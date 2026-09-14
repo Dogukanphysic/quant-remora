@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime state: balances, trades, locks, logs, models and backups
+state/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+*.lock
+
+# Downloaded market datasets and large machine reports
+data/*.csv
+reports/*.json
+
+# Local editor / operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
