@@ -112,6 +112,23 @@ def ensure_tables(db: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS v3_paper_executions_status "
         "ON v3_paper_executions(status,entry_ts_ms)"
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS v3_shadow_labels (
+            decision_ts INTEGER PRIMARY KEY,
+            version TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('long','short')),
+            entry_ts INTEGER NOT NULL,
+            exit_ts INTEGER NOT NULL,
+            entry_reference REAL NOT NULL CHECK (entry_reference > 0),
+            exit_reference REAL NOT NULL CHECK (exit_reference > 0),
+            net_return REAL NOT NULL,
+            exit_reason TEXT NOT NULL,
+            created_ts INTEGER NOT NULL,
+            FOREIGN KEY(decision_ts) REFERENCES v3_paper_decisions(decision_ts)
+        )
+        """
+    )
     decision_columns = {
         str(row[1]) for row in db.execute("PRAGMA table_info(v3_paper_decisions)")
     }
@@ -466,6 +483,110 @@ def _record_learning_outcome(
     return True
 
 
+def _shadow_net_return(side: str, entry_reference: float, exit_reference: float) -> float:
+    fee = DEFAULT_COST.fee_each_side
+    slip = DEFAULT_COST.slippage_each_side
+    if side == "long":
+        cash_out = entry_reference * (1 + slip) * (1 + fee)
+        cash_in = exit_reference * (1 - slip) * (1 - fee)
+        return cash_in / cash_out - 1
+    if side == "short":
+        entry_proceeds = entry_reference * (1 - slip) * (1 - fee)
+        cover_cost = exit_reference * (1 + slip) * (1 + fee)
+        reference_notional = entry_reference * (1 + slip) * (1 + fee)
+        return (entry_proceeds - cover_cost) / reference_notional
+    raise ValueError("Unknown Remora shadow side.")
+
+
+def _resolve_shadow_labels(
+    db: sqlite3.Connection,
+    rows: Sequence[Mapping[str, object]],
+    now_ms: int,
+) -> int:
+    """Label every recorded Remora trigger after H8 without using paper capital."""
+    import learning
+    by_ts = {int(row["ts"]): index for index, row in enumerate(rows)}
+    pending = db.execute(
+        "SELECT d.decision_ts,d.atr,d.feature_json,d.context_json "
+        "FROM v3_paper_decisions d LEFT JOIN v3_shadow_labels s "
+        "ON s.decision_ts=d.decision_ts "
+        "WHERE d.version=? AND d.context_json IS NOT NULL AND s.decision_ts IS NULL "
+        "ORDER BY d.decision_ts",
+        (VERSION,),
+    ).fetchall()
+    resolved = 0
+    for decision_ts, atr_value, feature_json, context_json in pending:
+        context = json.loads(str(context_json))
+        side = context.get("side") if isinstance(context, dict) else None
+        if side not in {"long", "short"}:
+            continue
+        index = by_ts.get(int(decision_ts))
+        if index is None or index + 8 >= len(rows):
+            continue
+        features = json.loads(str(feature_json))
+        vector = _learning_vector({"features": features})
+        entry_index = index + 1
+        entry_reference = float(rows[entry_index]["open"])
+        atr = _finite(atr_value, "shadow.atr")
+        if side == "long":
+            stop = entry_reference - STOP_ATR * atr
+            target = entry_reference + TARGET_ATR * atr
+        else:
+            stop = entry_reference + STOP_ATR * atr
+            target = entry_reference - TARGET_ATR * atr
+        if stop <= 0 or target <= 0:
+            continue
+        exit_index = index + 8
+        exit_reference = float(rows[exit_index]["close"])
+        reason = "remora_h8_timeout"
+        for cursor in range(entry_index, index + 9):
+            bar = rows[cursor]
+            bar_open = float(bar["open"])
+            if side == "long":
+                if float(bar["low"]) <= stop:
+                    exit_reference = min(stop, bar_open)
+                    reason, exit_index = "stop", cursor
+                    break
+                if float(bar["high"]) >= target:
+                    exit_reference = max(target, bar_open)
+                    reason, exit_index = "target", cursor
+                    break
+            else:
+                if float(bar["high"]) >= stop:
+                    exit_reference = max(stop, bar_open)
+                    reason, exit_index = "stop", cursor
+                    break
+                if float(bar["low"]) <= target:
+                    exit_reference = min(target, bar_open)
+                    reason, exit_index = "target", cursor
+                    break
+        net_return = _shadow_net_return(side, entry_reference, exit_reference)
+        db.execute(
+            "INSERT INTO v3_shadow_labels VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                int(decision_ts), VERSION, side, int(rows[entry_index]["ts"]),
+                int(rows[exit_index]["ts"]), entry_reference, exit_reference,
+                net_return, reason, now_ms,
+            ),
+        )
+        learning.ensure_tables(db)
+        learning.add_sample(
+            db, learning.REMORA_MODEL, learning.REMORA_SHADOW_SOURCE,
+            int(rows[entry_index]["ts"]) / 1000,
+            (int(rows[exit_index]["ts"]) + BAR_MS) / 1000,
+            vector, net_return,
+            metadata={
+                "decision_ts": int(decision_ts), "side": side,
+                "exit_reason": reason, "capital_used": False,
+                "label_horizon_bars": 8, "causal_features": True,
+            },
+        )
+        resolved += 1
+    if resolved:
+        learning.refresh(db)
+    return resolved
+
+
 def _close(
     db: sqlite3.Connection,
     state: dict[str, object],
@@ -525,6 +646,7 @@ def tick(
     decision = decide(rows, state["position"] is not None) if new_bar else None
     closed_result = None
     with db:
+        shadow_labels_resolved = _resolve_shadow_labels(db, rows, now) if rows else 0
         position = state["position"]
         if position:
             _, liquidation = _liquidation(position, bid)
@@ -731,6 +853,11 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
     import learning
     learning.ensure_tables(db)
     remora_model = learning.model_state(db, learning.REMORA_MODEL)
+    shadow_counts = db.execute(
+        "SELECT COUNT(*),COALESCE(SUM(side='long'),0),COALESCE(SUM(side='short'),0) "
+        "FROM v3_shadow_labels WHERE version=?",
+        (VERSION,),
+    ).fetchone()
     state.update(
         {
             "pnl_usd": float(state["equity_usd"]) - float(state["initial_usd"]),
@@ -786,6 +913,9 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
             "remora_learning": {
                 key: value for key, value in remora_model.items() if key != "model"
             },
+            "shadow_training_labels": int(shadow_counts[0]),
+            "shadow_long_labels": int(shadow_counts[1]),
+            "shadow_short_labels": int(shadow_counts[2]),
             "included_in_main_1000_usd": False,
             "real_orders_enabled": False,
         }

@@ -38,6 +38,7 @@ def decision(rows, action="buy", strategy="adaptive_probe", reason="test"):
         "action": action,
         "strategy": strategy,
         "reason": reason,
+        "context": {"side": "long", "profile": "test_remora"},
         "features": {
             "rsi14": 0.55,
             "atr_fraction": 0.01,
@@ -159,6 +160,38 @@ class PaperV3Tests(unittest.TestCase):
 
     def test_position_size_rejects_trade_without_net_cost_edge(self):
         self.assertIsNone(paper_v3._size(100.0, 100.0, 0.05))
+
+    def test_shadow_trigger_becomes_training_sample_without_capital(self):
+        paper_v3.disable(self.db, self.now - 1)
+        with patch("paper_v3.decide", return_value=decision(self.rows)):
+            first = paper_v3.tick(self.db, self.quote, self.rows, self.now)
+        self.assertEqual(first["open_trades"], 0)
+        extended = list(self.rows)
+        previous = dict(extended[-1])
+        for offset in range(1, 10):
+            price = float(previous["close"]) + 0.05
+            previous = {
+                "ts": self.rows[-1]["ts"] + offset * BAR_MS,
+                "open": price - 0.02,
+                "high": price + 0.15,
+                "low": price - 0.15,
+                "close": price,
+                "volume": 10.0,
+            }
+            extended.append(previous)
+        paper_v3.enable(self.db, self.now + 1)
+        later_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        with patch("paper_v3.decide", return_value=decision(
+                extended, action="hold", strategy="no_entry", reason="test")):
+            state = paper_v3.tick(self.db, self.quote, extended, later_now)
+        self.assertEqual(state["open_trades"], 0)
+        self.assertEqual(state["shadow_training_labels"], 1)
+        self.assertEqual(state["remora_learning"]["sample_count"], 1)
+        self.assertEqual(state["remora_learning"]["executed_forward_count"], 0)
+        source = self.db.execute(
+            "SELECT source FROM learning_samples"
+        ).fetchone()[0]
+        self.assertEqual(source, "paper_remora_shadow_h8")
 
     def test_capital_switch_fails_closed_when_quarantined(self):
         with patch("paper_v3.ENTRY_QUARANTINED", True), patch(

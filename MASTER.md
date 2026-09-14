@@ -340,6 +340,13 @@ net-edge filtresi olur. Sanal kanıt, demo ve gerçek mikro sermaye aşamaların
 sözleşmesi `LIVE_TRADING_PLAN.md`; SDD uyarlaması
 `reports/quant-remora-sdd-v5-implementation.md` içindedir.
 
+Eğitim süresini sermaye riskini artırmadan kısaltmak için her long/short StochRSI
+adayı H8 sonunda maliyet dahil gölge sonuçla etiketlenir. Kayıt
+`v3_shadow_labels` ve `paper_remora_shadow_h8` kaynağındadır. Gölge örnekler modelin
+minimum toplam/ileri veri sayısına katkı verir; `executed_forward_count` değerini
+artırmaz. Paper sermaye modelinin `eligible` olması için en az 50 gerçekleşmiş
+ileri paper sonucu yine zorunludur.
+
 ## 11. Sermaye ve risk politikası
 
 Altı defterin toplam nominal başlangıcı 1.000 USD'dir. V2 geçişi defterleri sıfırlamaz.

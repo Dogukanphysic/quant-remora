@@ -31,6 +31,7 @@ gerektiren alanlar şemada ayrılmış, `UNAVAILABLE/DORMANT` ve sermaye yetkisi
 | Kill switch | 4/8 mum kayıp beklemesi, günlük %2 ve toplam %8 kesici |
 | Durum makinesi | READY, TRADING, PAUSED, CIRCUIT_BREAKER |
 | Eğitim | Kapanan gerçek paper sonucu 22 nedensel özellikle eşlenir |
+| Hızlı gölge eğitim | Her long/short tetik H8 sonunda maliyet dahil etikete dönüşür; sermaye kullanmaz |
 | Model kapısı | Collecting sırasında mikro keşif; eligible model oluşursa net-edge filtresi |
 | OOS disiplini | Kronolojik purge, validation, forward minimumu ve maliyet stresi |
 
@@ -51,6 +52,11 @@ Yeni Remora işlemi kapanınca `paper_v3._record_learning_outcome()`:
 Eligible model oluşursa sabit Remora setup kapılarını kaldırmaz; onların üzerinde
 olasılık ve muhafazakâr maliyet sonrası edge filtresi olarak çalışır. Model uygun
 değilse riskli işlem engellenir. AI/LLM doğrudan LONG/SHORT otoritesi değildir.
+
+Eğitim hızlandırma katmanı `v3_shadow_labels` tablosunda her aday tetiğin long veya
+short H8 sonucunu tutar. Bu satırlar `paper_remora_shadow_h8` kaynağıyla eğitime
+katılır. `executed_forward_count` yalnız sermayeyle simüle edilip kapanan paper
+işlemlerden artar; 50 gerçekleşmiş ileri sonuç kapısı gölge veriyle aşılamaz.
 
 ## Binance bağlantısına kadar saklı/pasif alanlar
 

@@ -19,7 +19,11 @@ MODEL_SCHEMA = 4
 EXPLORATION_MODEL = 'bb15_exploration_v1'
 REMORA_MODEL = 'quant_remora_v5_forward'
 REMORA_SOURCE = 'paper_remora_v3'
+REMORA_SHADOW_SOURCE = 'paper_remora_shadow_h8'
 FORWARD_SOURCES = frozenset({
+    'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE, REMORA_SHADOW_SOURCE,
+})
+EXECUTED_FORWARD_SOURCES = frozenset({
     'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE,
 })
 EXTRA_COST_BUFFER = .001  # Additional 0.10% round-trip stress, beyond costs in labels.
@@ -103,7 +107,9 @@ def train_candidate(samples, feature_names=FEATURES):
     # Purge trades whose entry precedes the last training exit, even across strategies.
     samples = sorted(samples, key=lambda s: (s['exit_ts'],s['entry_ts']))
     forward = sum(is_forward(s) for s in samples)
+    executed_forward = sum(s.get('source') in EXECUTED_FORWARD_SOURCES for s in samples)
     result = {'schema':MODEL_SCHEMA, 'status':'collecting', 'sample_count':len(samples), 'forward_count':forward,
+              'executed_forward_count':executed_forward,
               'minimum_samples':MIN_SAMPLES, 'minimum_forward_samples':MIN_FORWARD,
               'threshold':THRESHOLD, 'model':None, 'eligible':False}
     if len(samples) < MIN_SAMPLES:
@@ -149,7 +155,9 @@ def train_candidate(samples, feature_names=FEATURES):
                               'brier':brier, 'baseline_brier':baseline_brier, 'quality_pass':passes,
                               'metric_note':'Sum of per-trade net returns, NOT portfolio return. Baseline trades replayed; skipped-trade reentry effects excluded.'})
     result['validation']['forward_count'] = sum(is_forward(s) for s in valid)
-    result['eligible'] = passes and forward>=MIN_FORWARD and result['validation']['forward_count']>=20
+    result['eligible'] = (passes and forward>=MIN_FORWARD
+                          and result['validation']['forward_count']>=20
+                          and executed_forward>=MIN_FORWARD)
     if result['eligible']:
         result['status'] = 'paper_eligible'
     result['version'] = hashlib.sha256(json.dumps(model,sort_keys=True).encode()).hexdigest()[:12]
@@ -210,7 +218,18 @@ def add_sample(db, strategy, source, entry, exit, x, net_return, metadata=None):
 
 def model_state(db, strategy):
     row = db.execute('SELECT detail FROM learning_models WHERE strategy=?',(strategy,)).fetchone()
-    return json.loads(row[0]) if row else {'status':'collecting','model':None,'eligible':False,'sample_count':0,'forward_count':0}
+    state = (json.loads(row[0]) if row else
+             {'status':'collecting','model':None,'eligible':False,
+              'sample_count':0,'forward_count':0})
+    if 'executed_forward_count' not in state:
+        details = db.execute(
+            'SELECT detail FROM learning_samples WHERE strategy=?', (strategy,)
+        ).fetchall()
+        state['executed_forward_count'] = sum(
+            json.loads(detail[0]).get('source') in EXECUTED_FORWARD_SOURCES
+            for detail in details
+        )
+    return state
 
 
 def refresh(db, force=False):

@@ -17,6 +17,10 @@ Risk, etiket üretmek için kullanılır. Risk miktarı modelin daha hızlı ö�
 sağlamaz; işlem çeşitliliği ve temiz ileri sonuç sayısı bunu sağlar. Bu nedenle
 pozisyon boyutu kanıttan önce artırılmaz.
 
+Her long/short StochRSI adayı ayrıca sermaye kullanmadan H8 gölge etiketi üretir.
+Stop ve hedef aynı mumda görülürse stop önce sayılır; ücret ve kayma etikete dahildir.
+Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution kanıtı sayılmaz.
+
 ## Aşama 1 — ileri mikro sanal risk
 
 - Ayrı başlangıç hesabı: 100 USD.
@@ -26,6 +30,8 @@ pozisyon boyutu kanıttan önce artırılmaz.
 - Spread, maliyet sonrası hedef, net ödül/risk, 4/8 mum kayıp beklemesi ve
   başa baş koruması zorunludur.
 - Her kapanan yeni sürüm işlemi eğitime hazır bir ileri örnek oluşturur.
+- Her aday tetik en geç sekiz sonraki 15m mum kapandığında sermayesiz gölge
+  eğitim örneği oluşturur.
 
 Bu aşamada zarar oluşabilir. Amaç getiriyi varsaymak değil, maliyet sonrası avantajı
 aynı sürümle ileri veride ölçmektir.

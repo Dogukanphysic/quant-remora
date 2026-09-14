@@ -223,6 +223,12 @@ kapanan net işlem sonucu ile otomatik eşlenir; model yeterli ileri örnek olu�
 `collecting` kalır. Ayrıntılı kanıt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
 
+Eğitimi hızlandırmak için sermaye kullanmayan H8 gölge etiketleri de üretilir.
+Her long/short StochRSI adayının 22 özelliği dondurulur; sekiz sonraki mumda
+stop/hedef/zaman aşımı sonucu maliyet dahil hesaplanarak `v3_shadow_labels` ve
+`paper_remora_shadow_h8` eğitim akışına yazılır. Bu veriler modeli daha erken
+eğitir; gerçek paper terfisi için gereken 50 gerçekleşmiş ileri işlemin yerine geçmez.
+
 Binance Futures, short/kaldıraç, OI, funding, long/short oranı, tam order-book,
 reconciliation ve bağımsız watchdog alanları Binance bağlantısı kurulana kadar
 saklı ve pasiftir; veri uydurulmaz. Uyarlama matrisi
