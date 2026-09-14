@@ -313,6 +313,11 @@ def main():
     sub.add_parser('v3-on', help='Quant Remora mikro sanal test hesabını aç')
     sub.add_parser('v3-off', help='Remora yeni girişlerini kapat; açık pozisyonu koruyarak yönet')
     sub.add_parser('v3-status', help='Remora sanal hesap, risk ve eğitim durumunu göster')
+    seed_remora = sub.add_parser(
+        'seed-remora-history',
+        help='Remora modelini tarihsel H8 örnekleriyle başlangıç eğitimine hazırla')
+    seed_remora.add_argument('--data', type=Path, default=DEFAULT_V2_DATA)
+    seed_remora.add_argument('--samples', type=int, default=200)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -428,6 +433,19 @@ def main():
                 result = paper_v3.disable(db, int(time.time() * 1000))
             else:
                 result = paper_v3.status(db)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        finally:
+            db.close()
+        return
+    if args.command == 'seed-remora-history':
+        if not args.data.is_file():
+            raise ValueError(f'Veri dosyası bulunamadı: {args.data}')
+        import paper
+        import paper_v3
+        db = paper.connect()
+        try:
+            result = paper_v3.seed_historical_samples(
+                db, read_dataset(args.data), args.samples)
             print(json.dumps(result, indent=2, ensure_ascii=False))
         finally:
             db.close()

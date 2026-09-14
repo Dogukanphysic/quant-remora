@@ -17,7 +17,7 @@ from strategies import BAR_MS, BAR_SECONDS, FRESH_WINDOW_SECONDS, indicators
 from v2_engine import DEFAULT_COST, MAX_ENTRY_SPREAD, validate_rows
 
 
-VERSION = "quant_remora_v5_trainable_paper_v1"
+VERSION = "quant_remora_v5_trainable_paper_v2"
 INITIAL_USD = 100.0
 RISK_FRACTION = 0.001
 ALLOCATION_CAP = 0.10
@@ -32,6 +32,8 @@ MIN_NET_REWARD_RISK = 1.5
 LOSS_COOLDOWN_BARS = 4
 LOSS_STREAK_COOLDOWN_BARS = 8
 BREAKEVEN_ARM_NET_RETURN = 0.001
+PROBE_NOTIONAL_USD = 1.0
+PROBE_HORIZON_BARS = 8
 # The 200,000-candle replay was negative, but the user explicitly authorized a
 # strictly bounded forward paper trial after reviewing that result.  All loss
 # guards remain active; this flag is the single fail-closed capital switch.
@@ -124,6 +126,29 @@ def ensure_tables(db: sqlite3.Connection) -> None:
             exit_reference REAL NOT NULL CHECK (exit_reference > 0),
             net_return REAL NOT NULL,
             exit_reason TEXT NOT NULL,
+            created_ts INTEGER NOT NULL,
+            FOREIGN KEY(decision_ts) REFERENCES v3_paper_decisions(decision_ts)
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS v3_probe_executions (
+            decision_ts INTEGER PRIMARY KEY,
+            version TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('long','short')),
+            decision_created_ts INTEGER NOT NULL,
+            entry_ts INTEGER NOT NULL,
+            exit_ts INTEGER NOT NULL,
+            entry_reference REAL NOT NULL CHECK (entry_reference > 0),
+            exit_reference REAL NOT NULL CHECK (exit_reference > 0),
+            notional_usd REAL NOT NULL CHECK (notional_usd > 0),
+            pnl_usd REAL NOT NULL,
+            net_return REAL NOT NULL,
+            stop REAL NOT NULL CHECK (stop > 0),
+            target REAL NOT NULL CHECK (target > 0),
+            exit_reason TEXT NOT NULL,
+            label_available_ts INTEGER NOT NULL,
             created_ts INTEGER NOT NULL,
             FOREIGN KEY(decision_ts) REFERENCES v3_paper_decisions(decision_ts)
         )
@@ -507,7 +532,7 @@ def _resolve_shadow_labels(
     import learning
     by_ts = {int(row["ts"]): index for index, row in enumerate(rows)}
     pending = db.execute(
-        "SELECT d.decision_ts,d.atr,d.feature_json,d.context_json "
+        "SELECT d.decision_ts,d.atr,d.feature_json,d.context_json,d.created_ts "
         "FROM v3_paper_decisions d LEFT JOIN v3_shadow_labels s "
         "ON s.decision_ts=d.decision_ts "
         "WHERE d.version=? AND d.context_json IS NOT NULL AND s.decision_ts IS NULL "
@@ -515,7 +540,7 @@ def _resolve_shadow_labels(
         (VERSION,),
     ).fetchall()
     resolved = 0
-    for decision_ts, atr_value, feature_json, context_json in pending:
+    for decision_ts, atr_value, feature_json, context_json, decision_created_ts in pending:
         context = json.loads(str(context_json))
         side = context.get("side") if isinstance(context, dict) else None
         if side not in {"long", "short"}:
@@ -536,10 +561,10 @@ def _resolve_shadow_labels(
             target = entry_reference - TARGET_ATR * atr
         if stop <= 0 or target <= 0:
             continue
-        exit_index = index + 8
+        exit_index = index + PROBE_HORIZON_BARS
         exit_reference = float(rows[exit_index]["close"])
         reason = "remora_h8_timeout"
-        for cursor in range(entry_index, index + 9):
+        for cursor in range(entry_index, index + PROBE_HORIZON_BARS + 1):
             bar = rows[cursor]
             bar_open = float(bar["open"])
             if side == "long":
@@ -561,6 +586,8 @@ def _resolve_shadow_labels(
                     reason, exit_index = "target", cursor
                     break
         net_return = _shadow_net_return(side, entry_reference, exit_reference)
+        label_available_ts = int(rows[exit_index]["ts"]) + BAR_MS
+        pre_registered = int(decision_created_ts) < label_available_ts
         db.execute(
             "INSERT INTO v3_shadow_labels VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -569,22 +596,168 @@ def _resolve_shadow_labels(
                 net_return, reason, now_ms,
             ),
         )
+        if pre_registered:
+            db.execute(
+                "INSERT OR IGNORE INTO v3_probe_executions VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    int(decision_ts), VERSION, side, int(decision_created_ts),
+                    int(rows[entry_index]["ts"]), int(rows[exit_index]["ts"]),
+                    entry_reference, exit_reference, PROBE_NOTIONAL_USD,
+                    PROBE_NOTIONAL_USD * net_return, net_return, stop, target,
+                    reason, label_available_ts, now_ms,
+                ),
+            )
         learning.ensure_tables(db)
         learning.add_sample(
-            db, learning.REMORA_MODEL, learning.REMORA_SHADOW_SOURCE,
+            db, learning.REMORA_MODEL,
+            (learning.REMORA_PROBE_SOURCE if pre_registered
+             else learning.REMORA_SHADOW_SOURCE),
             int(rows[entry_index]["ts"]) / 1000,
             (int(rows[exit_index]["ts"]) + BAR_MS) / 1000,
             vector, net_return,
             metadata={
                 "decision_ts": int(decision_ts), "side": side,
-                "exit_reason": reason, "capital_used": False,
-                "label_horizon_bars": 8, "causal_features": True,
+                "exit_reason": reason, "capital_used": pre_registered,
+                "paper_probe_notional_usd": (
+                    PROBE_NOTIONAL_USD if pre_registered else 0.0),
+                "pre_registered_before_label": pre_registered,
+                "label_horizon_bars": PROBE_HORIZON_BARS,
+                "causal_features": True,
             },
         )
         resolved += 1
     if resolved:
         learning.refresh(db)
     return resolved
+
+
+def seed_historical_samples(
+    db: sqlite3.Connection,
+    rows: Sequence[Mapping[str, object]],
+    max_samples: int = 200,
+) -> dict[str, object]:
+    """Seed a historical learner without counting replay as forward evidence."""
+    import learning
+    import remora_signal
+
+    validate_rows(rows)
+    if isinstance(max_samples, bool) or not 200 <= max_samples <= 2000:
+        raise ValueError("Historical Remora sample count must be 200-2000.")
+    if len(rows) < remora_signal.MIN_BARS + PROBE_HORIZON_BARS:
+        raise ValueError("Historical Remora seed data is too short.")
+
+    # Recent history is enough for the seed and keeps the one-off command fast.
+    # Every evaluated decision still receives the same 1,000 closed bars as the
+    # live worker, while the source remains explicitly historical.
+    analysis_rows = list(rows[-60_000:])
+    f = indicators(analysis_rows)
+    candidates = []
+    for index in range(max(999, remora_signal.MIN_BARS - 1),
+                       len(analysis_rows) - PROBE_HORIZON_BARS):
+        current = remora_signal._stoch_rsi(f["rsi"], index)
+        previous = remora_signal._stoch_rsi(f["rsi"], index - 1)
+        if current is None or previous is None:
+            continue
+        if previous <= 0.20 < current or previous >= 0.80 > current:
+            candidates.append(index)
+    if not candidates:
+        raise ValueError("Historical Remora seed found no trigger candidates.")
+
+    evaluation_target = min(len(candidates), math.ceil(max_samples * 1.5))
+    if evaluation_target == 1:
+        chosen = candidates
+    else:
+        chosen = [
+            candidates[round(i * (len(candidates) - 1) / (evaluation_target - 1))]
+            for i in range(evaluation_target)
+        ]
+    samples = []
+    for index in chosen:
+        window = analysis_rows[index - 999:index + 1]
+        decision = decide(window, False)
+        context = decision.get("context", {})
+        side = context.get("side") if isinstance(context, Mapping) else None
+        if side not in {"long", "short"}:
+            continue
+        entry_index = index + 1
+        entry_reference = float(analysis_rows[entry_index]["open"])
+        atr = _finite(decision["atr"], "historical.atr")
+        stop = entry_reference - STOP_ATR * atr if side == "long" else entry_reference + STOP_ATR * atr
+        target = entry_reference + TARGET_ATR * atr if side == "long" else entry_reference - TARGET_ATR * atr
+        if stop <= 0 or target <= 0:
+            continue
+        exit_index = index + PROBE_HORIZON_BARS
+        exit_reference = float(analysis_rows[exit_index]["close"])
+        reason = "remora_h8_timeout"
+        for cursor in range(entry_index, index + PROBE_HORIZON_BARS + 1):
+            bar = analysis_rows[cursor]
+            bar_open = float(bar["open"])
+            if side == "long" and float(bar["low"]) <= stop:
+                exit_reference, reason, exit_index = min(stop, bar_open), "stop", cursor
+                break
+            if side == "long" and float(bar["high"]) >= target:
+                exit_reference, reason, exit_index = max(target, bar_open), "target", cursor
+                break
+            if side == "short" and float(bar["high"]) >= stop:
+                exit_reference, reason, exit_index = max(stop, bar_open), "stop", cursor
+                break
+            if side == "short" and float(bar["low"]) <= target:
+                exit_reference, reason, exit_index = min(target, bar_open), "target", cursor
+                break
+        samples.append({
+            "decision_ts": int(analysis_rows[index]["ts"]),
+            "entry_ts": int(analysis_rows[entry_index]["ts"]),
+            "exit_ts": int(analysis_rows[exit_index]["ts"]),
+            "side": side,
+            "x": _learning_vector(decision),
+            "net_return": _shadow_net_return(side, entry_reference, exit_reference),
+            "exit_reason": reason,
+        })
+    if len(samples) < max_samples:
+        raise ValueError(
+            f"Historical Remora seed produced only {len(samples)}/{max_samples} samples.")
+    if len(samples) > max_samples:
+        samples = [
+            samples[round(i * (len(samples) - 1) / (max_samples - 1))]
+            for i in range(max_samples)
+        ]
+    learning.ensure_tables(db)
+    before_count = int(db.execute(
+        "SELECT COUNT(*) FROM learning_samples WHERE strategy=? AND source=?",
+        (learning.REMORA_MODEL, learning.REMORA_HISTORICAL_SOURCE),
+    ).fetchone()[0])
+    with db:
+        for sample in samples:
+            learning.add_sample(
+                db, learning.REMORA_MODEL, learning.REMORA_HISTORICAL_SOURCE,
+                sample["entry_ts"] / 1000,
+                (sample["exit_ts"] + BAR_MS) / 1000,
+                sample["x"], sample["net_return"],
+                metadata={
+                    "decision_ts": sample["decision_ts"], "side": sample["side"],
+                    "exit_reason": sample["exit_reason"], "capital_used": False,
+                    "historical_replay": True, "label_horizon_bars": PROBE_HORIZON_BARS,
+                    "causal_features": True,
+                },
+            )
+    after_count = int(db.execute(
+        "SELECT COUNT(*) FROM learning_samples WHERE strategy=? AND source=?",
+        (learning.REMORA_MODEL, learning.REMORA_HISTORICAL_SOURCE),
+    ).fetchone()[0])
+    learning.refresh(db, force=True)
+    state = learning.model_state(db, learning.REMORA_MODEL)
+    return {
+        "historical_samples_requested": max_samples,
+        "historical_samples_selected": len(samples),
+        "historical_samples_written": after_count - before_count,
+        "historical_samples_total": after_count,
+        "model_status": state.get("status"),
+        "total_samples": state.get("sample_count", 0),
+        "forward_samples": state.get("forward_count", 0),
+        "executed_forward_samples": state.get("executed_forward_count", 0),
+        "eligible": bool(state.get("eligible")),
+    }
 
 
 def _close(
@@ -858,6 +1031,15 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
         "FROM v3_shadow_labels WHERE version=?",
         (VERSION,),
     ).fetchone()
+    probe_counts = db.execute(
+        "SELECT COUNT(*),COALESCE(SUM(side='long'),0),COALESCE(SUM(side='short'),0),"
+        "COALESCE(SUM(pnl_usd),0),"
+        "COALESCE(SUM(CASE WHEN pnl_usd>0 THEN pnl_usd ELSE 0 END),0),"
+        "COALESCE(-SUM(CASE WHEN pnl_usd<0 THEN pnl_usd ELSE 0 END),0) "
+        "FROM v3_probe_executions WHERE version=?",
+        (VERSION,),
+    ).fetchone()
+    probe_gross_loss = float(probe_counts[5])
     state.update(
         {
             "pnl_usd": float(state["equity_usd"]) - float(state["initial_usd"]),
@@ -888,7 +1070,7 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
             "full_sdd_data_available": False,
             "binance_components_dormant": True,
             "dormant_components": [
-                "binance_futures_orders", "short_execution", "leverage",
+                "binance_futures_orders", "binance_short_order_execution", "leverage",
                 "open_interest", "long_short_ratio", "funding", "full_order_book",
                 "exchange_reconciliation", "independent_account_watchdog",
             ],
@@ -916,6 +1098,14 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
             "shadow_training_labels": int(shadow_counts[0]),
             "shadow_long_labels": int(shadow_counts[1]),
             "shadow_short_labels": int(shadow_counts[2]),
+            "forward_paper_probes": int(probe_counts[0]),
+            "forward_long_probes": int(probe_counts[1]),
+            "forward_short_probes": int(probe_counts[2]),
+            "forward_probe_pnl_usd": float(probe_counts[3]),
+            "forward_probe_profit_factor": (
+                float(probe_counts[4]) / probe_gross_loss if probe_gross_loss else None),
+            "forward_probe_notional_usd": PROBE_NOTIONAL_USD,
+            "forward_probe_horizon_bars": PROBE_HORIZON_BARS,
             "included_in_main_1000_usd": False,
             "real_orders_enabled": False,
         }
@@ -958,7 +1148,8 @@ __all__ = [
     "VERSION", "INITIAL_USD", "RISK_FRACTION", "ALLOCATION_CAP",
     "STOP_ATR", "TARGET_ATR", "MAX_HOLD_BARS", "MIN_TARGET_NET_RETURN",
     "MIN_NET_REWARD_RISK", "LOSS_COOLDOWN_BARS", "LOSS_STREAK_COOLDOWN_BARS",
-    "BREAKEVEN_ARM_NET_RETURN", "ENTRY_QUARANTINED", "ENTRY_AUTHORIZATION",
+    "BREAKEVEN_ARM_NET_RETURN", "PROBE_NOTIONAL_USD", "PROBE_HORIZON_BARS",
+    "ENTRY_QUARANTINED", "ENTRY_AUTHORIZATION",
     "ensure_tables", "enable", "disable", "decide", "tick", "status",
-    "learning_samples",
+    "learning_samples", "seed_historical_samples",
 ]

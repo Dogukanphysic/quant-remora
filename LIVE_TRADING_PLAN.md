@@ -38,7 +38,7 @@ aynı sürümle ileri veride ölçmektir.
 
 ## Aşama 2 — model adayı ve kilitli tekrar test
 
-Yeni model adayı ancak en az 120 toplam nedensel örnek ve en az 50 yeni ileri örnek
+Yeni model adayı ancak en az 200 toplam nedensel örnek ve en az 60 yeni ileri paper probe
 oluştuğunda eğitilebilir. Eğitimden sonraki sonuçlar eğitime geri sızmaz. Aday:
 
 - varsayılan maliyet ve iki kat maliyet stresinde pozitif net sonuç;

@@ -46,22 +46,24 @@ Yeni Remora işlemi kapanınca `paper_v3._record_learning_outcome()`:
 2. gerçekleşen net getiri, P&L ve çıkış nedenini ekler;
 3. `paper_remora_v3 / quant_remora_v5_forward` eğitim örneğini değişmez anahtarla yazar;
 4. aday lojistik modeli yeniden değerlendirir;
-5. en az 120 toplam, 50 ileri örnek ve kronolojik validation kapıları geçilmeden
+5. en az 200 toplam, 60 gerçekleşmiş ileri paper probe ve kronolojik validation kapıları geçilmeden
    modele `eligible` sermaye filtresi yetkisi vermez.
 
 Eligible model oluşursa sabit Remora setup kapılarını kaldırmaz; onların üzerinde
 olasılık ve muhafazakâr maliyet sonrası edge filtresi olarak çalışır. Model uygun
 değilse riskli işlem engellenir. AI/LLM doğrudan LONG/SHORT otoritesi değildir.
 
-Eğitim hızlandırma katmanı `v3_shadow_labels` tablosunda her aday tetiğin long veya
-short H8 sonucunu tutar. Bu satırlar `paper_remora_shadow_h8` kaynağıyla eğitime
-katılır. `executed_forward_count` yalnız sermayeyle simüle edilip kapanan paper
-işlemlerden artar; 50 gerçekleşmiş ileri sonuç kapısı gölge veriyle aşılamaz.
+Eğitim hızlandırma katmanı 200 adet `historical_remora_h8` örneğini başlangıç
+eğitimine ekler; bunları ileri kanıt saymaz. Canlı karar anında özellikleri dondurulan
+her long/short tetik H8 sonunda maliyet dahil 1 USD'lik bağımsız paper probe olur.
+`v3_probe_executions` ve `paper_remora_probe_h8` kayıtları önceden verilmiş kararın
+sonradan oluşan sonucunu taşır ve `executed_forward_count` değerini artırır. Terfi
+için 60 gerçekleşmiş ileri probe yine zorunludur.
 
 ## Binance bağlantısına kadar saklı/pasif alanlar
 
 - Binance Futures order ve fill adaptörü
-- short yürütme, isolated margin ve kaldıraç
+- gerçek borsa short emri, isolated margin ve kaldıraç
 - open interest
 - long/short ratio
 - funding

@@ -54,8 +54,10 @@ class LearningTests(unittest.TestCase):
     def test_exploration_is_forward_but_historical_is_not(self):
         self.assertTrue(is_forward({'source':'paper_bb15'}))
         self.assertTrue(is_forward({'source':'paper_exploration_bb15'}))
+        self.assertTrue(is_forward({'source':'paper_remora_probe_h8'}))
         self.assertFalse(is_forward({'source':'paper'}))
         self.assertFalse(is_forward({'source':'historical_bb15'}))
+        self.assertFalse(is_forward({'source':'historical_remora_h8'}))
         model=train_candidate(samples(source='paper_exploration_bb15'))
         self.assertEqual(model['forward_count'],200)
         self.assertGreaterEqual(model['validation']['forward_count'],20)

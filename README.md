@@ -209,7 +209,7 @@ V3 ileri denemesinde ilk 9 kapanış 3 kazanç/6 kayıp, `-0,33583163 USD` ve
 breakout 0/2, zaman aşımı 0/2 kaldı ve yaklaşık 25 bp gerçekleşen tur maliyeti
 zayıf hareketleri zarara çevirdi.
 
-`quant_remora_v5_trainable_paper_v1`, SDD'deki 1H EMA20/50/200 trend bağlamı,
+`quant_remora_v5_trainable_paper_v2`, SDD'deki 1H EMA20/50/200 trend bağlamı,
 15m StochRSI tetik, rejim, ATR percentile, volatilite, seans VWAP ve spread kapılarını
 uygular. Risk `%0,10`, tahsis `%10`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası
 minimum hedef `%0,30` ve net ödül/risk `1,5`'tir.
@@ -223,13 +223,23 @@ kapanan net işlem sonucu ile otomatik eşlenir; model yeterli ileri örnek olu�
 `collecting` kalır. Ayrıntılı kanıt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
 
-Eğitimi hızlandırmak için sermaye kullanmayan H8 gölge etiketleri de üretilir.
-Her long/short StochRSI adayının 22 özelliği dondurulur; sekiz sonraki mumda
-stop/hedef/zaman aşımı sonucu maliyet dahil hesaplanarak `v3_shadow_labels` ve
-`paper_remora_shadow_h8` eğitim akışına yazılır. Bu veriler modeli daha erken
-eğitir; gerçek paper terfisi için gereken 50 gerçekleşmiş ileri işlemin yerine geçmez.
+Eğitimi hızlandırmak için 200 tarihsel H8 örneği tek komutla başlangıç modeline
+eklenebilir. Kaynak `historical_remora_h8` olduğu için bunlar ileri kanıt veya paper
+işlem sayılmaz. Bundan sonra karar anında kaydı dondurulan her long/short StochRSI
+tetiği, sekiz mum sonra maliyet dahil 1 USD'lik bağımsız paper probe olarak
+sonuçlandırılır. Kayıtlar `v3_probe_executions` ve `paper_remora_probe_h8`
+kaynağındadır. Böylece gerçek zaman bekleme sürerken long ve short sonuçları paralel
+toplanır; en az 60 nedensel ileri probe olmadan `paper_eligible` olunamaz.
 
-Binance Futures, short/kaldıraç, OI, funding, long/short oranı, tam order-book,
+```powershell
+python agent.py seed-remora-history --samples 200
+```
+
+200.000 mumluk yerel dosyada başlangıç üretimi yaklaşık 45 saniye sürer. Tarihsel
+tetik sıklığı ileri 60 probe için yaklaşık 4 gün gösterir; bu yalnız veri gelme
+tahminidir, validation başarısını garanti etmez.
+
+Binance Futures, gerçek short emri/kaldıraç, OI, funding, long/short oranı, tam order-book,
 reconciliation ve bağımsız watchdog alanları Binance bağlantısı kurulana kadar
 saklı ve pasiftir; veri uydurulmaz. Uyarlama matrisi
 `reports/quant-remora-sdd-v5-implementation.md` içindedir.

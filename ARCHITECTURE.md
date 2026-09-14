@@ -263,11 +263,17 @@ frenleri uygulanır. Üretim `v2_executions` ve `eligible` değişmeden kalır.
 
 ## Eğitilebilir Quant Remora mikro sanal işlem hattı
 
-`quant_remora_v5_trainable_paper_v1` en az 1.000 kapanmış 15m mumdan tamamlanmış
+`quant_remora_v5_trainable_paper_v2` en az 1.000 kapanmış 15m mumdan tamamlanmış
 1H EMA20/50/200 bağlamını kurar. 15m StochRSI yalnız tetiktir; trend, rejim,
 volatilite, seans VWAP, veri kalitesi, spread, maliyet ve risk kapıları birlikte
 geçmeden giriş olmaz. Her mumun `buy`, `sell`, `hold` veya `blocked` sonucu,
 `context_json` bileşenleri ve `feature_json` model girdileri saklanır.
+
+Başlangıç eğitimi son 60.000 mumdan zaman boyunca dağıtılmış 200 tarihsel H8 örneği
+üretir; kaynak adı bu satırların ileri sayaçlara girmesini engeller. Canlı kararda
+önceden kaydedilen her long/short tetik, H8 sonunda 1 USD'lik bağımsız paper probe
+olarak `v3_probe_executions` tablosuna kapanır. Bu yapı çakışan adayları ayrı ayrı
+ölçer; gerçek Binance short emri veya kaldıraç açmaz.
 
 ```mermaid
 flowchart LR

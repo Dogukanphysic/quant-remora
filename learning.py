@@ -12,19 +12,23 @@ REMORA_FEATURES = FEATURES + [
     'atr_percentile', 'stoch_rsi', 'previous_stoch_rsi', 'vwap_distance_atr',
     'trend_bullish', 'trend_bearish', 'regime_trending', 'volatility_extreme',
 ]
-MIN_SAMPLES = 120
-MIN_FORWARD = 50
+MIN_SAMPLES = 200
+MIN_FORWARD = 60
 THRESHOLD = .55
 MODEL_SCHEMA = 4
 EXPLORATION_MODEL = 'bb15_exploration_v1'
 REMORA_MODEL = 'quant_remora_v5_forward'
 REMORA_SOURCE = 'paper_remora_v3'
 REMORA_SHADOW_SOURCE = 'paper_remora_shadow_h8'
+REMORA_PROBE_SOURCE = 'paper_remora_probe_h8'
+REMORA_HISTORICAL_SOURCE = 'historical_remora_h8'
 FORWARD_SOURCES = frozenset({
-    'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE, REMORA_SHADOW_SOURCE,
+    'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE,
+    REMORA_SHADOW_SOURCE, REMORA_PROBE_SOURCE,
 })
 EXECUTED_FORWARD_SOURCES = frozenset({
     'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE,
+    REMORA_PROBE_SOURCE,
 })
 EXTRA_COST_BUFFER = .001  # Additional 0.10% round-trip stress, beyond costs in labels.
 MIN_NET_EDGE = .0005  # 0.05% of position cost; no forced dollar target.
@@ -248,7 +252,8 @@ def refresh(db, force=False):
             if name == EXPLORATION_MODEL:
                 result['label_policy'] = 'bollinger_lower_zone_protective_or_15m_timeout'
             elif name == REMORA_MODEL:
-                result['label_policy'] = 'remora_v3_actual_net_execution_outcome'
+                result['label_policy'] = (
+                    'remora_h8_historical_seed_plus_pre_registered_forward_paper_probes')
             else:
                 result['label_policy'] = 'bollinger_strategy_stop_target_or_signal_exit_15m'
             # Each eligible version controls only its separate paper portfolio.

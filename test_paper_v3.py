@@ -161,7 +161,7 @@ class PaperV3Tests(unittest.TestCase):
     def test_position_size_rejects_trade_without_net_cost_edge(self):
         self.assertIsNone(paper_v3._size(100.0, 100.0, 0.05))
 
-    def test_shadow_trigger_becomes_training_sample_without_capital(self):
+    def test_pre_registered_trigger_becomes_forward_paper_probe(self):
         paper_v3.disable(self.db, self.now - 1)
         with patch("paper_v3.decide", return_value=decision(self.rows)):
             first = paper_v3.tick(self.db, self.quote, self.rows, self.now)
@@ -187,11 +187,13 @@ class PaperV3Tests(unittest.TestCase):
         self.assertEqual(state["open_trades"], 0)
         self.assertEqual(state["shadow_training_labels"], 1)
         self.assertEqual(state["remora_learning"]["sample_count"], 1)
-        self.assertEqual(state["remora_learning"]["executed_forward_count"], 0)
+        self.assertEqual(state["remora_learning"]["executed_forward_count"], 1)
+        self.assertEqual(state["forward_paper_probes"], 1)
+        self.assertEqual(state["forward_probe_notional_usd"], 1.0)
         source = self.db.execute(
             "SELECT source FROM learning_samples"
         ).fetchone()[0]
-        self.assertEqual(source, "paper_remora_shadow_h8")
+        self.assertEqual(source, "paper_remora_probe_h8")
 
     def test_capital_switch_fails_closed_when_quarantined(self):
         with patch("paper_v3.ENTRY_QUARANTINED", True), patch(
