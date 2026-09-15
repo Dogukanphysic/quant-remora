@@ -24,6 +24,7 @@ state/
 
 # Downloaded market datasets and large machine reports
 data/*.csv
+data/*.manifest.json
 reports/*.json
 
 # Local editor / operating system
@@ -32,4 +33,3 @@ reports/*.json
 .DS_Store
 Thumbs.db
 desktop.ini
-

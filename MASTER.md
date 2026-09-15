@@ -350,6 +350,15 @@ için en az 200 toplam örnek, 60 gerçekleşmiş ileri probe ve bütün kronolo
 validation kapıları zorunludur. Tarihsel sıklık 60 probe için yaklaşık dört gün
 gösterir; başarısız validation halinde toplama devam eder.
 
+Binance bağlantısı açılmadan da yalnız public tarihsel veriyle ayrı challenger
+eğitilebilir. Sistem Spot REST mumlarını ve checksum doğrulamalı USD-M aylık arşivini
+15m sözleşmesine çevirir; Spot/USD-M basis, 24 saatlik basis z-score ve bir saatlik
+basis değişimini Remora özelliklerine ekler. İlk bir yıllık deneyde basis challenger
+Brier skoru `0,143832` oldu; saf USD-M kontrolü `0,144493` idi. Maliyet sonrası kabul
+edilen işlem sıfır olduğu için model deploy edilmedi. Bu süreç gerçek emir, API
+anahtarı veya çalışan paper sermayesini kullanmaz. Ayrıntılı sözleşme ve komutlar
+`reports/binance-data-integration.md` içindedir.
+
 ## 11. Sermaye ve risk politikası
 
 Altı defterin toplam nominal başlangıcı 1.000 USD'dir. V2 geçişi defterleri sıfırlamaz.

@@ -275,6 +275,14 @@ Başlangıç eğitimi son 60.000 mumdan zaman boyunca dağıtılmış 200 tarihs
 olarak `v3_probe_executions` tablosuna kapanır. Bu yapı çakışan adayları ayrı ayrı
 ölçer; gerçek Binance short emri veya kaldıraç açmaz.
 
+Binance public veri katmanı çalışan worker'dan ayrıdır. `binance_archive.py`, Spot
+REST veya checksum doğrulamalı Spot/USD-M aylık arşivini iç 15m CSV sözleşmesine
+çevirir. Offline eğitim geçici, bellek içi SQLite kullanır; canlı `paper.db` dosyasına
+yazmaz. Spot ve USD-M mumları yalnız eşit kapanış zamanlarında birleştirilir ve üç
+nedensel basis özelliği eklenir. Üretilen artifact `deployed=false` olarak kaydedilir;
+kontrol modelini ancak aynı kronolojik validation ve maliyet kapılarını geçerse
+değiştirebilir.
+
 ```mermaid
 flowchart LR
     B[Fresh closed 15M bar] --> I[Bollinger RSI ATR SMA50]

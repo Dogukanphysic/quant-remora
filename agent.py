@@ -318,6 +318,35 @@ def main():
         help='Remora modelini tarihsel H8 örnekleriyle başlangıç eğitimine hazırla')
     seed_remora.add_argument('--data', type=Path, default=DEFAULT_V2_DATA)
     seed_remora.add_argument('--samples', type=int, default=200)
+    binance_download = sub.add_parser(
+        'binance-download', help='Binance Vision doğrulanmış 15m arşivini indir')
+    binance_download.add_argument('--market', choices=('um', 'spot'), default='um')
+    binance_download.add_argument('--symbol', default='BTCUSDT')
+    binance_download.add_argument('--start', required=True, help='YYYY-MM')
+    binance_download.add_argument('--end', required=True, help='YYYY-MM')
+    binance_download.add_argument('--out', type=Path)
+    binance_train = sub.add_parser(
+        'train-remora-binance', help='Binance arşivinden ayrı offline Remora modeli eğit')
+    binance_train.add_argument('--data', type=Path)
+    binance_train.add_argument('--market', choices=('um', 'spot'), default='um')
+    binance_train.add_argument('--symbol', default='BTCUSDT')
+    binance_train.add_argument('--samples', type=int, default=400)
+    binance_train.add_argument('--model', type=Path)
+    binance_train.add_argument('--report', type=Path)
+    binance_rest = sub.add_parser(
+        'binance-rest-download', help='Binance public Spot REST 15m mumlarını indir')
+    binance_rest.add_argument('--symbol', default='BTCUSDT')
+    binance_rest.add_argument('--start', required=True, help='UTC YYYY-MM-DD')
+    binance_rest.add_argument('--end', required=True, help='UTC YYYY-MM-DD, dahil')
+    binance_rest.add_argument('--out', type=Path)
+    binance_blend = sub.add_parser(
+        'train-remora-binance-blend',
+        help='Spot ve USD-M basis özellikli ayrı offline challenger eğit')
+    binance_blend.add_argument('--spot-data', type=Path, required=True)
+    binance_blend.add_argument('--futures-data', type=Path, required=True)
+    binance_blend.add_argument('--samples', type=int, default=400)
+    binance_blend.add_argument('--model', type=Path)
+    binance_blend.add_argument('--report', type=Path)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -449,6 +478,57 @@ def main():
             print(json.dumps(result, indent=2, ensure_ascii=False))
         finally:
             db.close()
+        return
+    if args.command == 'binance-download':
+        import binance_archive
+        out = args.out or (
+            binance_archive.DEFAULT_SPOT_DATA
+            if args.market == 'spot' else binance_archive.DEFAULT_DATA)
+        result = binance_archive.download_monthly(
+            args.market, args.symbol, args.start, args.end, out)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-rest-download':
+        import binance_archive
+        out = args.out or binance_archive.DEFAULT_SPOT_DATA
+        result = binance_archive.download_spot_rest(
+            args.symbol, args.start, args.end, out)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'train-remora-binance':
+        import binance_archive
+        spot = args.market == 'spot'
+        data = args.data or (
+            binance_archive.DEFAULT_SPOT_DATA if spot else binance_archive.DEFAULT_DATA)
+        model = args.model or (
+            binance_archive.DEFAULT_SPOT_MODEL if spot else binance_archive.DEFAULT_MODEL)
+        report = args.report or (
+            binance_archive.DEFAULT_SPOT_REPORT if spot else binance_archive.DEFAULT_REPORT)
+        if not data.is_file():
+            raise ValueError(f'Binance veri dosyası bulunamadı: {data}')
+        result = binance_archive.train_offline(
+            data, model, report, args.samples, args.market, args.symbol)
+        print(json.dumps({
+            'kind': result['kind'], 'candles': result['candles'],
+            'samples': result['model_state'].get('sample_count', 0),
+            'validation': result['model_state'].get('validation'),
+            'deployed': result['deployed'], 'model': str(model.resolve()),
+            'report': str(report.resolve()),
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'train-remora-binance-blend':
+        import binance_archive
+        model = args.model or binance_archive.DEFAULT_BLEND_MODEL
+        report = args.report or binance_archive.DEFAULT_BLEND_REPORT
+        result = binance_archive.train_blended_offline(
+            args.spot_data, args.futures_data, model, report, args.samples)
+        state = result['model_state']
+        print(json.dumps({
+            'kind': result['kind'], 'candles': result['candles'],
+            'samples': result['samples'], 'validation': state.get('validation'),
+            'deployed': result['deployed'], 'model': str(model.resolve()),
+            'report': str(report.resolve()),
+        }, indent=2, ensure_ascii=False))
         return
     if args.command.startswith('learn-'):
         import paper, learning

@@ -244,6 +244,22 @@ reconciliation ve bağımsız watchdog alanları Binance bağlantısı kurulana 
 saklı ve pasiftir; veri uydurulmaz. Uyarlama matrisi
 `reports/quant-remora-sdd-v5-implementation.md` içindedir.
 
+Binance'in public verisi gerçek emir bağlantısından bağımsız bir offline challenger
+olarak kullanılabilir. `binance-download` resmî aylık ZIP ve SHA-256 kayıtlarını,
+`binance-rest-download` anahtarsız Spot klines uçlarını kullanır. Spot ile USD-M'nin
+aynı 15m kapanışından basis özellikleri üretmek için:
+
+```powershell
+python agent.py binance-rest-download --symbol BTCUSDT --start 2025-09-01 --end 2026-08-31
+python agent.py binance-download --market um --symbol BTCUSDT --start 2025-09 --end 2026-08
+python agent.py train-remora-binance-blend --spot-data data/binance-spot-btcusdt-15m.csv --futures-data data/binance-um-btcusdt-15m.csv --samples 400
+```
+
+İndirme; mum sırası, 15m boşluk, OHLC tutarlılığı ve checksum kontrollerinden geçer.
+Model ayrı artifact üretir, `deployed=false` kalır ve validation kapıları geçmeden
+çalışan paper agente yüklenmez. Ayrıntılar ve ilk ölçüm
+`reports/binance-data-integration.md` içindedir.
+
 ## Ölçülen v2 sonucu
 
 Aktif eğitim verisi 31 Aralık 2020 00:15 UTC ile 14 Eylül 2026 08:00 UTC arasındaki
