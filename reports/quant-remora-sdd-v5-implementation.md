@@ -55,7 +55,9 @@ değilse riskli işlem engellenir. AI/LLM doğrudan LONG/SHORT otoritesi değild
 
 Eğitim hızlandırma katmanı 200 adet `historical_remora_h8` örneğini başlangıç
 eğitimine ekler; bunları ileri kanıt saymaz. Canlı karar anında özellikleri dondurulan
-her long/short tetik H8 sonunda maliyet dahil 1 USD'lik bağımsız paper probe olur.
+her `%20/%80` sermaye tetiği, `%30/%70` geniş probe geçişi ve saatlik anlamlı
+StochRSI yön adayı H8 sonunda maliyet dahil
+1 USD'lik bağımsız paper probe olur; aynı karar mumundan en fazla bir probe sayılır.
 `v3_probe_executions` ve `paper_remora_probe_h8` kayıtları önceden verilmiş kararın
 sonradan oluşan sonucunu taşır ve `executed_forward_count` değerini artırır. Terfi
 için 60 gerçekleşmiş ileri probe yine zorunludur.

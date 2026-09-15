@@ -18,6 +18,40 @@ from v2_engine import validate_rows
 PROFILE = "quant_remora_v5_spot_ohlcv_paper_subset"
 MIN_BARS = 820
 VWAP_TOLERANCE_ATR = 0.30
+ENTRY_STOCH_LOWER = 0.20
+ENTRY_STOCH_UPPER = 0.80
+PROBE_STOCH_LOWER = 0.30
+PROBE_STOCH_UPPER = 0.70
+PROBE_SCHEDULE_BARS = 4
+PROBE_MIN_STOCH_CHANGE = 0.05
+
+
+def _cross_side(previous: float, current: float, lower: float, upper: float) -> str | None:
+    """Return one causal oscillator crossing side for a closed bar."""
+    if previous <= lower < current:
+        return "long"
+    if previous >= upper > current:
+        return "short"
+    return None
+
+
+def _probe_candidate(previous: float, current: float, decision_ts: int) -> tuple[str | None, str | None]:
+    """Select one pre-registered probe without duplicating a decision bar."""
+    capital_crossing = _cross_side(
+        previous, current, ENTRY_STOCH_LOWER, ENTRY_STOCH_UPPER)
+    if capital_crossing is not None:
+        return capital_crossing, "capital_stoch_rsi_cross_20_80_h8"
+    crossing = _cross_side(
+        previous, current, PROBE_STOCH_LOWER, PROBE_STOCH_UPPER)
+    if crossing is not None:
+        return crossing, "stoch_rsi_cross_30_70_h8"
+    hourly_close_offset = (PROBE_SCHEDULE_BARS - 1) * BAR_MS
+    if (
+        decision_ts % (PROBE_SCHEDULE_BARS * BAR_MS) == hourly_close_offset
+        and abs(current - previous) >= PROBE_MIN_STOCH_CHANGE
+    ):
+        return ("long" if current > previous else "short"), "hourly_stoch_direction_h8"
+    return None, None
 
 
 def _ema(values: Sequence[float], period: int) -> list[float | None]:
@@ -135,8 +169,12 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     previous_stoch = _stoch_rsi(f["rsi"], i - 1)
     if stoch is None or previous_stoch is None:
         raise ValueError("Quant Remora StochRSI is unavailable.")
-    long_trigger = previous_stoch <= 0.20 < stoch
-    short_trigger = previous_stoch >= 0.80 > stoch
+    side = _cross_side(
+        previous_stoch, stoch, ENTRY_STOCH_LOWER, ENTRY_STOCH_UPPER)
+    probe_side, probe_profile = _probe_candidate(
+        previous_stoch, stoch, int(rows[i]["ts"]))
+    long_trigger = side == "long"
+    short_trigger = side == "short"
     vwap = _session_vwap(rows)
     vwap_distance_atr = abs(close - vwap) / atr
     vwap_pass = vwap_distance_atr <= VWAP_TOLERANCE_ATR
@@ -155,7 +193,6 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "order_book_depth": "UNAVAILABLE",
         "liquidity": "PARTIAL_QUOTE_SPREAD_ONLY",
     }
-    side = "long" if long_trigger else "short" if short_trigger else None
     eligible_long = bool(
         data_quality and side == "long" and trend == "bullish"
         and regime == "trending" and volatility == "normal" and vwap_pass
@@ -168,6 +205,8 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "paper_market": "bitstamp_btcusd_spot",
         "decision_ts": int(rows[i]["ts"]),
         "side": side,
+        "probe_side": probe_side,
+        "probe_profile": probe_profile,
         "eligible_long": eligible_long,
         "short_execution_supported": False,
         "trend": trend,
@@ -199,4 +238,8 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
-__all__ = ["PROFILE", "MIN_BARS", "VWAP_TOLERANCE_ATR", "evaluate"]
+__all__ = [
+    "PROFILE", "MIN_BARS", "VWAP_TOLERANCE_ATR", "ENTRY_STOCH_LOWER",
+    "ENTRY_STOCH_UPPER", "PROBE_STOCH_LOWER", "PROBE_STOCH_UPPER",
+    "PROBE_SCHEDULE_BARS", "PROBE_MIN_STOCH_CHANGE", "evaluate",
+]

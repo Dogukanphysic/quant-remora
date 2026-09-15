@@ -170,7 +170,12 @@ class PaperV3Tests(unittest.TestCase):
 
     def test_pre_registered_trigger_becomes_forward_paper_probe(self):
         paper_v3.disable(self.db, self.now - 1)
-        with patch("paper_v3.decide", return_value=decision(self.rows)):
+        probe_decision = decision(
+            self.rows, action="hold", strategy="no_entry", reason="hourly_probe")
+        probe_decision["context"]["side"] = None
+        probe_decision["context"]["probe_side"] = "long"
+        probe_decision["context"]["probe_profile"] = "hourly_stoch_direction_h8"
+        with patch("paper_v3.decide", return_value=probe_decision):
             first = paper_v3.tick(self.db, self.quote, self.rows, self.now)
         self.assertEqual(first["open_trades"], 0)
         extended = list(self.rows)

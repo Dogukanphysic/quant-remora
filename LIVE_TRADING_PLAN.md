@@ -17,7 +17,10 @@ Risk, etiket üretmek için kullanılır. Risk miktarı modelin daha hızlı ö�
 sağlamaz; işlem çeşitliliği ve temiz ileri sonuç sayısı bunu sağlar. Bu nedenle
 pozisyon boyutu kanıttan önce artırılmaz.
 
-Her long/short StochRSI adayı ayrıca sermaye kullanmadan H8 gölge etiketi üretir.
+Her `%20/%80` sermaye tetiği, `%30/%70` geniş StochRSI probe geçişi ve saat
+kapanışındaki anlamlı StochRSI yön değişimi
+ayrıca sermaye kullanmadan H8 gölge etiketi üretir. Aynı karar mumundan yalnız bir
+probe sayılır.
 Stop ve hedef aynı mumda görülürse stop önce sayılır; ücret ve kayma etikete dahildir.
 Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution kanıtı sayılmaz.
 

@@ -228,19 +228,23 @@ eşlenir; model yeterli ileri örnek oluşana kadar `collecting` kalır. Ayrınt
 
 Eğitimi hızlandırmak için 200 tarihsel H8 örneği tek komutla başlangıç modeline
 eklenebilir. Kaynak `historical_remora_h8` olduğu için bunlar ileri kanıt veya paper
-işlem sayılmaz. Bundan sonra karar anında kaydı dondurulan her long/short StochRSI
-tetiği, sekiz mum sonra maliyet dahil 1 USD'lik bağımsız paper probe olarak
-sonuçlandırılır. Kayıtlar `v3_probe_executions` ve `paper_remora_probe_h8`
-kaynağındadır. Böylece gerçek zaman bekleme sürerken long ve short sonuçları paralel
-toplanır; en az 60 nedensel ileri probe olmadan `paper_eligible` olunamaz.
+işlem sayılmaz. Karar anında kaydı dondurulan her `%20/%80` sermaye tetiğine,
+`%30/%70` geniş probe geçişi ve saat kapanışında StochRSI yönü en az `0,05`
+değişmişse tek bir yönlü aday
+kaydedilir. Her karar mumunda en fazla bir aday, sekiz mum sonra maliyet dahil 1
+USD'lik bağımsız paper probe olarak sonuçlandırılır. Kayıtlar
+`v3_probe_executions` ve `paper_remora_probe_h8` kaynağındadır. Böylece gerçek zaman
+bekleme sürerken long ve short sonuçları paralel toplanır; en az 60 benzersiz karar
+zamanlı ileri probe olmadan `paper_eligible` olunamaz.
 
 ```powershell
 python agent.py seed-remora-history --samples 200
 ```
 
-200.000 mumluk yerel dosyada başlangıç üretimi yaklaşık 45 saniye sürer. Tarihsel
-tetik sıklığı ileri 60 probe için yaklaşık 4 gün gösterir; bu yalnız veri gelme
-tahminidir, validation başarısını garanti etmez.
+200.000 mumluk yerel dosyada başlangıç üretimi yaklaşık 45 saniye sürer. Son 30–365
+günlük tarihsel ölçüm, saatlik yönlü adayla probe hızının yaklaşık 16/günden 34/güne
+çıktığını gösterir. Sıfırdan 60 probe yaklaşık 2 gün sürebilir; bu yalnız veri
+gelme tahminidir, validation başarısını garanti etmez.
 
 Binance Futures, gerçek short emri/kaldıraç, OI, funding, long/short oranı, tam order-book,
 reconciliation ve bağımsız watchdog alanları Binance bağlantısı kurulana kadar

@@ -544,7 +544,10 @@ def _resolve_shadow_labels(
     resolved = 0
     for decision_ts, atr_value, feature_json, context_json, decision_created_ts in pending:
         context = json.loads(str(context_json))
-        side = context.get("side") if isinstance(context, dict) else None
+        side = (
+            context.get("probe_side", context.get("side"))
+            if isinstance(context, dict) else None
+        )
         if side not in {"long", "short"}:
             continue
         index = by_ts.get(int(decision_ts))
@@ -620,7 +623,8 @@ def _resolve_shadow_labels(
             vector, net_return,
             metadata={
                 "decision_ts": int(decision_ts), "side": side,
-                "exit_reason": reason, "capital_used": pre_registered,
+                "exit_reason": reason, "capital_used": False,
+                "paper_probe_executed": pre_registered,
                 "paper_probe_notional_usd": (
                     PROBE_NOTIONAL_USD if pre_registered else 0.0),
                 "pre_registered_before_label": pre_registered,
@@ -1120,6 +1124,7 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
                 float(probe_counts[4]) / probe_gross_loss if probe_gross_loss else None),
             "forward_probe_notional_usd": PROBE_NOTIONAL_USD,
             "forward_probe_horizon_bars": PROBE_HORIZON_BARS,
+            "forward_probe_trigger": "stoch_rsi_cross_30_70_or_hourly_direction",
             "included_in_main_1000_usd": False,
             "real_orders_enabled": False,
         }

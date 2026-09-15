@@ -347,14 +347,17 @@ sözleşmesi `LIVE_TRADING_PLAN.md`; SDD uyarlaması
 `reports/quant-remora-sdd-v5-implementation.md` içindedir.
 
 Eğitim süresini kısaltmak için önce 200 adet nedensel tarihsel H8 örneği
-`historical_remora_h8` kaynağıyla eklenir. Bunlar ileri kanıt sayılmaz. Canlı worker
-karar anında dondurduğu her long/short StochRSI tetiğini sekiz mum sonra maliyet
-dahil 1 USD'lik bağımsız sanal probe olarak kapatır. Sonuç `v3_probe_executions` ve
-`paper_remora_probe_h8` kaynağına yazılır; yalnız bu önceden kaydedilmiş probe'lar
-`executed_forward_count` değerini artırır. Paper sermaye modelinin `eligible` olması
-için en az 200 toplam örnek, 60 gerçekleşmiş ileri probe ve bütün kronolojik
-validation kapıları zorunludur. Tarihsel sıklık 60 probe için yaklaşık dört gün
-gösterir; başarısız validation halinde toplama devam eder.
+`historical_remora_h8` kaynağıyla eklenir. Bunlar ileri kanıt sayılmaz. Canlı worker,
+`%20/%80` sermaye StochRSI geçişlerine ek olarak `%30/%70` geniş probe geçişini ve
+saat kapanışında en az `0,05` StochRSI yön değişimi varsa tek bir adayı kaydeder.
+Her karar mumunda en fazla bir aday sekiz mum
+sonra maliyet dahil 1 USD'lik bağımsız sanal probe olarak kapanır. Sonuç
+`v3_probe_executions` ve `paper_remora_probe_h8` kaynağına yazılır; yalnız bu önceden
+kaydedilmiş, benzersiz karar zamanlı probe'lar `executed_forward_count` değerini
+artırır. Paper sermaye modelinin `eligible` olması için en az 200 toplam örnek, 60
+gerçekleşmiş ileri probe ve bütün kronolojik validation kapıları zorunludur. Son
+30–365 günlük ölçüm yaklaşık 16 yerine 34 probe/gün gösterir; başarısız validation
+halinde toplama devam eder.
 
 Binance bağlantısı açılmadan da yalnız public tarihsel veriyle ayrı challenger
 eğitilebilir. Sistem Spot REST mumlarını ve checksum doğrulamalı USD-M aylık arşivini

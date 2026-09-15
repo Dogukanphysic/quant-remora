@@ -271,8 +271,10 @@ geçmeden giriş olmaz. Her mumun `buy`, `sell`, `hold` veya `blocked` sonucu,
 
 Başlangıç eğitimi son 60.000 mumdan zaman boyunca dağıtılmış 200 tarihsel H8 örneği
 üretir; kaynak adı bu satırların ileri sayaçlara girmesini engeller. Canlı kararda
-önceden kaydedilen her long/short tetik, H8 sonunda 1 USD'lik bağımsız paper probe
-olarak `v3_probe_executions` tablosuna kapanır. Bu yapı çakışan adayları ayrı ayrı
+önceden kaydedilen her `%20/%80` sermaye tetiği, `%30/%70` geniş probe geçişi ve
+saatlik StochRSI yön adayı, H8 sonunda 1
+USD'lik bağımsız paper probe olarak `v3_probe_executions` tablosuna kapanır. Aynı
+karar mumunda en fazla bir probe yazılır. Bu yapı çakışan adayları ayrı ayrı
 ölçer; gerçek Binance short emri veya kaldıraç açmaz.
 
 Binance public veri katmanı çalışan worker'dan ayrıdır. `binance_archive.py`, Spot
