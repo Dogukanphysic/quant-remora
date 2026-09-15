@@ -66,3 +66,15 @@ emir kullanmaz.
 Sonraki araştırma, yeni bir holdout dönemiyle daha uzun 1h/4h bekleme, farklı kripto
 varlıklarında çapraz kesit ve gerçekleşen hesap ücretleri belli olduğunda maliyet
 duyarlılığı üzerinde yapılmalıdır.
+
+## Beş yıllık 4H trend araştırması
+
+Checksum doğrulamalı Binance USD-M arşivinden 175.296 kesintisiz 15m mum alındı ve
+10.956 tam 4H muma dönüştürüldü. Tek yön `%0,20` stresli maliyetle 298 EMA,
+zaman-serisi momentum ve Donchian long/cash ile long/short varyantı 40/40/20
+geliştirme-seçim-holdout ayrımında tarandı.
+
+Holdout görülmeden önce yalnız Donchian long/cash `72/12` adayı iki ilk kapıyı geçti.
+Geliştirmede `%25,19`, seçimde `%45,60` getiri üretmesine rağmen dokunulmamış
+holdout'ta `-%11,53`, Sharpe `-0,7235` ve `%23,94` azami düşüş üretti. Aday
+reddedildi; `deployed=false` ve gerçek emir kapalıdır.

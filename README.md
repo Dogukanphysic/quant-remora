@@ -216,11 +216,12 @@ minimum hedef `%0,30` ve net ödül/risk `1,5`'tir.
 
 Bu kuralların 200.000 mumluk kronolojik tekrarı maliyet sonrası negatif kaldı.
 Bu sonuç bildirildikten sonra kullanıcı, 14 Eylül 2026'da yalnız ileri sanal kanıt
-toplamak için sınırlı mikro riski açıkça yetkilendirdi. `ENTRY_QUARANTINED=false`;
-yetki kaydı `user_authorized_forward_micro_risk_2026-09-14`'tür. Zarar korumaları
-ve sermaye sınırları aynen uygulanır. Yeni kararların 22 nedensel özelliği
-kapanan net işlem sonucu ile otomatik eşlenir; model yeterli ileri örnek oluşana kadar
-`collecting` kalır. Ayrıntılı kanıt
+toplamak için sınırlı mikro riski açıkça yetkilendirdi. Sonraki Binance türev ve beş
+yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için 15 Eylül'de
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. V3 artık model `paper_eligible`
+olmadan sermaye işlemi açmaz; 1 USD'lik bağımsız H8 probe'lar öğrenme kanıtı toplamaya
+devam eder. Yeni kararların 22 nedensel özelliği kapanan probe sonucu ile otomatik
+eşlenir; model yeterli ileri örnek oluşana kadar `collecting` kalır. Ayrıntılı kanıt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
 
 Eğitimi hızlandırmak için 200 tarihsel H8 örneği tek komutla başlangıç modeline
@@ -266,6 +267,7 @@ Funding, open interest, genel/top-trader oranları, taker akışı ve rejim abla
 python agent.py binance-derivatives-download --symbol BTCUSDT --start 2025-09-01 --end 2026-08-31
 python agent.py train-remora-binance-derivatives --spot-data data/binance-spot-btcusdt-15m-1y.csv --futures-data data/binance-um-btcusdt-15m-1y.csv --samples 1000
 python agent.py research-remora-binance-exits --futures-data data/binance-um-btcusdt-15m-1y.csv --sample-cache reports/remora-binance-derivatives-training-samples-1000.json
+python agent.py research-binance-long-horizon --data data/binance-um-btcusdt-15m-5y.csv
 ```
 
 Metrics/funding dosyaları checksum doğrulanır. Eğitim eşit olay bütçeli ablation ve

@@ -371,6 +371,11 @@ def main():
     exit_search.add_argument('--futures-data', type=Path, required=True)
     exit_search.add_argument('--sample-cache', type=Path, required=True)
     exit_search.add_argument('--report', type=Path)
+    long_horizon = sub.add_parser(
+        'research-binance-long-horizon',
+        help='Beş yıllık USD-M veride maliyet stresli 4H trend ailelerini araştır')
+    long_horizon.add_argument('--data', type=Path, required=True)
+    long_horizon.add_argument('--report', type=Path)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -619,6 +624,21 @@ def main():
             'selected_policy': result['selected_policy'],
             'holdout': result['holdout'], 'holdout_pass': result['holdout_pass'],
             'deployable': result['deployable'],
+            'report': str(report_path.resolve()),
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'research-binance-long-horizon':
+        import long_horizon
+        report_path = args.report or long_horizon.DEFAULT_REPORT
+        result = long_horizon.research(args.data, report_path)
+        print(json.dumps({
+            'kind': result['kind'], 'candles_15m': result['candles_15m'],
+            'bars_4h': result['bars_4h'],
+            'configuration_count': result['configuration_count'],
+            'eligible_before_holdout': result['eligible_before_holdout'],
+            'selected': result['selected'], 'holdout': result['holdout'],
+            'holdout_pass': result['holdout_pass'],
+            'deployed': result['deployed'],
             'report': str(report_path.resolve()),
         }, indent=2, ensure_ascii=False))
         return

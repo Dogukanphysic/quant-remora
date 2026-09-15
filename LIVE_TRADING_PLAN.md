@@ -36,6 +36,10 @@ Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution ka
 Bu aşamada zarar oluşabilir. Amaç getiriyi varsaymak değil, maliyet sonrası avantajı
 aynı sürümle ileri veride ölçmektir.
 
+Güncel kod bu koşulu `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` ile fail-closed uygular.
+Model `paper_eligible` olana kadar sermaye işlemi açılmaz; H8 probe'lar öğrenme
+örneklerini toplamayı sürdürür.
+
 ## Aşama 2 — model adayı ve kilitli tekrar test
 
 Yeni model adayı ancak en az 200 toplam nedensel örnek ve en az 60 yeni ileri paper probe

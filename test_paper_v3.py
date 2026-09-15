@@ -90,6 +90,7 @@ class PaperV3Tests(unittest.TestCase):
 
     def test_buy_is_persisted_and_target_closes_with_actual_pnl(self):
         with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", False), patch(
                 "paper_v3.decide", return_value=decision(self.rows)):
             opened = paper_v3.tick(self.db, self.quote, self.rows, self.now)
         self.assertEqual(opened["open_trades"], 1)
@@ -207,8 +208,25 @@ class PaperV3Tests(unittest.TestCase):
             row, ("blocked", "v3_historical_edge_not_validated")
         )
 
+    def test_collecting_model_cannot_use_capital(self):
+        with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", True), patch(
+                "paper_v3.decide", return_value=decision(self.rows)):
+            state = paper_v3.tick(self.db, self.quote, self.rows, self.now)
+        self.assertEqual(state["open_trades"], 0)
+        self.assertEqual(state["system_state"], "LEARNING")
+        self.assertTrue(state["entry_quarantined"])
+        self.assertEqual(state["entry_quarantine_reason"], "forward_model_not_eligible")
+        row = self.db.execute(
+            "SELECT action,reason FROM v3_paper_decisions"
+        ).fetchone()
+        self.assertEqual(
+            row, ("blocked", "remora_model_remora_forward_model_collecting")
+        )
+
     def test_loss_blocks_rapid_reentry_for_four_bars(self):
         with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", False), patch(
                 "paper_v3.decide", return_value=decision(self.rows)):
             opened = paper_v3.tick(self.db, self.quote, self.rows, self.now)
         stop = float(opened["position"]["stop"])
@@ -233,6 +251,7 @@ class PaperV3Tests(unittest.TestCase):
 
     def test_profitable_position_arms_breakeven_guard(self):
         with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", False), patch(
                 "paper_v3.decide", return_value=decision(self.rows)):
             paper_v3.tick(self.db, self.quote, self.rows, self.now)
         paper_v3.tick(
@@ -257,6 +276,7 @@ class PaperV3Tests(unittest.TestCase):
 
     def test_open_position_from_retired_rules_is_closed(self):
         with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", False), patch(
                 "paper_v3.decide", return_value=decision(self.rows)):
             paper_v3.tick(self.db, self.quote, self.rows, self.now)
         encoded = self.db.execute(

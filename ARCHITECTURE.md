@@ -290,6 +290,12 @@ Kontrol ve beş ablation varyantı aynı olaylarla çalışır. Ayrı çıkış 
 geliştirme, seçim ve dokunulmamış holdout arasına 32 mum embargo koyar; araştırma
 artifact'leri hiçbir koşulda canlı `paper.db` dosyasına yazılmaz.
 
+`long_horizon.py`, kesintisiz Binance USD-M 15m verisini tam 4H mumlara dönüştürür
+ve 298 EMA, zaman serisi momentum ve Donchian varyantını stresli maliyetle tarar.
+Geliştirme ve seçim kapıları geçilmeden holdout açılmaz; yalnız seçilmiş adayın
+holdout sonucu raporlanır. Çıktı her koşulda `deployed=false` ve
+`real_orders_enabled=false` taşır.
+
 ```mermaid
 flowchart LR
     B[Fresh closed 15M bar] --> I[Bollinger RSI ATR SMA50]
@@ -307,8 +313,10 @@ V3 hesabı 100 USD ile başlar ve ana 1.000 USD toplamına katılmaz. Revizyonun
 planlanan stop riski %0,10, tahsis tavanı %10, stop 1,5 ATR, hedef 3,2 ATR ve azami
 süre dört mumdur. Günlük %2 ve toplam %8 kesici uygulanır. 200.000 mumluk
 kronolojik maliyet testi negatiftir; kullanıcı bu bulgudan sonra yalnız ileri sanal
-mikro risk için açık yetki verdi. `ENTRY_QUARANTINED=false` olsa da maliyet, teyit,
-cooldown, tek pozisyon ve kayıp kesicileri her girişte uygulanır. Gerçek emir yolu yoktur.
+mikro risk için açık yetki verdi. Sonraki negatif araştırmaların ardından
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı: model `paper_eligible` olmadan V3
+sermaye işlemi açmaz. H8 probe hattı bağımsız çalışır ve maliyet dahil ileri öğrenme
+örnekleri üretir. Gerçek emir yolu yoktur.
 
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş

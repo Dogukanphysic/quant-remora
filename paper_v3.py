@@ -39,6 +39,7 @@ PROBE_HORIZON_BARS = 8
 # guards remain active; this flag is the single fail-closed capital switch.
 ENTRY_QUARANTINED = False
 ENTRY_AUTHORIZATION = "user_authorized_forward_micro_risk_2026-09-14"
+CAPITAL_REQUIRES_ELIGIBLE_MODEL = True
 
 
 def ensure_tables(db: sqlite3.Connection) -> None:
@@ -463,7 +464,8 @@ def _model_gate(
     learning.ensure_tables(db)
     state = learning.model_state(db, learning.REMORA_MODEL)
     if not bool(state.get("eligible")) or not isinstance(state.get("model"), dict):
-        return True, "remora_forward_model_collecting", None
+        return (not CAPITAL_REQUIRES_ELIGIBLE_MODEL,
+                "remora_forward_model_collecting", None)
     assessment = learning.assess(state["model"], _learning_vector(decision), spread)
     return bool(assessment["accept"]), str(assessment["reason"]), assessment
 
@@ -1077,14 +1079,26 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
             "system_state": (
                 "CIRCUIT_BREAKER" if state["daily_halt"] or state["drawdown_halt"]
                 else "PAUSED" if not state["enabled"] or ENTRY_QUARANTINED
+                else "LEARNING" if (
+                    CAPITAL_REQUIRES_ELIGIBLE_MODEL
+                    and not bool(remora_model.get("eligible")))
                 else "TRADING" if state["position"] is not None
                 else "READY"
             ),
-            "entry_quarantined": ENTRY_QUARANTINED,
+            "entry_quarantined": bool(
+                ENTRY_QUARANTINED or (
+                    CAPITAL_REQUIRES_ELIGIBLE_MODEL
+                    and not bool(remora_model.get("eligible")))
+            ),
             "entry_quarantine_reason": (
                 "negative_200k_chronological_replay_after_costs"
                 if ENTRY_QUARANTINED else None
+            ) or (
+                "forward_model_not_eligible"
+                if CAPITAL_REQUIRES_ELIGIBLE_MODEL
+                and not bool(remora_model.get("eligible")) else None
             ),
+            "capital_requires_eligible_model": CAPITAL_REQUIRES_ELIGIBLE_MODEL,
             "entry_authorization": ENTRY_AUTHORIZATION,
             "winning_trades": int(outcomes[0]),
             "losing_trades": int(outcomes[1]),
@@ -1149,7 +1163,7 @@ __all__ = [
     "STOP_ATR", "TARGET_ATR", "MAX_HOLD_BARS", "MIN_TARGET_NET_RETURN",
     "MIN_NET_REWARD_RISK", "LOSS_COOLDOWN_BARS", "LOSS_STREAK_COOLDOWN_BARS",
     "BREAKEVEN_ARM_NET_RETURN", "PROBE_NOTIONAL_USD", "PROBE_HORIZON_BARS",
-    "ENTRY_QUARANTINED", "ENTRY_AUTHORIZATION",
+    "ENTRY_QUARANTINED", "ENTRY_AUTHORIZATION", "CAPITAL_REQUIRES_ELIGIBLE_MODEL",
     "ensure_tables", "enable", "disable", "decide", "tick", "status",
     "learning_samples", "seed_historical_samples",
 ]

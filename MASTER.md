@@ -327,9 +327,12 @@ tahsis `%10`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası hedef eşiği `%0,30`, 
 Revizyon 200.000 mumda kronolojik yeniden oynatıldı ve son `%30` kesimde
 `PF=0,3340`, yaklaşık `-%86,38` bileşik getiri verdi. Bu negatif kanıt
 kullanıcıya bildirildi. Kullanıcı 14 Eylül 2026'da korumalar altında ileri mikro
-sanal risk alınmasını açıkça istedi; bu nedenle `ENTRY_QUARANTINED=false` ve yetki
-`user_authorized_forward_micro_risk_2026-09-14` olarak kaydedildi. Bu bir kârlılık
-terfisi değildir. Kanıt ve karar `reports/v3-loss-analysis-20260914.md` içindedir.
+sanal risk alınmasını açıkça istedi ve yetki
+`user_authorized_forward_micro_risk_2026-09-14` olarak kaydedildi. Genişletilmiş
+türev, çıkış ve beş yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için
+15 Eylül'de `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. V3 sermaye hesabı artık
+model `paper_eligible` olmadan işlem açmaz; 1 USD'lik H8 probe'lar veri toplamaya
+devam eder. Kanıt ve karar `reports/v3-loss-analysis-20260914.md` içindedir.
 
 Remora yeni kararların 22 nedensel özelliğini `v3_paper_decisions.feature_json`
 alanına yazar. Kapanan işlemler `paper_v3.learning_samples()` ile bu özelliklere ve
@@ -366,6 +369,13 @@ rağmen sınıflandırma ve doğrudan net-getiri Ridge modelleri kabul edilebili
 dönemlerinde birlikte pozitif stresli getiri ve 1,2 profit factor kapısını geçmedi.
 Bu nedenle StochRSI tetik ailesi korunmuş bir kontrol olarak kaldı; Binance türev
 artifact'i paper veya gerçek sermayeye geçirilmedi.
+
+Beş yıllık kesintisiz Binance USD-M arşivinde 175.296 adet 15m mum, 10.956 tam 4H
+muma dönüştürüldü. Stresli tek yön maliyet `%0,20` ile 298 EMA, momentum ve Donchian
+varyantı 40/40/20 geliştirme-seçim-holdout ayrımında tarandı. Yalnız Donchian
+long/cash `72/12` geliştirme ve seçim kapılarını geçti; dokunulmamış holdout'ta
+`-%11,5316`, Sharpe `-0,7235` üretti ve reddedildi. Hiçbir uzun dönem artifact'i
+paper veya gerçek sermayeye geçirilmedi.
 
 ## 11. Sermaye ve risk politikası
 
