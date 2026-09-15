@@ -2,7 +2,7 @@
 
 **Güncel aşama:** Quant Remora ayrı 100 USD sanal hesapta kullanıcı yetkili mikro risk  
 **Gerçek emir:** Kapalı ve henüz uygulanmadı  
-**Yetki kaydı:** `user_authorized_forward_micro_risk_2026-09-14`
+**Yetki kaydı:** `user_authorized_higher_forward_paper_risk_2026-09-15`
 
 ## Temel ilke
 
@@ -24,8 +24,8 @@ Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution ka
 ## Aşama 1 — ileri mikro sanal risk
 
 - Ayrı başlangıç hesabı: 100 USD.
-- İşlem başına planlanan stop riski: özkaynağın `%0,10`'u.
-- Tahsis tavanı: `%10`; aynı anda en fazla bir pozisyon.
+- İşlem başına planlanan stop riski: özkaynağın `%0,15`'i.
+- Tahsis tavanı: `%12`; aynı anda en fazla bir pozisyon.
 - Günlük kayıp kesici `%2`, toplam düşüş kesici `%8`.
 - Spread, maliyet sonrası hedef, net ödül/risk, 4/8 mum kayıp beklemesi ve
   başa baş koruması zorunludur.
@@ -36,9 +36,10 @@ Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution ka
 Bu aşamada zarar oluşabilir. Amaç getiriyi varsaymak değil, maliyet sonrası avantajı
 aynı sürümle ileri veride ölçmektir.
 
-Güncel kod bu koşulu `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` ile fail-closed uygular.
-Model `paper_eligible` olana kadar sermaye işlemi açılmaz; H8 probe'lar öğrenme
-örneklerini toplamayı sürdürür.
+15 Eylül 2026 tarihli kullanıcı talebiyle
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` yapıldı. Model henüz `paper_eligible`
+olmadan bu sınırlı sanal deneme işlem açabilir; H8 probe'lar öğrenme örneklerini
+toplamayı sürdürür. Bu yetki yalnız paper hesap içindir.
 
 ## Aşama 2 — model adayı ve kilitli tekrar test
 

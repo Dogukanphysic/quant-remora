@@ -211,16 +211,18 @@ zayıf hareketleri zarara çevirdi.
 
 `quant_remora_v5_trainable_paper_v2`, SDD'deki 1H EMA20/50/200 trend bağlamı,
 15m StochRSI tetik, rejim, ATR percentile, volatilite, seans VWAP ve spread kapılarını
-uygular. Risk `%0,10`, tahsis `%10`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası
+uygular. Risk `%0,15`, tahsis `%12`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası
 minimum hedef `%0,30` ve net ödül/risk `1,5`'tir.
 
 Bu kuralların 200.000 mumluk kronolojik tekrarı maliyet sonrası negatif kaldı.
 Bu sonuç bildirildikten sonra kullanıcı, 14 Eylül 2026'da yalnız ileri sanal kanıt
 toplamak için sınırlı mikro riski açıkça yetkilendirdi. Sonraki Binance türev ve beş
-yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için 15 Eylül'de
-`CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. V3 artık model `paper_eligible`
-olmadan sermaye işlemi açmaz; 1 USD'lik bağımsız H8 probe'lar öğrenme kanıtı toplamaya
-devam eder. Yeni kararların 22 nedensel özelliği kapanan probe sonucu ile otomatik
+yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için sermaye bir süre
+fail-closed tutuldu. Kullanıcı 15 Eylül'de daha yüksek sanal riski açıkça istedi;
+V3 stop riski `%0,15`, tahsis tavanı `%12` ve
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` olarak ayarlandı. Günlük `%2`, toplam `%8`,
+tek pozisyon ve maliyet kapıları korunur. 1 USD'lik bağımsız H8 probe'lar öğrenme
+kanıtı toplamaya devam eder. Yeni kararların 22 nedensel özelliği probe sonucu ile otomatik
 eşlenir; model yeterli ileri örnek oluşana kadar `collecting` kalır. Ayrıntılı kanıt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
 

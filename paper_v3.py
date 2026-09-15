@@ -19,8 +19,8 @@ from v2_engine import DEFAULT_COST, MAX_ENTRY_SPREAD, validate_rows
 
 VERSION = "quant_remora_v5_trainable_paper_v2"
 INITIAL_USD = 100.0
-RISK_FRACTION = 0.001
-ALLOCATION_CAP = 0.10
+RISK_FRACTION = 0.0015
+ALLOCATION_CAP = 0.12
 STOP_ATR = 1.5
 TARGET_ATR = 3.2
 MAX_HOLD_BARS = 4
@@ -34,12 +34,12 @@ LOSS_STREAK_COOLDOWN_BARS = 8
 BREAKEVEN_ARM_NET_RETURN = 0.001
 PROBE_NOTIONAL_USD = 1.0
 PROBE_HORIZON_BARS = 8
-# The 200,000-candle replay was negative, but the user explicitly authorized a
-# strictly bounded forward paper trial after reviewing that result.  All loss
-# guards remain active; this flag is the single fail-closed capital switch.
+# The 200,000-candle replay was negative. After reviewing that result and the
+# fail-closed collection period, the user explicitly authorized a slightly
+# larger bounded paper trial on 2026-09-15. All loss guards remain active.
 ENTRY_QUARANTINED = False
-ENTRY_AUTHORIZATION = "user_authorized_forward_micro_risk_2026-09-14"
-CAPITAL_REQUIRES_ELIGIBLE_MODEL = True
+ENTRY_AUTHORIZATION = "user_authorized_higher_forward_paper_risk_2026-09-15"
+CAPITAL_REQUIRES_ELIGIBLE_MODEL = False
 
 
 def ensure_tables(db: sqlite3.Connection) -> None:

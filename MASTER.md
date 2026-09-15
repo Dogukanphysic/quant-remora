@@ -320,8 +320,8 @@ oranı stratejiyi ekonomik olarak negatif yaptı.
 
 Yeni `quant_remora_v5_trainable_paper_v2` sürümü 1H EMA20/50/200 trend bağlamı,
 15m StochRSI tetik, rejim, ATR percentile, volatilite, seans VWAP ve spread kapılarını
-uygular. Kötü bir sonuçtan sonra 4, kayıp serisinde 8 mum bekler. Risk `%0,10`,
-tahsis `%10`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası hedef eşiği `%0,30`, net
+uygular. Kötü bir sonuçtan sonra 4, kayıp serisinde 8 mum bekler. Risk `%0,15`,
+tahsis `%12`, stop/hedef `1,5/3,2 ATR`; maliyet sonrası hedef eşiği `%0,30`, net
 ödül/risk eşiği `1,5`'tir.
 
 Revizyon 200.000 mumda kronolojik yeniden oynatıldı ve son `%30` kesimde
@@ -330,9 +330,12 @@ kullanıcıya bildirildi. Kullanıcı 14 Eylül 2026'da korumalar altında ileri
 sanal risk alınmasını açıkça istedi ve yetki
 `user_authorized_forward_micro_risk_2026-09-14` olarak kaydedildi. Genişletilmiş
 türev, çıkış ve beş yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için
-15 Eylül'de `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. V3 sermaye hesabı artık
-model `paper_eligible` olmadan işlem açmaz; 1 USD'lik H8 probe'lar veri toplamaya
-devam eder. Kanıt ve karar `reports/v3-loss-analysis-20260914.md` içindedir.
+sermaye bir süre fail-closed tutuldu. Kullanıcı 15 Eylül'de sanal bakiye riskinin
+biraz artırılarak devam edilmesini açıkça istedi. Stop riski `%0,15`, tahsis tavanı
+`%12` yapıldı ve `CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` olarak kaydedildi. Günlük
+`%2`, toplam `%8`, maliyet, tek pozisyon ve bekleme korumaları devam eder. 1 USD'lik
+H8 probe'lar ayrıca veri toplamayı sürdürür. Kanıt ve önceki karar
+`reports/v3-loss-analysis-20260914.md` içindedir.
 
 Remora yeni kararların 22 nedensel özelliğini `v3_paper_decisions.feature_json`
 alanına yazar. Kapanan işlemler `paper_v3.learning_samples()` ile bu özelliklere ve

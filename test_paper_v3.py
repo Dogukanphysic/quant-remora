@@ -95,8 +95,14 @@ class PaperV3Tests(unittest.TestCase):
             opened = paper_v3.tick(self.db, self.quote, self.rows, self.now)
         self.assertEqual(opened["open_trades"], 1)
         self.assertEqual(opened["buy_decisions"], 1)
-        self.assertLessEqual(opened["position"]["cost"], 10.0 + 1e-9)
-        self.assertLessEqual(opened["position"]["planned_loss_usd"], 0.10 + 1e-9)
+        self.assertLessEqual(
+            opened["position"]["cost"],
+            paper_v3.INITIAL_USD * paper_v3.ALLOCATION_CAP + 1e-9,
+        )
+        self.assertLessEqual(
+            opened["position"]["planned_loss_usd"],
+            paper_v3.INITIAL_USD * paper_v3.RISK_FRACTION + 1e-9,
+        )
         self.assertGreaterEqual(
             opened["position"]["planned_target_net_return"],
             paper_v3.MIN_TARGET_NET_RETURN,
