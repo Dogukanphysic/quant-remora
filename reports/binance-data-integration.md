@@ -38,7 +38,7 @@ Kaynaklar:
    exact join ile eşler; futures/spot basis, 24 saatlik basis z-score ve bir saatlik
    basis değişimini 22 çekirdek Remora özelliğine ekler.
 
-## Harmanlanacak özellikler
+## Harmanlanan özellikler
 
 | Özellik | Nedensel dönüşüm | Amaç |
 |---|---|---|
@@ -50,8 +50,9 @@ Kaynaklar:
 | Mark price volatilitesi | ATR ve spot/futures sapması | Likidasyon kaynaklı risk filtresi |
 
 Her veri yalnız zaman damgası karar mumundan önce veya ona eşitse backward-asof join
-ile eklenir. Funding yayınlanmadan geçmiş mumlara geri doldurulmaz. Son 30 günle
-sınırlı oran/OI verisi uzun dönem OHLCV validation'ına karıştırılmaz.
+ile eklenir. Funding yayınlanmadan geçmiş mumlara geri doldurulmaz. REST oran/OI
+uçları son bir ayla sınırlı olduğu için uzun dönem araştırmada checksum doğrulamalı
+Binance Vision günlük `metrics` arşivi kullanılır.
 
 ## Model seçimi
 
@@ -98,4 +99,47 @@ python agent.py binance-download --market um --symbol BTCUSDT --start 2025-09 --
 python agent.py train-remora-binance --market spot --samples 400
 python agent.py train-remora-binance --market um --samples 400
 python agent.py train-remora-binance-blend --spot-data data/binance-spot-btcusdt-15m.csv --futures-data data/binance-um-btcusdt-15m.csv --samples 400
+```
+
+## Funding, OI ve rejim araştırması
+
+2025-09-01–2026-08-31 dönemindeki 365 günlük metrics ZIP'inin tamamı ve 12 aylık
+funding ZIP'i ayrı SHA-256 kayıtlarıyla doğrulandı. Veri kümesi 105.120 adet 5m
+metrics satırı ve 1.095 gerçekleşmiş funding kaydı içeriyor. Metrics zamanları
+dosyada sırasız gelebildiği için önce sıralanır; karar özelliği en fazla beş dakika
+eski son gözlemden alınır ve gelecek değer taşınmaz.
+
+1.000 ortak Remora olayıyla aynı 70/30 purged ayrımda ölçülen sonuçlar:
+
+| Varyant | Brier | Taban Brier | Kabul edilen işlem |
+|---|---:|---:|---:|
+| OHLCV kontrol | 0,158690 | 0,162267 | 0 |
+| Basis | 0,158410 | 0,162267 | 0 |
+| Funding | 0,158378 | 0,162267 | 0 |
+| OI ve oran metrics | 0,156938 | 0,162267 | 0 |
+| Bütün türev özellikleri | **0,156937** | 0,162267 | 0 |
+| Türev + rejim | 0,157785 | 0,162267 | 0 |
+
+Türev verisi olasılık kalibrasyonunu iyileştirdi; ancak hiçbir tahmin `%55` eşiğine
+ulaşmadı. Sabit ayarlı Ridge doğrudan net getiri modeli de ek maliyet sonrası `%0,15`
+beklenen avantaj eşiğini geçen işlem bulamadı.
+
+Ayrıca mevcut StochRSI girişlerinde 114 stop/target/horizon politikası tarandı. İlk
+%50 geliştirme, sonraki %25 seçim, son %25 holdout olarak ayrıldı ve bölümler arasına
+32 mum embargo kondu. Geliştirme ve seçim dönemlerinde aynı anda pozitif stresli
+getiri ile en az 1,2 profit factor sağlayan politika sayısı sıfır oldu; bu yüzden yeni
+politika için holdout açılmadı. Mevcut H8 politikasının stresli toplam getirisi
+geliştirmede `-2,2582`, seçimde `-0,9018`, önceden belirlenmiş holdout'ta `-0,9805`
+oldu. Bunlar bağımsız işlemlerin getiri toplamıdır, portföy getirisi değildir.
+
+Sonuç, mevcut StochRSI tetik ailesinin yalnız yeni özellik veya çıkış ayarıyla
+kurtarılamadığını gösteriyor. Türev artifact'i `deployed=false` kaldı; eşikler
+gevşetilmedi ve çalışan paper modele aktarılmadı. Funding/basis ters yön ve
+fiyat+OI+taker momentum hipotezlerinin negatif keşif sonuçları
+`reports/binance-edge-search.md` belgesindedir.
+
+```powershell
+python agent.py binance-derivatives-download --symbol BTCUSDT --start 2025-09-01 --end 2026-08-31
+python agent.py train-remora-binance-derivatives --spot-data data/binance-spot-btcusdt-15m-1y.csv --futures-data data/binance-um-btcusdt-15m-1y.csv --samples 1000
+python agent.py research-remora-binance-exits --futures-data data/binance-um-btcusdt-15m-1y.csv --sample-cache reports/remora-binance-derivatives-training-samples-1000.json
 ```

@@ -283,6 +283,13 @@ nedensel basis özelliği eklenir. Üretilen artifact `deployed=false` olarak ka
 kontrol modelini ancak aynı kronolojik validation ve maliyet kapılarını geçerse
 değiştirebilir.
 
+`binance_derivatives.py` checksum doğrulamalı günlük 5m metrics ve aylık funding
+arşivlerini yönetir. OI değişimi, genel/top-trader oranları, taker akışı, funding
+z-score ve üç rejim özelliğini karar zamanında bilinen son gözlemle birleştirir.
+Kontrol ve beş ablation varyantı aynı olaylarla çalışır. Ayrı çıkış araştırması
+geliştirme, seçim ve dokunulmamış holdout arasına 32 mum embargo koyar; araştırma
+artifact'leri hiçbir koşulda canlı `paper.db` dosyasına yazılmaz.
+
 ```mermaid
 flowchart LR
     B[Fresh closed 15M bar] --> I[Bollinger RSI ATR SMA50]

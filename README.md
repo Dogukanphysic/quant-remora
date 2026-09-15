@@ -260,6 +260,19 @@ Model ayrı artifact üretir, `deployed=false` kalır ve validation kapıları g
 çalışan paper agente yüklenmez. Ayrıntılar ve ilk ölçüm
 `reports/binance-data-integration.md` içindedir.
 
+Funding, open interest, genel/top-trader oranları, taker akışı ve rejim ablation'ı:
+
+```powershell
+python agent.py binance-derivatives-download --symbol BTCUSDT --start 2025-09-01 --end 2026-08-31
+python agent.py train-remora-binance-derivatives --spot-data data/binance-spot-btcusdt-15m-1y.csv --futures-data data/binance-um-btcusdt-15m-1y.csv --samples 1000
+python agent.py research-remora-binance-exits --futures-data data/binance-um-btcusdt-15m-1y.csv --sample-cache reports/remora-binance-derivatives-training-samples-1000.json
+```
+
+Metrics/funding dosyaları checksum doğrulanır. Eğitim eşit olay bütçeli ablation ve
+çıkış araştırması geliştirme–seçim–holdout ayrımı kullanır. İlk bir yıllık araştırma
+türev özelliklerinin Brier skorunu iyileştirdiğini, fakat maliyet sonrası işlem
+avantajı üretmediğini gösterdi; bu nedenle artifact aktif değildir.
+
 ## Ölçülen v2 sonucu
 
 Aktif eğitim verisi 31 Aralık 2020 00:15 UTC ile 14 Eylül 2026 08:00 UTC arasındaki

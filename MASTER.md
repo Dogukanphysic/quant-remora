@@ -359,6 +359,14 @@ edilen işlem sıfır olduğu için model deploy edilmedi. Bu süreç gerçek em
 anahtarı veya çalışan paper sermayesini kullanmaz. Ayrıntılı sözleşme ve komutlar
 `reports/binance-data-integration.md` içindedir.
 
+Bir yıllık funding/OI/oran araştırması 1.000 ortak olay üzerinde türev özelliklerinin
+Brier skorunu `0,158690` kontrolden `0,156937` değerine indirdiğini gösterdi. Buna
+rağmen sınıflandırma ve doğrudan net-getiri Ridge modelleri kabul edilebilir işlem
+üretmedi. 114 stop/target/horizon kombinasyonunun hiçbiri geliştirme ve seçim
+dönemlerinde birlikte pozitif stresli getiri ve 1,2 profit factor kapısını geçmedi.
+Bu nedenle StochRSI tetik ailesi korunmuş bir kontrol olarak kaldı; Binance türev
+artifact'i paper veya gerçek sermayeye geçirilmedi.
+
 ## 11. Sermaye ve risk politikası
 
 Altı defterin toplam nominal başlangıcı 1.000 USD'dir. V2 geçişi defterleri sıfırlamaz.

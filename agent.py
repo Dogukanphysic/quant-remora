@@ -347,6 +347,30 @@ def main():
     binance_blend.add_argument('--samples', type=int, default=400)
     binance_blend.add_argument('--model', type=Path)
     binance_blend.add_argument('--report', type=Path)
+    binance_derivatives = sub.add_parser(
+        'binance-derivatives-download',
+        help='Checksum doğrulamalı funding ve günlük futures metrics indir')
+    binance_derivatives.add_argument('--symbol', default='BTCUSDT')
+    binance_derivatives.add_argument('--start', required=True, help='UTC YYYY-MM-DD')
+    binance_derivatives.add_argument('--end', required=True, help='UTC YYYY-MM-DD, dahil')
+    binance_derivatives.add_argument('--metrics-out', type=Path)
+    binance_derivatives.add_argument('--funding-out', type=Path)
+    binance_derivatives_train = sub.add_parser(
+        'train-remora-binance-derivatives',
+        help='Basis, funding, OI, oran ve rejim ablation challengerlarını eğit')
+    binance_derivatives_train.add_argument('--spot-data', type=Path, required=True)
+    binance_derivatives_train.add_argument('--futures-data', type=Path, required=True)
+    binance_derivatives_train.add_argument('--metrics-data', type=Path)
+    binance_derivatives_train.add_argument('--funding-data', type=Path)
+    binance_derivatives_train.add_argument('--samples', type=int, default=400)
+    binance_derivatives_train.add_argument('--model', type=Path)
+    binance_derivatives_train.add_argument('--report', type=Path)
+    exit_search = sub.add_parser(
+        'research-remora-binance-exits',
+        help='Remora stop/target/horizon politikasını embargo ve holdout ile araştır')
+    exit_search.add_argument('--futures-data', type=Path, required=True)
+    exit_search.add_argument('--sample-cache', type=Path, required=True)
+    exit_search.add_argument('--report', type=Path)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -528,6 +552,74 @@ def main():
             'samples': result['samples'], 'validation': state.get('validation'),
             'deployed': result['deployed'], 'model': str(model.resolve()),
             'report': str(report.resolve()),
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-derivatives-download':
+        import binance_derivatives
+        metrics_out = args.metrics_out or binance_derivatives.DEFAULT_METRICS_DATA
+        funding_out = args.funding_out or binance_derivatives.DEFAULT_FUNDING_DATA
+        metrics = binance_derivatives.download_metrics(
+            args.symbol, args.start, args.end, metrics_out)
+        funding = binance_derivatives.download_funding(
+            args.symbol, args.start[:7], args.end[:7], funding_out)
+        print(json.dumps({
+            'metrics': metrics, 'funding': funding,
+            'real_orders_enabled': False,
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'train-remora-binance-derivatives':
+        import binance_derivatives
+        metrics = args.metrics_data or binance_derivatives.DEFAULT_METRICS_DATA
+        funding = args.funding_data or binance_derivatives.DEFAULT_FUNDING_DATA
+        model = args.model or binance_derivatives.DEFAULT_MODEL
+        report = args.report or binance_derivatives.DEFAULT_REPORT
+        result = binance_derivatives.train_derivatives_offline(
+            args.spot_data, args.futures_data, metrics, funding,
+            model, report, args.samples)
+        summary = {
+            name: {
+                'brier': item['model_state'].get('validation', {}).get('brier'),
+                'baseline_brier': item['model_state'].get('validation', {}).get('baseline_brier'),
+                'accepted': item['model_state'].get('validation', {}).get('accepted'),
+                'quality_pass': item['model_state'].get('validation', {}).get('quality_pass'),
+            }
+            for name, item in result['evaluations'].items()
+        }
+        return_summary = {
+            name: {
+                'accepted': item['accepted'],
+                'stressed_sum_trade_returns': item['stressed_sum_trade_returns'],
+                'quality_pass': item['quality_pass'],
+            }
+            for name, item in result['return_evaluations'].items()
+        }
+        print(json.dumps({
+            'kind': result['kind'], 'candles': result['candles'],
+            'matched_samples': result['matched_samples'],
+            'best_brier_variant': result['best_brier_variant'],
+            'best_return_variant': result['best_return_variant'],
+            'return_candidate_quality_pass': result['return_candidate_quality_pass'],
+            'research_quality_candidate': result['research_quality_candidate'],
+            'selected_for_forward_shadow': result['selected_for_forward_shadow'],
+            'deployed': result['deployed'], 'evaluations': summary,
+            'return_evaluations': return_summary,
+            'model': str(model.resolve()), 'report': str(report.resolve()),
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'research-remora-binance-exits':
+        import binance_derivatives
+        report_path = args.report or binance_derivatives.DEFAULT_EXIT_REPORT
+        result = binance_derivatives.search_exit_policies(
+            args.futures_data, args.sample_cache, report_path)
+        print(json.dumps({
+            'kind': result['kind'], 'events': result['events'],
+            'grid_candidates': result['grid_candidates'],
+            'segments': result['segments'],
+            'eligible_before_holdout': result['eligible_before_holdout'],
+            'selected_policy': result['selected_policy'],
+            'holdout': result['holdout'], 'holdout_pass': result['holdout_pass'],
+            'deployable': result['deployable'],
+            'report': str(report_path.resolve()),
         }, indent=2, ensure_ascii=False))
         return
     if args.command.startswith('learn-'):
