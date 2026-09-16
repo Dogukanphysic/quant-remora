@@ -331,6 +331,12 @@ Worker, artifact bulunduğunda `low_frequency_shadow_state`,
 yalnız aktivasyondan sonraki tam UTC günlük kapanışları izler. İlk yüklemede geçmiş
 günlere forward sonucu yazmaz.
 
+`binance_execution.py` yalnız Spot Testnet taban URL'sini kabul eden fail-closed emir
+adapterıdır. İmzalı istekler HMAC-SHA256, 5 saniye `recvWindow`, ortam değişkeninden
+kimlik bilgisi ve benzersiz `newClientOrderId` kullanır. Public doctor `exchangeInfo`
+filtrelerini doğrular; özel yollar hesap, açık emir, `/order/test` ve 5–25 USDT ile
+sınırlı market buy sağlar. Gerçek Binance URL'si kod tarafından reddedilir.
+
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş
 sahte değerlerle doldurulmaz.

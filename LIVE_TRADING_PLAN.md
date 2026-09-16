@@ -70,6 +70,11 @@ zaman senkronizasyonu, tekrar gönderim ve yeniden başlatma senaryoları test e
 
 Bu aşama tamamlanmadan API anahtarıyla gerçek emir yolu eklenmez.
 
+Binance Spot Testnet adapterı 16 Eylül'de eklendi. Public bağlantı, BTCUSDT `TRADING`
+durumu, `LOT_SIZE`, `NOTIONAL` ve sunucu saat farkı doğrulandı. İmzalı hesap,
+`/order/test` ve gerçek Testnet emir kontrolleri Testnet API anahtarı beklemektedir;
+gerçek para URL'si desteklenmez.
+
 ## Aşama 4 — gerçek mikro sermaye
 
 Gerçek geçiş ayrı bir kullanıcı onayı ve yeni kod sürümü gerektirir. Başlangıçta:

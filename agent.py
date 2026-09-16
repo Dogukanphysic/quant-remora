@@ -383,6 +383,16 @@ def main():
     low_frequency.add_argument('--bitstamp-data', type=Path, required=True)
     low_frequency.add_argument('--report', type=Path)
     low_frequency.add_argument('--model', type=Path)
+    sub.add_parser('binance-execution-doctor',
+                   help='Binance Spot Testnet public bağlantı ve BTCUSDT filtrelerini doğrula')
+    sub.add_parser('binance-testnet-account',
+                   help='Ortam değişkenlerindeki Testnet anahtarıyla bakiye ve açık emirleri uzlaştır')
+    order_check = sub.add_parser('binance-testnet-order-check',
+                                 help='Emir oluşturmadan Binance /order/test doğrulaması yap')
+    order_check.add_argument('--quote-usdt', type=float, default=5.0)
+    testnet_buy = sub.add_parser('binance-testnet-buy',
+                                 help='Yalnız açık çevre anahtarıyla Testnet market BUY gönder')
+    testnet_buy.add_argument('--quote-usdt', type=float, default=5.0)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -667,6 +677,28 @@ def main():
             'report': str(report_path.resolve()),
             'model': str(model_path.resolve()),
         }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-execution-doctor':
+        import binance_execution
+        print(json.dumps(binance_execution.public_doctor(), indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-testnet-account':
+        import binance_execution
+        client = binance_execution.Client()
+        print(json.dumps({"account": client.account(), "open_orders": client.open_orders(),
+                          "real_money_supported": False}, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-testnet-order-check':
+        import binance_execution
+        result = binance_execution.Client().test_market_buy(args.quote_usdt)
+        print(json.dumps({"validated": True, "order_created": False,
+                          "response": result}, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'binance-testnet-buy':
+        import binance_execution
+        result = binance_execution.Client().place_market_buy(args.quote_usdt)
+        print(json.dumps({"environment": "testnet", "order": result,
+                          "real_money": False}, indent=2, ensure_ascii=False))
         return
     if args.command.startswith('learn-'):
         import paper, learning

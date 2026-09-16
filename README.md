@@ -295,6 +295,24 @@ olarak dondurur. Bundan sonraki her yeni günlük kapanışta 30 günlük moment
 önceden kaydeder ve long/nakit geçişlerini maliyetli forward shadow execution olarak
 izler. Bu defter sanal bakiyeyi değiştirmez.
 
+## Binance Spot Testnet yürütmesi
+
+Gerçek para desteği kapalıdır. Adapter yalnız `https://testnet.binance.vision/api`
+adresini kabul eder; HMAC imzası, hesap/açık emir uzlaştırması, `/order/test`, benzersiz
+istemci emir kimliği ve 5–25 USDT Testnet emir tavanı uygular.
+
+```powershell
+python agent.py binance-execution-doctor
+python agent.py binance-testnet-account
+python agent.py binance-testnet-order-check --quote-usdt 5
+$env:BINANCE_ORDER_EXECUTION_ENABLED='testnet'
+python agent.py binance-testnet-buy --quote-usdt 5
+```
+
+Anahtarlar yalnız `BINANCE_TESTNET_API_KEY` ve `BINANCE_TESTNET_SECRET_KEY` ortam
+değişkenlerinden okunur; dosyaya veya loga yazılmaz. Son komut ancak yürütme ortam
+değişkeni tam olarak `testnet` ise emir gönderebilir.
+
 ## Ölçülen v2 sonucu
 
 Aktif eğitim verisi 31 Aralık 2020 00:15 UTC ile 14 Eylül 2026 08:00 UTC arasındaki
