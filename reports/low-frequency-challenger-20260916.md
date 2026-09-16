@@ -30,3 +30,8 @@ bütün dönem sonuçlarını gördü; dolayısıyla bunlar bağımsız gelecek 
 Artifact `forward_shadow_candidate=true` olarak kaydedilir, fakat `deployed=false`,
 `capital_enabled=false` ve `real_orders_enabled=false` kalır. Terfi için bundan sonra
 oluşacak yeni günlük kararların önceden kaydedilmiş ileri sonuçları gerekir.
+
+Worker aktivasyonda son tamamlanmış UTC gününü sınır olarak kaydeder. Yalnız sonraki
+günlük kapanışlar `low_frequency_shadow_decisions` tablosuna girer; long/nakit
+geçişleri `low_frequency_shadow_executions` içinde maliyetli olarak izlenir. Bu
+shadow kayıtları ana veya V3 sanal bakiyesini değiştirmez.

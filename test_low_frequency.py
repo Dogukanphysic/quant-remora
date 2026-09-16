@@ -25,6 +25,15 @@ class LowFrequencyTests(unittest.TestCase):
         closes = [100 + index * 0.1 for index in range(500)]
         self.assertEqual(len(low_frequency.configurations(closes)), 281)
 
+    def test_frozen_daily_signal_uses_thirty_day_return(self):
+        bars = [{"close": 100.0, "ts": index * low_frequency.DAY_MS}
+                for index in range(31)]
+        bars[-1]["close"] = 121.0
+        rule = {"family": "momentum", "lookback": 30, "threshold": 0.2}
+        signal, momentum = low_frequency.daily_signal(bars, rule)
+        self.assertEqual(signal, 1)
+        self.assertAlmostEqual(momentum, 0.21)
+
 
 if __name__ == "__main__":
     unittest.main()

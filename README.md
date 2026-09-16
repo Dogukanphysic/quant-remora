@@ -290,6 +290,11 @@ pozitif kaldı. Binance toplam PF `1,496`, Bitstamp PF `1,428` oldu. Bütün tar
 görüldüğü için sonuç yalnız `forward_shadow_candidate=true`; sermaye ve gerçek emir
 kapalıdır.
 
+Worker düşük frekanslı artifact mevcutsa son tamamlanmış UTC gününü aktivasyon sınırı
+olarak dondurur. Bundan sonraki her yeni günlük kapanışta 30 günlük momentumu
+önceden kaydeder ve long/nakit geçişlerini maliyetli forward shadow execution olarak
+izler. Bu defter sanal bakiyeyi değiştirmez.
+
 ## Ölçülen v2 sonucu
 
 Aktif eğitim verisi 31 Aralık 2020 00:15 UTC ile 14 Eylül 2026 08:00 UTC arasındaki

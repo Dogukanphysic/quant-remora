@@ -26,6 +26,7 @@ import v2_model
 import v2_store
 import v2_challengers
 import paper_v3
+import low_frequency
 
 
 ROOT = Path(__file__).resolve().parent
@@ -680,6 +681,7 @@ def tick(db: sqlite3.Connection, q: Mapping[str, float],
     pristine_initialization = _is_pristine_v2_session(db)
     v2_challengers.paper_tick(db, q, int(round(now * 1000)))
     paper_v3.tick(db, q, rows, int(round(now * 1000)))
+    low_frequency.tick_shadow(db, q, rows, int(round(now * 1000)))
 
     day = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
     candle = int(rows[-1]['ts']) if rows else None
@@ -928,6 +930,7 @@ def status(db: sqlite3.Connection) -> dict[str, object]:
         'shadow_learning': v2_store.status(db),
         'challengers': v2_challengers.status(db),
         'v3_test': paper_v3.status(db),
+        'low_frequency_challenger': low_frequency.shadow_status(db),
         'automatic_retraining': auto_retrain_status(db, artifact),
         'model': model_summary,
     }

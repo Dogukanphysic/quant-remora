@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sqlite3
 import statistics
 from typing import Mapping, Sequence
 
@@ -17,6 +18,8 @@ DEFAULT_REPORT = ROOT / "reports/low-frequency-challenger.json"
 DEFAULT_MODEL = ROOT / "state/low-frequency-challenger.json"
 DAY_MS = 86_400_000
 ONE_WAY_STRESSED_COST = 0.002
+BITSTAMP_HISTORY = ROOT / "data/bitstamp-btc-usd-15m-200000.csv"
+_HISTORICAL_DAILY: list[dict[str, float | int]] | None = None
 
 
 def resample_daily(rows: Sequence[Mapping[str, object]]) -> list[dict[str, float | int]]:
@@ -118,6 +121,135 @@ def positions_for(rule: Mapping[str, object], closes: Sequence[float]) -> list[i
         if candidate == dict(rule):
             return positions
     raise ValueError("Low-frequency rule is outside the registered search space.")
+
+
+def daily_signal(bars: Sequence[Mapping[str, object]], rule: Mapping[str, object]) -> tuple[int, float]:
+    if rule != {"family": "momentum", "lookback": 30, "threshold": 0.2}:
+        raise ValueError("Forward shadow supports only the frozen selected rule.")
+    if len(bars) < 31:
+        raise ValueError("Forward shadow needs 31 complete daily bars.")
+    momentum = float(bars[-1]["close"]) / float(bars[-31]["close"]) - 1
+    return int(momentum > 0.20), momentum
+
+
+def ensure_shadow_tables(db: sqlite3.Connection) -> None:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS low_frequency_shadow_state (
+            id INTEGER PRIMARY KEY CHECK(id=1), model_version TEXT NOT NULL,
+            activated_ts INTEGER NOT NULL, last_day INTEGER NOT NULL,
+            position INTEGER NOT NULL CHECK(position IN (0,1)),
+            entry_day INTEGER, entry_cost REAL)
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS low_frequency_shadow_decisions (
+            day_ts INTEGER PRIMARY KEY, model_version TEXT NOT NULL,
+            close REAL NOT NULL, momentum REAL NOT NULL,
+            desired_position INTEGER NOT NULL CHECK(desired_position IN (0,1)),
+            created_ts INTEGER NOT NULL)
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS low_frequency_shadow_executions (
+            entry_day INTEGER PRIMARY KEY, model_version TEXT NOT NULL,
+            exit_day INTEGER, entry_cost REAL NOT NULL, exit_proceeds REAL,
+            net_return REAL, status TEXT NOT NULL CHECK(status IN ('open','closed')),
+            created_ts INTEGER NOT NULL, updated_ts INTEGER NOT NULL)
+    """)
+
+
+def _artifact() -> dict[str, object] | None:
+    if not DEFAULT_MODEL.exists():
+        return None
+    value = json.loads(DEFAULT_MODEL.read_text(encoding="utf-8"))
+    return value if value.get("forward_shadow_candidate") else None
+
+
+def _daily_history(live_rows: Sequence[Mapping[str, object]]) -> list[dict[str, float | int]]:
+    global _HISTORICAL_DAILY
+    if _HISTORICAL_DAILY is None:
+        if not BITSTAMP_HISTORY.exists():
+            raise ValueError("Bitstamp history is missing for low-frequency shadow.")
+        import agent
+        _HISTORICAL_DAILY = resample_daily(agent.read_dataset(BITSTAMP_HISTORY))
+    merged = {int(bar["ts"]): bar for bar in _HISTORICAL_DAILY}
+    merged.update({int(bar["ts"]): bar for bar in resample_daily(live_rows)})
+    return [merged[key] for key in sorted(merged)]
+
+
+def tick_shadow(db: sqlite3.Connection, quote: Mapping[str, object],
+                live_rows: Sequence[Mapping[str, object]] | None, now_ms: int) -> None:
+    artifact = _artifact()
+    if artifact is None or not live_rows:
+        return
+    ensure_shadow_tables(db)
+    bars = _daily_history(live_rows)
+    desired, momentum = daily_signal(bars, artifact["rule"])
+    latest_day = int(bars[-1]["ts"])
+    state = db.execute(
+        "SELECT model_version,last_day,position,entry_day,entry_cost "
+        "FROM low_frequency_shadow_state WHERE id=1").fetchone()
+    if state is None or str(state[0]) != str(artifact["model_version"]):
+        with db:
+            db.execute("DELETE FROM low_frequency_shadow_state")
+            db.execute(
+                "INSERT INTO low_frequency_shadow_state VALUES (1,?,?,?,?,NULL,NULL)",
+                (artifact["model_version"], now_ms, latest_day, 0))
+        return
+    if latest_day <= int(state[1]):
+        return
+    from v2_engine import DEFAULT_COST
+    bid, ask = float(quote["bid"]), float(quote["ask"])
+    fee, slip = DEFAULT_COST.fee_each_side, DEFAULT_COST.slippage_each_side
+    position, entry_day, entry_cost = int(state[2]), state[3], state[4]
+    with db:
+        db.execute(
+            "INSERT OR IGNORE INTO low_frequency_shadow_decisions VALUES (?,?,?,?,?,?)",
+            (latest_day, artifact["model_version"], float(bars[-1]["close"]),
+             momentum, desired, now_ms))
+        if desired and not position:
+            entry_cost = ask * (1 + slip) * (1 + fee)
+            entry_day = latest_day
+            position = 1
+            db.execute(
+                "INSERT INTO low_frequency_shadow_executions VALUES "
+                "(?,?,NULL,?,NULL,NULL,'open',?,?)",
+                (entry_day, artifact["model_version"], entry_cost, now_ms, now_ms))
+        elif not desired and position:
+            proceeds = bid * (1 - slip) * (1 - fee)
+            net_return = proceeds / float(entry_cost) - 1
+            db.execute(
+                "UPDATE low_frequency_shadow_executions SET exit_day=?,exit_proceeds=?,"
+                "net_return=?,status='closed',updated_ts=? WHERE entry_day=? AND status='open'",
+                (latest_day, proceeds, net_return, now_ms, entry_day))
+            position, entry_day, entry_cost = 0, None, None
+        db.execute(
+            "UPDATE low_frequency_shadow_state SET last_day=?,position=?,entry_day=?,entry_cost=? WHERE id=1",
+            (latest_day, position, entry_day, entry_cost))
+
+
+def shadow_status(db: sqlite3.Connection) -> dict[str, object]:
+    artifact = _artifact()
+    if artifact is None:
+        return {"status": "unavailable", "capital_enabled": False,
+                "real_orders_enabled": False}
+    ensure_shadow_tables(db)
+    state = db.execute(
+        "SELECT activated_ts,last_day,position,entry_day FROM low_frequency_shadow_state WHERE id=1"
+    ).fetchone()
+    counts = db.execute(
+        "SELECT COUNT(*),COALESCE(SUM(status='closed'),0),"
+        "COALESCE(SUM(CASE WHEN status='closed' THEN net_return ELSE 0 END),0) "
+        "FROM low_frequency_shadow_executions").fetchone()
+    return {
+        "status": "forward_shadow" if state else "ready_to_activate",
+        "model_version": artifact["model_version"], "rule": artifact["rule"],
+        "activated_ts": None if state is None else int(state[0]),
+        "last_day": None if state is None else int(state[1]),
+        "position": None if state is None else ("long" if state[2] else "cash"),
+        "entry_day": None if state is None or state[3] is None else int(state[3]),
+        "execution_records": int(counts[0]), "closed_executions": int(counts[1]),
+        "sum_net_return": float(counts[2]), "capital_enabled": False,
+        "real_orders_enabled": False,
+    }
 
 
 def metrics(closes: Sequence[float], positions: Sequence[int], start: int, end: int) -> dict[str, object]:
@@ -236,4 +368,5 @@ def research(binance_path: Path, bitstamp_path: Path, report_path: Path = DEFAUL
 
 
 __all__ = ["DEFAULT_REPORT", "DEFAULT_MODEL", "ONE_WAY_STRESSED_COST",
-           "resample_daily", "configurations", "positions_for", "metrics", "research"]
+           "resample_daily", "configurations", "positions_for", "daily_signal",
+           "metrics", "research", "ensure_shadow_tables", "tick_shadow", "shadow_status"]

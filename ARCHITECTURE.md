@@ -326,6 +326,10 @@ dahil ileri öğrenme örnekleri üretir. Gerçek emir yolu yoktur.
 long/cash kuralını seçer ve seçilen tek kuralı Bitstamp günlük verisinde sabit çapraz
 kontrolden geçirir. Üretilen artifact tüm tarih görüldüğü için yalnız forward shadow
 adayıdır; `deployed=false`, `capital_enabled=false` ve `real_orders_enabled=false`.
+Worker, artifact bulunduğunda `low_frequency_shadow_state`,
+`low_frequency_shadow_decisions` ve `low_frequency_shadow_executions` tablolarıyla
+yalnız aktivasyondan sonraki tam UTC günlük kapanışları izler. İlk yüklemede geçmiş
+günlere forward sonucu yazmaz.
 
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş
