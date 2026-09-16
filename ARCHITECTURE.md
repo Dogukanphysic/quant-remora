@@ -317,9 +317,15 @@ süre dört mumdur. Günlük %2 ve toplam %8 kesici uygulanır. 200.000 mumluk
 kronolojik maliyet testi negatiftir; kullanıcı bu bulgudan sonra yalnız ileri sanal
 mikro risk için açık yetki verdi. Fail-closed toplama döneminden sonra kullanıcı
 15 Eylül'de sanal bakiye riskinin artırılmasını istedi;
-`CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` yapıldı. Maliyet, teyit, cooldown, tek
-pozisyon ve kayıp kesicileri her girişte uygulanır. H8 probe hattı bağımsız çalışır
-ve maliyet dahil ileri öğrenme örnekleri üretir. Gerçek emir yolu yoktur.
+29 ileri probe'un PF değeri `0,101` kaldığı için 16 Eylül'de
+`ENTRY_QUARANTINED=true` ve `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. Eski 15m
+long ailesi artık sermaye işlemi açmaz. H8 probe hattı bağımsız çalışır ve maliyet
+dahil ileri öğrenme örnekleri üretir. Gerçek emir yolu yoktur.
+
+`low_frequency.py`, beş yıllık Binance USD-M günlük mumlarında 281 düşük frekanslı
+long/cash kuralını seçer ve seçilen tek kuralı Bitstamp günlük verisinde sabit çapraz
+kontrolden geçirir. Üretilen artifact tüm tarih görüldüğü için yalnız forward shadow
+adayıdır; `deployed=false`, `capital_enabled=false` ve `real_orders_enabled=false`.
 
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş

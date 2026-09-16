@@ -376,6 +376,13 @@ def main():
         help='Beş yıllık USD-M veride maliyet stresli 4H trend ailelerini araştır')
     long_horizon.add_argument('--data', type=Path, required=True)
     long_horizon.add_argument('--report', type=Path)
+    low_frequency = sub.add_parser(
+        'research-low-frequency-challenger',
+        help='Günlük düşük frekanslı long/cash ailelerini Binance seçimi ve Bitstamp çapraz kontrolüyle araştır')
+    low_frequency.add_argument('--binance-data', type=Path, required=True)
+    low_frequency.add_argument('--bitstamp-data', type=Path, required=True)
+    low_frequency.add_argument('--report', type=Path)
+    low_frequency.add_argument('--model', type=Path)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -640,6 +647,25 @@ def main():
             'holdout_pass': result['holdout_pass'],
             'deployed': result['deployed'],
             'report': str(report_path.resolve()),
+        }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'research-low-frequency-challenger':
+        import low_frequency
+        report_path = args.report or low_frequency.DEFAULT_REPORT
+        model_path = args.model or low_frequency.DEFAULT_MODEL
+        result = low_frequency.research(
+            args.binance_data, args.bitstamp_data, report_path, model_path)
+        print(json.dumps({
+            'kind': result['kind'],
+            'configuration_count': result['configuration_count'],
+            'selected': result['selected'],
+            'external_bitstamp': result['external_bitstamp'],
+            'status': result['status'],
+            'forward_shadow_candidate': result['forward_shadow_candidate'],
+            'deployed': result['deployed'],
+            'capital_enabled': result['capital_enabled'],
+            'report': str(report_path.resolve()),
+            'model': str(model_path.resolve()),
         }, indent=2, ensure_ascii=False))
         return
     if args.command.startswith('learn-'):

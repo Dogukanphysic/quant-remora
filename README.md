@@ -219,9 +219,10 @@ Bu sonuç bildirildikten sonra kullanıcı, 14 Eylül 2026'da yalnız ileri sana
 toplamak için sınırlı mikro riski açıkça yetkilendirdi. Sonraki Binance türev ve beş
 yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için sermaye bir süre
 fail-closed tutuldu. Kullanıcı 15 Eylül'de daha yüksek sanal riski açıkça istedi;
-V3 stop riski `%0,15`, tahsis tavanı `%12` ve
-`CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` olarak ayarlandı. Günlük `%2`, toplam `%8`,
-tek pozisyon ve maliyet kapıları korunur. 1 USD'lik bağımsız H8 probe'lar öğrenme
+V3 stop riski `%0,15`, tahsis tavanı `%12` olarak denendi. 29 ileri probe sonunda
+`PF=0,101` ve toplam `-%11,28` net probe getirisi görüldüğü için 16 Eylül'de bu
+sermaye sinyal ailesi emekliye ayrıldı; `ENTRY_QUARANTINED=true` ve
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. 1 USD'lik bağımsız H8 probe'lar öğrenme
 kanıtı toplamaya devam eder. Yeni kararların 22 nedensel özelliği probe sonucu ile otomatik
 eşlenir; model yeterli ileri örnek oluşana kadar `collecting` kalır. Ayrıntılı kanıt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
@@ -274,12 +275,20 @@ python agent.py binance-derivatives-download --symbol BTCUSDT --start 2025-09-01
 python agent.py train-remora-binance-derivatives --spot-data data/binance-spot-btcusdt-15m-1y.csv --futures-data data/binance-um-btcusdt-15m-1y.csv --samples 1000
 python agent.py research-remora-binance-exits --futures-data data/binance-um-btcusdt-15m-1y.csv --sample-cache reports/remora-binance-derivatives-training-samples-1000.json
 python agent.py research-binance-long-horizon --data data/binance-um-btcusdt-15m-5y.csv
+python agent.py research-low-frequency-challenger --binance-data data/binance-um-btcusdt-15m-5y.csv --bitstamp-data data/bitstamp-btc-usd-15m-200000.csv
 ```
 
 Metrics/funding dosyaları checksum doğrulanır. Eğitim eşit olay bütçeli ablation ve
 çıkış araştırması geliştirme–seçim–holdout ayrımı kullanır. İlk bir yıllık araştırma
 türev özelliklerinin Brier skorunu iyileştirdiğini, fakat maliyet sonrası işlem
 avantajı üretmediğini gösterdi; bu nedenle artifact aktif değildir.
+
+Günlük düşük frekanslı challenger 281 long/cash kuralını `%0,20` tek yön stresli
+maliyetle tarar. Seçilen `30 günlük momentum > %20` kuralı Binance'in beş döneminin
+beşinde pozitif, sabit kural olarak Bitstamp çapraz kontrolünün beş döneminin dördünde
+pozitif kaldı. Binance toplam PF `1,496`, Bitstamp PF `1,428` oldu. Bütün tarih
+görüldüğü için sonuç yalnız `forward_shadow_candidate=true`; sermaye ve gerçek emir
+kapalıdır.
 
 ## Ölçülen v2 sonucu
 

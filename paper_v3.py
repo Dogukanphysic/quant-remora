@@ -37,9 +37,10 @@ PROBE_HORIZON_BARS = 8
 # The 200,000-candle replay was negative. After reviewing that result and the
 # fail-closed collection period, the user explicitly authorized a slightly
 # larger bounded paper trial on 2026-09-15. All loss guards remain active.
-ENTRY_QUARANTINED = False
+ENTRY_QUARANTINED = True
+ENTRY_QUARANTINE_REASON = "negative_forward_probe_edge_29_samples_pf_0_101"
 ENTRY_AUTHORIZATION = "user_authorized_higher_forward_paper_risk_2026-09-15"
-CAPITAL_REQUIRES_ELIGIBLE_MODEL = False
+CAPITAL_REQUIRES_ELIGIBLE_MODEL = True
 
 
 def ensure_tables(db: sqlite3.Connection) -> None:
@@ -963,7 +964,7 @@ def tick(
                     elif cooldown:
                         actual_reason = cooldown_reason
                     elif ENTRY_QUARANTINED:
-                        actual_reason = "v3_historical_edge_not_validated"
+                        actual_reason = "v3_negative_forward_probe_edge"
                     elif not model_pass:
                         actual_reason = "remora_model_" + model_reason
                     elif spread > MAX_ENTRY_SPREAD:
@@ -1082,7 +1083,8 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
             ],
             "system_state": (
                 "CIRCUIT_BREAKER" if state["daily_halt"] or state["drawdown_halt"]
-                else "PAUSED" if not state["enabled"] or ENTRY_QUARANTINED
+                else "RETIRED" if ENTRY_QUARANTINED
+                else "PAUSED" if not state["enabled"]
                 else "LEARNING" if (
                     CAPITAL_REQUIRES_ELIGIBLE_MODEL
                     and not bool(remora_model.get("eligible")))
@@ -1095,8 +1097,7 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
                     and not bool(remora_model.get("eligible")))
             ),
             "entry_quarantine_reason": (
-                "negative_200k_chronological_replay_after_costs"
-                if ENTRY_QUARANTINED else None
+                ENTRY_QUARANTINE_REASON if ENTRY_QUARANTINED else None
             ) or (
                 "forward_model_not_eligible"
                 if CAPITAL_REQUIRES_ELIGIBLE_MODEL
@@ -1168,7 +1169,8 @@ __all__ = [
     "STOP_ATR", "TARGET_ATR", "MAX_HOLD_BARS", "MIN_TARGET_NET_RETURN",
     "MIN_NET_REWARD_RISK", "LOSS_COOLDOWN_BARS", "LOSS_STREAK_COOLDOWN_BARS",
     "BREAKEVEN_ARM_NET_RETURN", "PROBE_NOTIONAL_USD", "PROBE_HORIZON_BARS",
-    "ENTRY_QUARANTINED", "ENTRY_AUTHORIZATION", "CAPITAL_REQUIRES_ELIGIBLE_MODEL",
+    "ENTRY_QUARANTINED", "ENTRY_QUARANTINE_REASON", "ENTRY_AUTHORIZATION",
+    "CAPITAL_REQUIRES_ELIGIBLE_MODEL",
     "ensure_tables", "enable", "disable", "decide", "tick", "status",
     "learning_samples", "seed_historical_samples",
 ]

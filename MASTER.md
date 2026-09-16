@@ -332,8 +332,11 @@ sanal risk alınmasını açıkça istedi ve yetki
 türev, çıkış ve beş yıllık trend araştırmaları da sermaye avantajı doğrulamadığı için
 sermaye bir süre fail-closed tutuldu. Kullanıcı 15 Eylül'de sanal bakiye riskinin
 biraz artırılarak devam edilmesini açıkça istedi. Stop riski `%0,15`, tahsis tavanı
-`%12` yapıldı ve `CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` olarak kaydedildi. Günlük
-`%2`, toplam `%8`, maliyet, tek pozisyon ve bekleme korumaları devam eder. 1 USD'lik
+`%12` ile ileri denendi. 29 probe sonunda kazanma oranı `%24,1`, PF `0,101` ve toplam
+net probe getirisi `-%11,28` olduğu için kullanıcı talebiyle 16 Eylül'de mevcut long
+sermaye ailesi emekliye ayrıldı. `ENTRY_QUARANTINED=true` ve
+`CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. Günlük `%2`, toplam `%8`, maliyet,
+tek pozisyon ve bekleme korumaları devam eder. 1 USD'lik
 H8 probe'lar ayrıca veri toplamayı sürdürür. Kanıt ve önceki karar
 `reports/v3-loss-analysis-20260914.md` içindedir.
 
@@ -375,6 +378,15 @@ rağmen sınıflandırma ve doğrudan net-getiri Ridge modelleri kabul edilebili
 dönemlerinde birlikte pozitif stresli getiri ve 1,2 profit factor kapısını geçmedi.
 Bu nedenle StochRSI tetik ailesi korunmuş bir kontrol olarak kaldı; Binance türev
 artifact'i paper veya gerçek sermayeye geçirilmedi.
+
+16 Eylül'de ayrı günlük düşük frekans araştırması 281 EMA, momentum, Donchian ve SMA
+long/cash kuralını tek yön `%0,20` stresli maliyetle taradı. Binance seçimi `30 günlük
+momentum > %20` kuralını buldu: beş eşit dönemin beşi pozitif, toplam getiri `%111,86`,
+Sharpe `0,941`, PF `1,496`, azami düşüş `%20,63`. Aynı sabit kural Bitstamp verisinde
+beş dönemin dördünde pozitif, toplam getiri `%168,69`, Sharpe `0,926`, PF `1,428`,
+azami düşüş `%21,31` üretti. Araştırmacı bütün tarih sonuçlarını gördüğü için bu bir
+terfi kanıtı değildir; artifact yalnız `forward_shadow_candidate=true`, sermaye ve
+gerçek emir kapalıdır. Ayrıntı `reports/low-frequency-challenger-20260916.md` içindedir.
 
 Beş yıllık kesintisiz Binance USD-M arşivinde 175.296 adet 15m mum, 10.956 tam 4H
 muma dönüştürüldü. Stresli tek yön maliyet `%0,20` ile 298 EMA, momentum ve Donchian

@@ -216,7 +216,7 @@ class PaperV3Tests(unittest.TestCase):
             "SELECT action,reason FROM v3_paper_decisions"
         ).fetchone()
         self.assertEqual(
-            row, ("blocked", "v3_historical_edge_not_validated")
+            row, ("blocked", "v3_negative_forward_probe_edge")
         )
 
     def test_collecting_model_cannot_use_capital(self):

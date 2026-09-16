@@ -39,10 +39,10 @@ Bu yol model eğitimini hızlandırır, fakat gerçekleşmiş paper execution ka
 Bu aşamada zarar oluşabilir. Amaç getiriyi varsaymak değil, maliyet sonrası avantajı
 aynı sürümle ileri veride ölçmektir.
 
-15 Eylül 2026 tarihli kullanıcı talebiyle
-`CAPITAL_REQUIRES_ELIGIBLE_MODEL=false` yapıldı. Model henüz `paper_eligible`
-olmadan bu sınırlı sanal deneme işlem açabilir; H8 probe'lar öğrenme örneklerini
-toplamayı sürdürür. Bu yetki yalnız paper hesap içindir.
+15 Eylül 2026 tarihli kullanıcı talebiyle sınırlı sanal risk artırıldı. 29 ileri
+probe sonunda PF `0,101` kaldığı için 16 Eylül'de bu sinyal ailesi emekliye ayrıldı;
+`ENTRY_QUARANTINED=true` ve `CAPITAL_REQUIRES_ELIGIBLE_MODEL=true` yapıldı. Sermaye
+işlemi açılmaz; H8 probe'lar öğrenme örneklerini toplamayı sürdürür.
 
 ## Aşama 2 — model adayı ve kilitli tekrar test
 
