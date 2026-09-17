@@ -501,7 +501,7 @@ sonucu ayrı gösterir. V1 kayıpları silinmez ve v2 başarısı gibi sunulmaz.
 | Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 0 |
 | Binance public Testnet | VPN ile bağlantı, saat, BTCUSDT ve minimum notional doğrulandı |
 | Binance imzalı Testnet | Güvenli betik tamamlandı; anahtarlar dosyaya yazılmadı |
-| Binance background worker | Eski `%20` worker güvenle durduruldu; `%10` Testnet policy ayrı, boş defterle güvenli yeniden başlatmayı bekliyor |
+| Binance background worker | `%10` Testnet policy çalışıyor; 30g momentum `%18,0901`, `long`, 1 niyet / 1 dolum, `0,00013000 BTC`, maliyet `9,96557640 USDT` |
 
 Bu tablo yerel `paper-status`, public Binance doctor ve operatörün imzalı Testnet
 doğrulama sonucuna dayanır. Daha sonraki canlı durum için `paper-status` ve
