@@ -62,6 +62,10 @@ simülasyondur.
 | Quant Remora sinyal | `remora_signal.py` | 1H trend, 15m StochRSI, rejim, volatilite, VWAP ve açıklanabilir gate bağlamı |
 | Eğitilebilir Remora paper | `paper_v3.py` | Sınırlı mikro sanal sermaye, sonuç etiketi, model kapısı ve zarar korumaları |
 | Süreç | `paper.py` | 30 saniyelik worker, kilit, başlangıç/duruş, ortak status, legacy uyumluluk |
+| Binance veri/yürütme adapterı | `binance_execution.py` | Public Spot GET-only mumlar ile ayrı Testnet-only HMAC/emir/dolum istemcileri |
+| Binance Testnet worker | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT pozisyon, SQLite niyet defteri ve süreç kontrolü |
+| Güvenli Testnet başlatma | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi, ön kontrol, açık onay ve detached worker ortamı |
+| Testnet epoch reseti | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş dönemi aynı SQLite içinde arşivleyip temiz aktif epoch açma |
 | Kalıcılık | `state/paper.sqlite3` | Durum, olay, portföy ve ileri öğrenme kayıtları |
 
 V1 modülleri `strategies.py`, `experiment.py` ve `learning.py` geçmişi yeniden
@@ -333,9 +337,62 @@ günlere forward sonucu yazmaz.
 
 `binance_execution.py` yalnız Spot Testnet taban URL'sini kabul eden fail-closed emir
 adapterıdır. İmzalı istekler HMAC-SHA256, 5 saniye `recvWindow`, ortam değişkeninden
-kimlik bilgisi ve benzersiz `newClientOrderId` kullanır. Public doctor `exchangeInfo`
-filtrelerini doğrular; özel yollar hesap, açık emir, `/order/test` ve 5–25 USDT ile
-sınırlı market buy sağlar. Gerçek Binance URL'si kod tarafından reddedilir.
+kimlik bilgisi ve açıkça verilen `newClientOrderId` kullanır. Public doctor
+`exchangeInfo` filtrelerini doğrular; özel yollar hesap, açık emir, `/order/test`,
+istemci kimliğiyle emir sorgusu, `myTrades` dolum uzlaştırması ve 5–25 USDT ile
+sınırlı market alış/satış sağlar. Gerçek Binance URL'si kod tarafından
+reddedilir. POST sonucu belirsizse adapter otomatik tekrar göndermez.
+
+`binance_testnet_worker.py`, paper motorundan ayrı `state/binance-testnet-worker.sqlite3`
+defteri ve süreç kilidi kullanır. Bu yürütme pilotu eğitilmiş 15 dakikalık
+Bollinger modeli değildir. Negatif ileri sonucu olan V3'ten emir almaz. Sabitlenmiş
+düşük frekans adayını kullanır: Binance public Spot'tan gelen tamamlanmış UTC
+günlük mumda 30 günlük getiri `>%20` ise long, aksi halde nakit. Public veri
+istemcisi yalnız izinli `/api/v3/klines` GET yolunu açar; kimlik bilgisi, hesap veya
+emir metodu yoktur. Yalnız hedef durum değiştiğinde 10 USDT
+Testnet pozisyonu açar veya yalnız kendi dolumlarıyla edindiği BTC'yi satar.
+
+Emir niyeti POST'tan önce SQLite'a yazılır. İstemci kimliği politika, kapanmış
+mum zamanı ve yönden deterministik üretilir. Kesinti sonrası aynı POST tekrarlanmaz;
+`GET /order` ve gerektiğinde `GET /myTrades` ile dolum yeniden kurulur. Bilinmeyen
+açık emir, kimlik/sembol/yön uyuşmazlığı, yetersiz bakiye, dust veya Testnet'in
+aylık sıfırlamasına işaret eden kayıp kaynak emir yeni emri kapatır. Başlatma için
+iki ayrı anahtar gerekir: `BINANCE_TESTNET_WORKER_ENABLED=true` ve
+`BINANCE_ORDER_EXECUTION_ENABLED=testnet`. Kimlik bilgileri güvenli başlatma
+PowerShell işlemi ile onun ön kontrol çocuklarında geçici olarak bulunur; sonunda
+temizlenir. Başarılı başlangıçtan sonra yalnız detached worker kendi kopyasını tutar.
+
+Testnet'in dönemsel hesap sıfırlamasından sonra reset yalnız worker durmuşken,
+bekleyen niyet ve BTCUSDT açık emri yokken çalışır. Ayrı reset kapısı ve açık onay
+gerekir. Worker durumu, kararlar ve emir niyetleri aynı SQLite transaction'ında
+append-only epoch tablolarına arşivlenir; kontrol mutex'i eşzamanlı start/stop/reset
+yarışını engeller.
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant W as Testnet worker
+    participant D as SQLite intent ledger
+    participant M as Binance public Spot data
+    participant B as Binance Spot Testnet execution
+
+    O->>W: Secure start + two execution gates
+    W->>B: Reconcile account and open orders
+    W->>M: GET completed daily candles
+    W->>W: 30d momentum target cash or long
+    alt Target changes
+        W->>D: Persist deterministic order intent
+        W->>B: Submit one MARKET order
+        alt Response is complete
+            W->>D: Persist fill, position and Testnet P&L
+        else Response is ambiguous
+            W->>B: Query same client id and myTrades
+            W->>D: Reconcile or halt without reposting
+        end
+    else Target unchanged
+        W->>D: Record one decision for the closed day
+    end
+```
 
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş
@@ -670,8 +727,8 @@ güncel toplam özkaynak `999,9112799645061 USD`, v2 dönem P&L'ı `0 USD`'dir. 
 `v2_predictions`, `v2_samples` veya `v2_executions` satırı oluşmamıştır. Bu zaman
 damgasında challenger `collecting`, eşleşmiş event/skor sayısı `0`dır. Ayrık mikro
 hesap `100 USD`, açık/kapalı işlem `0 / 0`; ana sermaye yetkisi kapalıdır. Bu anlık görüntü kârlılık göstergesi değildir;
-sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. Tam test paketi
-**148/148** geçmiştir.
+sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. 17 Eylül
+2026'daki son doğrulamada tam test paketi **241/241** geçmiştir.
 
 Aynı gün V3 etkinleştirildikten sonraki doğrulamada ilk `adaptive_probe` işlemi
 77.869,99 USD referanstan 15 USD maliyetle açıldı; stop 77.667,95 ve hedef

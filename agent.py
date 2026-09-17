@@ -1,4 +1,7 @@
-"""Bitstamp BTC/USD research, learning, and persistent paper trading. No order API."""
+"""Crypto research and paper trading with fail-closed Binance Testnet execution.
+
+No real-money order endpoint is supported.
+"""
 import argparse
 import csv
 import json
@@ -385,14 +388,19 @@ def main():
     low_frequency.add_argument('--model', type=Path)
     sub.add_parser('binance-execution-doctor',
                    help='Binance Spot Testnet public bağlantı ve BTCUSDT filtrelerini doğrula')
+    sub.add_parser('binance-testnet-agent-start',
+                   help='Ayrı Binance Spot Testnet background workerını başlat')
+    sub.add_parser('binance-testnet-agent-status',
+                   help='Binance Spot Testnet worker, sinyal ve pozisyon durumunu göster')
+    sub.add_parser('binance-testnet-agent-stop',
+                   help='Binance Spot Testnet workerını güvenli biçimde durdur')
+    sub.add_parser('binance-testnet-agent-reset',
+                   help='Aylık Testnet sıfırlamasından sonra durmuş worker defterini arşivle')
     sub.add_parser('binance-testnet-account',
                    help='Ortam değişkenlerindeki Testnet anahtarıyla bakiye ve açık emirleri uzlaştır')
     order_check = sub.add_parser('binance-testnet-order-check',
                                  help='Emir oluşturmadan Binance /order/test doğrulaması yap')
     order_check.add_argument('--quote-usdt', type=float, default=5.0)
-    testnet_buy = sub.add_parser('binance-testnet-buy',
-                                 help='Yalnız açık çevre anahtarıyla Testnet market BUY gönder')
-    testnet_buy.add_argument('--quote-usdt', type=float, default=5.0)
     sub.add_parser('exploration-on', help='15 dakikalık küçük sanal keşif işlemlerini aç')
     sub.add_parser('exploration-off', help='Yeni keşif işlemlerini kapat')
     sub.add_parser('learn-status', help='Öğrenme verisi ve model doğrulama durumu')
@@ -682,6 +690,14 @@ def main():
         import binance_execution
         print(json.dumps(binance_execution.public_doctor(), indent=2, ensure_ascii=False))
         return
+    if args.command.startswith('binance-testnet-agent-'):
+        import binance_testnet_worker
+        try:
+            result = binance_testnet_worker.control(args.command.rsplit('-', 1)[1])
+        except binance_testnet_worker.WorkerHalt as exc:
+            raise ValueError(str(exc)) from exc
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     if args.command == 'binance-testnet-account':
         import binance_execution
         client = binance_execution.Client()
@@ -693,12 +709,6 @@ def main():
         result = binance_execution.Client().test_market_buy(args.quote_usdt)
         print(json.dumps({"validated": True, "order_created": False,
                           "response": result}, indent=2, ensure_ascii=False))
-        return
-    if args.command == 'binance-testnet-buy':
-        import binance_execution
-        result = binance_execution.Client().place_market_buy(args.quote_usdt)
-        print(json.dumps({"environment": "testnet", "order": result,
-                          "real_money": False}, indent=2, ensure_ascii=False))
         return
     if args.command.startswith('learn-'):
         import paper, learning

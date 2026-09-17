@@ -301,17 +301,83 @@ Gerçek para desteği kapalıdır. Adapter yalnız `https://testnet.binance.visi
 adresini kabul eder; HMAC imzası, hesap/açık emir uzlaştırması, `/order/test`, benzersiz
 istemci emir kimliği ve 5–25 USDT Testnet emir tavanı uygular.
 
+Anahtarları diske veya komut geçmişine yazmadan bağlantıyı doğrulamak için güvenli
+yardımcı betiği çalıştırın. Betik API key ve secret key değerlerini ekranda göstermeden
+ister; yalnız çalışan PowerShell işleminin ortamına aktarır ve tamamlandığında ortamdan
+siler. Public doctor, imzalı hesap/açık emir uzlaştırması ve 5 USDT parametreli
+`/api/v3/order/test` kontrolünü sırasıyla çalıştırır:
+
+```powershell
+cd "C:\Users\Doğukan\Documents\Codex\2026-09-12\yerasdasd\outputs\okx-agent"
+& .\scripts\setup-binance-testnet.ps1
+```
+
+`python` PATH üzerinde bulunamazsa Python yorumlayıcısını açıkça verin:
+
+```powershell
+& .\scripts\setup-binance-testnet.ps1 -PythonPath "C:\Users\Doğukan\AppData\Local\Programs\Python\Python312\python.exe"
+```
+
+Bu doğrulama **emir göndermez**. Son çağrı Binance'in `/order/test` ucudur; yalnız
+imza, yetki ve 5 USDT MARKET parametrelerini doğrular. Betik yürütme anahtarını
+`false` yapar ve sonunda üç geçici ortam değişkenini de temizler.
+
+Doğrulama geçtikten sonra ayrı Testnet worker'ını güvenli istemle başlatın:
+
+```powershell
+& .\scripts\start-binance-testnet-agent.ps1
+```
+
+Betik anahtarları yeniden gizli ister, public ve imzalı ön kontrolleri çalıştırır
+ve gelecekte sanal emir oluşturabilecek background süreci başlatmadan hemen önce
+`BINANCE TESTNET AGENTI BASLAT` onay cümlesini ister. Anahtarlar diske yazılmaz;
+yalnız başlatılan worker sürecinin ortamında kalır.
+
+Testnet worker, Binance public Spot'tan alınan tamamlanmış UTC günlük mumlarda
+30 günlük getiri `%20` üzerindeyse long, aksi halde nakit hedefler. Public istemci
+yalnız izinli `/api/v3/klines` GET çağrısına sahiptir; hesap ve emir yüzeyi yoktur.
+Hesap ve emirler ayrı Testnet-only istemcide kalır. Yalnız nakit/long geçişinde sabit 10 USDT
+sanal emir verir; her gün zorla işlem açmaz. 10 USDT, 5 USDT minimum notional
+sınırında komisyon veya fiyat düşüşü nedeniyle satışın dust olarak takılma
+riskini azaltır. Durum ve durdurma komutları:
+
+```powershell
+python agent.py binance-testnet-agent-status
+python agent.py binance-testnet-agent-stop
+```
+
+Binance Spot Testnet hesabı dönemsel olarak sıfırlanırsa önce worker'ı durdurun,
+ardından güvenli reset betiğini çalıştırın:
+
+```powershell
+python agent.py binance-testnet-agent-stop
+& .\scripts\reset-binance-testnet-agent.ps1
+```
+
+Betik gizli anahtarları yalnız işlem ortamında tutar ve
+`BINANCE TESTNET DEFTERINI ARSIVLE VE SIFIRLA` onay cümlesini ister. Reset ancak
+worker tamamen durmuşsa, bekleyen niyet ve BTCUSDT açık emri yoksa yapılır. Aktif
+durum, kararlar ve emir niyetleri aynı SQLite veritabanındaki değişmez epoch
+tablolarına tek transaction içinde arşivlenir; önceki dönemler silinmez.
+
+Worker yalnız kendi deterministik istemci kimlikleriyle aldığı BTC miktarını
+yönetir. Testnet hesabının önceden verdiği BTC bakiyesini pozisyon saymaz. Emir
+niyeti POST isteğinden önce ayrı SQLite defterine yazılır; belirsiz cevapta aynı
+POST tekrarlanmaz, istemci kimliğiyle uzlaştırılır ve kanıtlanamayan durumda
+worker kapanır.
+
+Komutları elle çalıştırmak gerekirse:
+
 ```powershell
 python agent.py binance-execution-doctor
 python agent.py binance-testnet-account
 python agent.py binance-testnet-order-check --quote-usdt 5
-$env:BINANCE_ORDER_EXECUTION_ENABLED='testnet'
-python agent.py binance-testnet-buy --quote-usdt 5
 ```
 
 Anahtarlar yalnız `BINANCE_TESTNET_API_KEY` ve `BINANCE_TESTNET_SECRET_KEY` ortam
-değişkenlerinden okunur; dosyaya veya loga yazılmaz. Son komut ancak yürütme ortam
-değişkeni tam olarak `testnet` ise emir gönderebilir.
+değişkenlerinden okunur; dosyaya veya loga yazılmaz. Worker emirleri için hem
+`BINANCE_TESTNET_WORKER_ENABLED=true` hem de
+`BINANCE_ORDER_EXECUTION_ENABLED=testnet` gerekir.
 
 ## Ölçülen v2 sonucu
 
@@ -415,8 +481,8 @@ fazla doğrulanmamış risk açar.
 
 Bu tablo, 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
 doğrulanmış anlık görüntüdür. Daha sonraki canlı durum için `paper-status` esas alınır.
-Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. Kod doğrulamasında tam
-test paketi **148/148** geçti.
+Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. 17 Eylül 2026 tarihli
+son kod doğrulamasında tam test paketi **241/241** geçti.
 
 ## Durumu okuma
 

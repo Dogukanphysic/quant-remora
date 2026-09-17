@@ -70,10 +70,23 @@ zaman senkronizasyonu, tekrar gönderim ve yeniden başlatma senaryoları test e
 
 Bu aşama tamamlanmadan API anahtarıyla gerçek emir yolu eklenmez.
 
-Binance Spot Testnet adapterı 16 Eylül'de eklendi. Public bağlantı, BTCUSDT `TRADING`
-durumu, `LOT_SIZE`, `NOTIONAL` ve sunucu saat farkı doğrulandı. İmzalı hesap,
-`/order/test` ve gerçek Testnet emir kontrolleri Testnet API anahtarı beklemektedir;
-gerçek para URL'si desteklenmez.
+Binance Spot Testnet adapterı 16 Eylül'de eklendi; 17 Eylül'de HMAC anahtarıyla
+imzalı hesap ve `/order/test` doğrulaması tamamlandı. Public bağlantı, BTCUSDT
+`TRADING` durumu, `LOT_SIZE`, `NOTIONAL` ve sunucu saat farkı da geçti. Ayrı Testnet
+worker; Binance public Spot GET mumlarını Testnet-only hesap/emir istemcisinden
+ayırarak deterministik istemci kimliği, POST öncesi SQLite niyeti, `myTrades` dolum
+uzlaştırması, alış/satış, yeniden başlatma ve aylık Testnet reset korumasıyla
+hazırlandı. Gerçek para URL'si desteklenmez.
+
+Testnet hesabı sıfırlandığında reset yalnız durmuş worker, boş bekleyen niyet ve boş
+BTCUSDT açık emir koşulunda yapılır. Eski dönem aynı SQLite içindeki epoch tablolarına
+atomik olarak arşivlenir; böylece yeni dönem önceki yürütme kanıtını silmez.
+
+Bu worker bir yürütme pilotudur. Negatif ileri sonuç nedeniyle emekli V3'ten ve
+nakit seçen 15 dakikalık modelden emir almaz. Şimdilik sabit `30d momentum > %20`
+günlük long/nakit kuralını 10 USDT sanal pozisyonla uygular. 30 gün/100 kapanmış
+emir Aşama 3 kapısı henüz tamamlanmamıştır; düşük frekans nedeniyle süreden
+bağımsız bir yürütme-drill hattı gerekirse model kanıtından ayrı tutulmalıdır.
 
 ## Aşama 4 — gerçek mikro sermaye
 

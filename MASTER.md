@@ -483,25 +483,30 @@ kapanır. Son toplam özkaynak `policy_cutover_v2` içine yazılır; `policy_epo
 `paper-status`, tüm oturum P&L'ını ve `v2_period_pnl_usd` alanında geçişten sonraki
 sonucu ayrı gösterir. V1 kayıpları silinmez ve v2 başarısı gibi sunulmaz.
 
-14 Eylül 2026 anlık çalışma durumu:
+17 Eylül 2026 anlık çalışma durumu:
 
 | Alan | Değer |
 |---|---:|
 | Worker | Çalışıyor (`process_running=true`) |
 | Keşif | Açık; tek mikro deneme sınırı etkin |
 | V2 geçiş özkaynağı | 999,9112799645061 USD |
-| Güncel özkaynak/nakit | 999,9112799645061 USD |
-| V2 dönem P&L | 0 USD |
-| Prediction / H8 sample / execution | 0 / 0 / 0 |
-| Challenger | `collecting`; eşleşmiş olay / would-accept / gated-accept = 0 / 0 / 0 |
+| Güncel özkaynak/nakit | 999,8847028627918 USD |
+| V2 dönem P&L | −0,0265771017143 USD |
+| Prediction / H8 sample / execution | 8 / 8 / 4 |
+| Challenger | `collecting`; eşleşmiş olay / would-accept / gated-accept = 8 / 0 / 0 |
 | Challenger ana sermaye / ayrık execution | Kapalı / açık; 100 USD ayrı hesap |
-| V3 test | Açık; 100 USD ayrı hesapta 1 `adaptive_probe` işlemi açık |
+| V3 test | `RETIRED`; 10 kapanmış işlem, 99,6378102638 USD, PF 0,205667 |
+| V3 ileri probe | 63; P&L −0,2435292615 USD, PF 0,114933; yeni giriş karantinada |
 | Kontrol auto-retrain | Yalnız challenger toplaması bitene kadar frozen |
-| Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 1 |
+| Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 0 |
+| Binance public Testnet | VPN ile bağlantı, saat, BTCUSDT ve minimum notional doğrulandı |
+| Binance imzalı Testnet | Güvenli betik tamamlandı; anahtarlar dosyaya yazılmadı |
+| Binance background worker | Kod ve test hazır; operatör güvenli başlatmasını bekliyor |
 
-Bu tablo 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
-doğrulanmış işletim anıdır. Daha sonraki canlı durum için `paper-status` esas alınır.
-Henüz ileri aday kaydı oluşmadığı için bu sıfır sonuç bir performans ölçümü değildir.
+Bu tablo yerel `paper-status`, public Binance doctor ve operatörün imzalı Testnet
+doğrulama sonucuna dayanır. Daha sonraki canlı durum için `paper-status` ve
+`binance-testnet-agent-status` esas alınır. Testnet yürütme pilotu, kârlı veya
+gerçek para için uygun model kanıtı değildir.
 
 ## 14. Operasyon
 
@@ -538,6 +543,17 @@ python agent.py paper-status
 # Yeni mikro girişleri kapatma / worker'ı durdurma
 python agent.py exploration-off
 python agent.py paper-stop
+
+# Binance Spot Testnet kimlik ve emir-parametre doğrulaması; emir göndermez
+& .\scripts\setup-binance-testnet.ps1
+
+# Ayrı 10 USDT Testnet yürütme pilotunu başlatma ve izleme
+& .\scripts\start-binance-testnet-agent.ps1
+python agent.py binance-testnet-agent-status
+python agent.py binance-testnet-agent-stop
+
+# Yalnız Binance Testnet dönemsel olarak hesabı sıfırladıktan ve worker durduktan sonra
+& .\scripts\reset-binance-testnet-agent.ps1
 ```
 
 `paper-start` arka planda yaklaşık 30 saniyede bir çalışır. Worker v2'de normalde 240
@@ -546,6 +562,12 @@ kapanmış mum ister; çözülmemiş ileri H8 kaydı varsa istek gerekli bağlam
 pozisyonların koruyucu çıkışları kontrol edilir. `paper-start` ve
 `migrate-bollinger-v2`, worker kilidinden ayrı `state/paper-control.lock` ile seri
 çalışır; geçiş ayrıca worker kilidini almadan başlayamaz.
+
+Binance Testnet worker paper worker'dan ayrıdır. Binance public Spot'tan salt okunur
+GET ile tamamlanmış UTC günlük mumları izler; hesap ve emirleri ayrı Testnet-only
+istemciye yollar. Yalnız `30d momentum > %20` long/nakit hedefi değiştiğinde 10 USDT
+sanal emir verir. Bu, 15 dakikalık eğitilmiş modelin terfi ettiği anlamına gelmez;
+15 dakikalık kontrol ve challenger sermaye için hâlâ uygun değildir.
 
 ## 15. Dosya ve durum haritası
 
@@ -559,7 +581,13 @@ pozisyonların koruyucu çıkışları kontrol edilir. `paper-start` ve
 | `paper_v2.py` | V2 defter, mikro pozisyon ve risk uygulaması |
 | `paper_v3.py` | Her taze 15M mumda aktif V3 kararı, ayrık hesap ve yürütme kaydı |
 | `paper.py` | Worker kilidi, süreç kontrolü, ortak status ve legacy geçişler |
+| `binance_execution.py` | Public Spot GET-only mum istemcisi ile ayrı Testnet-only HMAC, market filtreleri, alış/satış ve `myTrades` uzlaştırması |
+| `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT sanal pozisyon, kalıcı emir niyeti ve tekrar koruması |
+| `scripts/setup-binance-testnet.ps1` | Anahtarları kaydetmeden hesap ve `/order/test` doğrulaması |
+| `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi ve çift kapıyla detached Testnet worker başlatma |
+| `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş Testnet dönemini aynı SQLite içinde arşivleyip yeni epoch açma |
 | `state/paper.sqlite3` | Canlı sanal durumun tek kaynağı |
+| `state/binance-testnet-worker.sqlite3` | Testnet karar, emir niyeti, dolum, pozisyon ve sanal P&L defteri |
 | `state/bollinger-v2-model.json` | Güncel çıkarım artefaktı |
 | `reports/bollinger-v2-training.json` | Tekrarlanabilir eğitim sonucu |
 | `reports/bollinger-v2-research.md` | Araştırma kararı ve kanıt özeti |
@@ -577,7 +605,9 @@ portföy satırları eksikse sistem sermaye uydurmaz ve sıfır sermayeyle kapal
 açık ve kapanmış işlemlerin fiyat/maliyet/P&L kaydını taşır. Kontrol prediction, skor
 ve mümkünse challenger girişi aynı transaction içinde yazılır.
 `v3_paper_state`, `v3_paper_decisions` ve `v3_paper_executions` V3 testini V2
-muhasebesinden ayırır. 14 Eylül 2026'da tam otomatik test paketi **148/148** geçti.
+muhasebesinden ayırır. Testnet reseti aktif satırları `worker_epochs` ve ilgili epoch
+tablolarına aynı transaction içinde taşır; denetim geçmişini silmez. 17 Eylül 2026'da
+tam otomatik test paketi **241/241** geçti.
 
 ## 16. Bilinen sınırlar
 
@@ -615,6 +645,9 @@ muhasebesinden ayırır. 14 Eylül 2026'da tam otomatik test paketi **148/148** 
 | 2026-09-14 | Eksik durum, model sürümü, politika düşürme ve işlem atomikliği yolları fail-closed yapıldı | Bozuk veya kısmi durumda sermaye ve kanıt üretimini önlemek |
 | 2026-09-14 | Weighted-interaction logistic ayrık mikro sanal hesaplı ileri challenger olarak donduruldu | Tarihsel champion ilan etmeden aynı gelecek olaylarda sabit kontrolle adil karşılaştırma yapmak |
 | 2026-09-14 | Challenger skorları kontrol prediction'ıyla atomik eşleştirildi; kontrol auto-retrain'i toplama bitene kadar donduruldu | Model çifti veya olay evreni değişmeden prequential kanıt toplamak |
+| 2026-09-17 | Binance Spot Testnet HMAC bağlantısı güvenli oturum betiğiyle doğrulandı | Anahtarı dosyaya veya komut geçmişine yazmadan imza ve `/order/test` yolunu sınamak |
+| 2026-09-17 | Testnet yürütmesi paper worker'dan ayrı bir defter ve sürece alındı | Testnet resetini, tekrar emir riskini ve önceden verilmiş BTC bakiyesini paper kanıtına karıştırmamak |
+| 2026-09-17 | Negatif V3 ve nakit seçen 15m modeller Testnet emrinden dışlandı; sabit günlük momentum pilotu seçildi | Daha sık işlem uğruna daha önce ölçülen zararı tekrarlamamak |
 
 ## 18. Kaynaklar
 
