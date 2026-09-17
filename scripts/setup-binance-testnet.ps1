@@ -67,11 +67,18 @@ function Resolve-PythonInvocation {
 function Invoke-AgentCommand {
     param([string[]]$AgentArguments)
 
-    $commandOutput = @(& $script:pythonInvocation.Executable `
-        @($script:pythonInvocation.PrefixArguments) `
-        $script:agentPath `
-        @AgentArguments 2>&1)
-    $commandExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $commandOutput = @(& $script:pythonInvocation.Executable `
+            @($script:pythonInvocation.PrefixArguments) `
+            $script:agentPath `
+            @AgentArguments 2>&1)
+        $commandExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $commandOutput | ForEach-Object { Write-Host $_ }
     if ($commandExitCode -ne 0) {
         $detail = (($commandOutput | ForEach-Object { $_.ToString() }) -join "`n").Trim()

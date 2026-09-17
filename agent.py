@@ -688,7 +688,7 @@ def main():
         return
     if args.command == 'binance-execution-doctor':
         import binance_execution
-        print(json.dumps(binance_execution.public_doctor(), indent=2, ensure_ascii=False))
+        print(json.dumps(binance_execution.public_doctor(), indent=2, ensure_ascii=True))
         return
     if args.command.startswith('binance-testnet-agent-'):
         import binance_testnet_worker
@@ -696,19 +696,19 @@ def main():
             result = binance_testnet_worker.control(args.command.rsplit('-', 1)[1])
         except binance_testnet_worker.WorkerHalt as exc:
             raise ValueError(str(exc)) from exc
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(result, indent=2, ensure_ascii=True))
         return
     if args.command == 'binance-testnet-account':
         import binance_execution
         client = binance_execution.Client()
         print(json.dumps({"account": client.account(), "open_orders": client.open_orders(),
-                          "real_money_supported": False}, indent=2, ensure_ascii=False))
+                          "real_money_supported": False}, indent=2, ensure_ascii=True))
         return
     if args.command == 'binance-testnet-order-check':
         import binance_execution
         result = binance_execution.Client().test_market_buy(args.quote_usdt)
         print(json.dumps({"validated": True, "order_created": False,
-                          "response": result}, indent=2, ensure_ascii=False))
+                          "response": result}, indent=2, ensure_ascii=True))
         return
     if args.command.startswith('learn-'):
         import paper, learning
