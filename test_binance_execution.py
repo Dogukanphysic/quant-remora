@@ -1,6 +1,7 @@
 from io import BytesIO
 import json
 import os
+from decimal import ROUND_DOWN, getcontext, setcontext
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -35,6 +36,18 @@ class BinanceExecutionTests(unittest.TestCase):
 
     def test_quantity_rounds_down_to_step(self):
         self.assertEqual(str(binance_execution.floor_step("1.239", "0.01")), "1.23")
+
+    def test_quantity_floor_is_independent_of_process_decimal_context(self):
+        baseline = binance_execution.floor_step("0.001999999", "0.000001")
+        original = getcontext().copy()
+        try:
+            getcontext().prec = 3
+            getcontext().rounding = ROUND_DOWN
+            changed = binance_execution.floor_step("0.001999999", "0.000001")
+        finally:
+            setcontext(original)
+        self.assertEqual(changed, baseline)
+        self.assertEqual(str(changed), "0.001999")
 
     def test_non_finite_quantity_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "finite"):
@@ -354,6 +367,40 @@ class BinanceExecutionTests(unittest.TestCase):
                     (binance_execution.BinanceTransportError,
                      binance_execution.AmbiguousOrderError),
                 )
+
+    def test_order_not_found_is_structured_only_for_order_query(self):
+        client = binance_execution.Client("key", "secret")
+        error = HTTPError(
+            "https://testnet.binance.vision/api/v3/order", 400, "missing", {},
+            BytesIO(b'{"code":-2013,"msg":"Order does not exist."}'),
+        )
+        with patch.object(binance_execution, "urlopen", side_effect=error), \
+                self.assertRaises(
+                    binance_execution.BinanceOrderNotFoundError
+                ) as caught:
+            client.order_by_client_id("remora-buy-missing")
+
+        self.assertEqual(caught.exception.method, "GET")
+        self.assertEqual(caught.exception.path, "/v3/order")
+        self.assertEqual(caught.exception.http_status, 400)
+        self.assertEqual(caught.exception.api_code, -2013)
+        self.assertTrue(caught.exception.signed)
+
+    def test_minus_2013_from_another_endpoint_is_not_order_not_found_proof(self):
+        client = binance_execution.Client("key", "secret")
+        error = HTTPError(
+            "https://testnet.binance.vision/api/v3/account", 400, "missing", {},
+            BytesIO(b'{"code":-2013,"msg":"unexpected"}'),
+        )
+        with patch.object(binance_execution, "urlopen", side_effect=error), \
+                self.assertRaises(binance_execution.BinanceAPIError) as caught:
+            client.account()
+
+        self.assertNotIsInstance(
+            caught.exception, binance_execution.BinanceOrderNotFoundError
+        )
+        self.assertEqual(caught.exception.path, "/v3/account")
+        self.assertEqual(caught.exception.api_code, -2013)
 
 
 if __name__ == "__main__":

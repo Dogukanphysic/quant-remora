@@ -78,9 +78,14 @@ ayırarak deterministik istemci kimliği, POST öncesi SQLite niyeti, `myTrades`
 uzlaştırması, alış/satış, yeniden başlatma ve aylık Testnet reset korumasıyla
 hazırlandı. Gerçek para URL'si desteklenmez.
 
-Testnet hesabı sıfırlandığında reset yalnız durmuş worker, boş bekleyen niyet ve boş
-BTCUSDT açık emir koşulunda yapılır. Eski dönem aynı SQLite içindeki epoch tablolarına
-atomik olarak arşivlenir; böylece yeni dönem önceki yürütme kanıtını silmez.
+Testnet hesabı dönemsel olarak sıfırlandığında reset yalnız durmuş worker, boş bekleyen niyet ve boş
+BTCUSDT açık emir koşulunda yapılır. Yerel pozisyon açıksa kaynak BUY emrinin Binance
+tarafından yapılandırılmış `GET /v3/order` / `-2013` cevabıyla silindiği de kanıtlanır.
+Eski dönem aynı SQLite içindeki epoch tablolarına
+atomik olarak arşivlenir; böylece yeni dönem önceki yürütme kanıtını silmez. Çözülmemiş
+öğrenme outbox'ı reseti engeller ve son işlenmiş günlük mum yeni epoch'a taşınır.
+Yürütme defteri ham anahtar yerine API key SHA-256 parmak izine bağlıdır; start,
+çalışma ve reset aynı anahtar bağını doğrular.
 
 Bu worker bir yürütme pilotudur. Negatif ileri sonuç nedeniyle emekli V3'ten ve
 nakit seçen 15 dakikalık modelden emir almaz. Testnet exploration için ön-kayıtlı
@@ -89,6 +94,55 @@ pozisyonla uygular. Son bir yıllık Binance Spot tanısı `-%10,44` olduğu iç
 aday kârlılık veya gerçek para uygunluğu kanıtı değildir. 30 gün/100 kapanmış
 emir Aşama 3 kapısı henüz tamamlanmamıştır; düşük frekans nedeniyle süreden
 bağımsız bir yürütme-drill hattı gerekirse model kanıtından ayrı tutulmalıdır.
+
+### Testnet online challenger sözleşmesi
+
+Worker her tamamlanmış UTC günlük kararda yalnız o anda bilinen nedensel özellikleri
+append-only kaydeder. Bir günlük ileri etiket, ancak bir sonraki karar mumu tam bir
+gün sonra geldiyse mühürlenir. Kesintiyle oluşan çok günlük boşluk eğitim örneği
+değildir ve karantinaya alınır. Emir kanıtı da yalnız uzlaştırılmış BUY ile tamamen
+kapatıcı SELL'i eşleyen, gerçek maliyeti ve kesin P&L'ı bilinen kapanmış Testnet
+turudur. Mevcut `%10` pozisyonu incumbent'a aittir; challenger hattı onu kapatmaz veya
+sonucu oluşmadan örnek saymaz.
+
+Politika defterlerindeki gerçekler her kaynak yürütme defterine özel
+`state/<kaynak-defter-adı>-online-learning.sqlite3` dosyasına idempotent aktarılır;
+kaynak ve aggregate tek bir policy/model kimliğine mühürlenir ve farklı kimlikler
+birleştirilmez. İlk
+fit 60 geçerli günlük etikette yapılır; aday çıkmazsa seçim en az 30 yeni etiketten
+sonra yeniden denenebilir. Arama alanı önceden sabit `%3/%5/%10/%15/%20` momentum
+eşikleridir. Challenger artefaktı dondurulduğunda yeni fit yapılmaz; seçimde kullanılan
+etiketler challenger performansı veya incumbent üstünlüğü sayılmaz; bu kanıt yalnız
+dondurma sonrasında toplanır. Dondurma sınırındaki tek örnek embargo edilir. Sonraki
+bir süreklilik boşluğu adayı emekli eder ve yeni kesintisiz bölüm yeniden 60 örneklik
+yaşam döngüsü başlatır. Eğitim etiketleri yalnız toplam veri-yeterliliği sayımına dahildir.
+
+İncelemeye hazır öneri için şu kapıların tamamı gerekir:
+
+- toplam veri-yeterliliği için en az 200 ileri toplanmış günlük etiket;
+- en az 60 kesin dondurma-sonrası ileri etiket;
+- challenger geçişiyle eşleşen en az 8 kesin P&L'lı kapanmış Testnet turu;
+- günlük ileri kohortta ve eşleşen gerçek turlarda pozitif maliyet-sonrası net,
+  PF `>=1,15`, azami düşüş `<=%15`;
+- eşlenmiş örneklerde incumbent'tan daha iyi sonuç;
+- güvenlik ihlali olmaması.
+
+`proposal_ready_for_review` yalnız insan incelemesi ister. Aktif config otomatik
+değişmez, worker'a hot-swap yapılmaz ve paper, gerçek para veya live emir yetkisi
+açılmaz. Mevcut yakın dönem tanısı `-%10,44`, PF `0,678` ve kapanmış kesin tur sayısı
+0 olduğundan şu anda kâr ya da gerçek geçiş iddiası yoktur.
+Günlük etiket, BUY-open, SELL-close ve epoch-karantina olaylarını taşıyan çözülmemiş
+öğrenme outbox'ı, başarısız yenileme veya sürüm uyuşmazlığı öneri durumunu fail-closed
+olarak kapatır. Olaylar eklenme sırasıyla oynatılır. Kaynak `learning_revision` değeri
+aggregate `ingested_source_revision` değerinden ilerideyse durum
+`stale_source_evidence` olur ve hazır bayrağı kapanır.
+Kaynak aday bağı iki aşamalı kalıcı geçiştir; yarıda kalırsa durum
+`candidate_transition_pending` olur, öğrenme yazımları outbox'a ertelenir ve yeni
+alış ancak idempotent recovery tamamlandıktan sonra değerlendirilebilir.
+
+```powershell
+python agent.py binance-testnet-learning-status
+```
 
 ## Aşama 4 — gerçek mikro sermaye
 

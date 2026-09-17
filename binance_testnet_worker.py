@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing, contextmanager
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 import json
 import os
@@ -25,10 +25,11 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 import uuid
 
 import binance_execution as execution
+import testnet_learning_store as learning_store
 
 
 ROOT = Path(__file__).resolve().parent
@@ -115,6 +116,7 @@ CONTROL_LOCK_PATH = STATE_DIR / "binance-testnet-worker-control.lock"
 # Policy-specific locks remain useful for status, while this lease prevents two
 # different policy ledgers from trading the same Testnet account concurrently.
 ACCOUNT_LOCK_PATH = STATE_DIR / "binance-testnet-worker-account.lock"
+LEARNING_DB_PATH = STATE_DIR / f"{_LEDGER_STEM}-online-learning.sqlite3"
 
 SYMBOL = "BTCUSDT"
 BASE_ASSET = "BTC"
@@ -129,6 +131,17 @@ DAY_MS = 86_400_000
 MAX_CANDLE_AGE_MS = 36 * 60 * 60 * 1000
 STARTUP_WAIT_SECONDS = 3.0
 STOP_WAIT_SECONDS = 20.0
+_DECIMAL_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
+_LEARNING_OUTBOX_SCHEMA = 1
+_LEARNING_OUTBOX_OPERATIONS = frozenset(
+    {
+        "capture_daily_label",
+        "open_round_trip",
+        "close_round_trip",
+        "epoch_reset_quarantine",
+    }
+)
+_LEARNING_SOURCE_CALL_FAILED = object()
 
 
 class WorkerHalt(RuntimeError):
@@ -137,6 +150,10 @@ class WorkerHalt(RuntimeError):
 
 class WorkerStopped(RuntimeError):
     """The operator disabled new decisions before an intent could be submitted."""
+
+
+class AccountBindingError(WorkerHalt):
+    """The supplied API key cannot safely own this execution ledger."""
 
 
 def _now_ms() -> int:
@@ -173,6 +190,31 @@ def _connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     return db
 
 
+def _connect_read_only(path: Path | str = DB_PATH) -> sqlite3.Connection:
+    """Open an existing worker ledger without running schema or recovery writes."""
+
+    db_path = Path(path)
+    # ``mode=ro`` prevents an accidental create when an operator asks for
+    # status before the worker has initialized its ledger.  ``query_only`` is
+    # a second guard against writes through this connection.
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    db = sqlite3.connect(
+        uri,
+        uri=True,
+        timeout=15,
+        isolation_level=None,
+    )
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only=ON")
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA busy_timeout=15000")
+    except BaseException:
+        db.close()
+        raise
+    return db
+
+
 def _ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(
         """
@@ -181,6 +223,7 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             active_policy TEXT NOT NULL DEFAULT '',
             policy_spec_hash TEXT NOT NULL DEFAULT '',
             policy_started_ms INTEGER,
+            api_key_fingerprint_sha256 TEXT,
             desired_running INTEGER NOT NULL DEFAULT 0 CHECK (desired_running IN (0,1)),
             halted INTEGER NOT NULL DEFAULT 0 CHECK (halted IN (0,1)),
             halt_reason TEXT,
@@ -209,6 +252,8 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             close_latest TEXT NOT NULL,
             close_30d TEXT NOT NULL,
             momentum TEXT NOT NULL,
+            feature_schema TEXT,
+            feature_json TEXT,
             target_long INTEGER NOT NULL CHECK (target_long IN (0,1)),
             action TEXT NOT NULL,
             client_id TEXT,
@@ -265,6 +310,29 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             PRIMARY KEY (epoch_id, client_id),
             FOREIGN KEY (epoch_id) REFERENCES worker_epochs(epoch_id)
         );
+
+        CREATE TABLE IF NOT EXISTS worker_learning_outbox (
+            event_id TEXT PRIMARY KEY,
+            operation TEXT NOT NULL CHECK (
+                operation IN (
+                    'capture_daily_label',
+                    'open_round_trip',
+                    'close_round_trip',
+                    'epoch_reset_quarantine'
+                )
+            ),
+            payload_json TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            created_ms INTEGER NOT NULL,
+            last_attempt_ms INTEGER,
+            attempt_count INTEGER NOT NULL DEFAULT 0
+                CHECK (attempt_count >= 0),
+            resolved_ms INTEGER,
+            last_error TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS worker_learning_outbox_pending_idx
+            ON worker_learning_outbox(resolved_ms, created_ms);
         """
     )
     # Additive migration for databases created before realized-P&L accounting.
@@ -312,6 +380,10 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE worker_state ADD COLUMN policy_started_ms INTEGER"
         )
+    if "api_key_fingerprint_sha256" not in state_columns:
+        db.execute(
+            "ALTER TABLE worker_state ADD COLUMN api_key_fingerprint_sha256 TEXT"
+        )
     intent_columns = {
         str(row[1]) for row in db.execute("PRAGMA table_info(worker_order_intents)")
     }
@@ -323,6 +395,13 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE worker_order_intents ADD COLUMN commission_by_asset TEXT"
         )
+    decision_columns = {
+        str(row[1]) for row in db.execute("PRAGMA table_info(worker_decisions)")
+    }
+    if "feature_schema" not in decision_columns:
+        db.execute("ALTER TABLE worker_decisions ADD COLUMN feature_schema TEXT")
+    if "feature_json" not in decision_columns:
+        db.execute("ALTER TABLE worker_decisions ADD COLUMN feature_json TEXT")
     now = _now_ms()
     db.execute(
         """INSERT OR IGNORE INTO worker_state
@@ -331,6 +410,14 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         (POLICY, POLICY_SPEC_HASH, now, now, now),
     )
     _bind_or_validate_policy(db, now)
+    try:
+        learning_store.ensure_source_schema(
+            db, POLICY, POLICY_SPEC_HASH, now
+        )
+    except Exception:
+        # The proposal-only learner is a sidecar. Its schema must never make
+        # the execution ledger unavailable or halt an otherwise safe cycle.
+        pass
 
 
 def _bind_or_validate_policy(db: sqlite3.Connection, now_ms: int) -> None:
@@ -381,6 +468,363 @@ def _transaction(db: sqlite3.Connection) -> Iterator[None]:
         raise
     else:
         db.execute("COMMIT")
+
+
+def _safe_learning_source_call(
+    db: sqlite3.Connection,
+    operation: str,
+    function: Callable[..., object],
+    *args: object,
+    outbox_reference: Mapping[str, object] | None = None,
+    **kwargs: object,
+) -> object | None:
+    """Isolate learning writes so they can never break execution accounting."""
+
+    savepoint = "worker_learning_sidecar"
+    db.execute(f"SAVEPOINT {savepoint}")
+    try:
+        result = function(*args, **kwargs)
+    except Exception as exc:
+        db.execute(f"ROLLBACK TO {savepoint}")
+        db.execute(f"RELEASE {savepoint}")
+        if outbox_reference is not None:
+            _enqueue_learning_outbox(
+                db,
+                operation,
+                outbox_reference,
+                exc,
+                _now_ms(),
+            )
+        if isinstance(exc, learning_store.LearningIntegrityError):
+            try:
+                learning_store.record_source_error(
+                    db,
+                    f"{operation}: {type(exc).__name__}: {exc}",
+                    _now_ms(),
+                )
+            except Exception:
+                pass
+        return _LEARNING_SOURCE_CALL_FAILED
+    db.execute(f"RELEASE {savepoint}")
+    return result
+
+
+def _learning_outbox_payload(
+    operation: str, reference: Mapping[str, object]
+) -> tuple[str, str, str]:
+    if operation not in _LEARNING_OUTBOX_OPERATIONS:
+        raise ValueError(f"Unsupported learning outbox operation: {operation}")
+    payload = {
+        "schema": _LEARNING_OUTBOX_SCHEMA,
+        "operation": operation,
+        "reference": dict(reference),
+    }
+    encoded = _json(payload)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return encoded, digest, f"learning-outbox:{digest}"
+
+
+def _learning_outbox_error(exc: BaseException) -> str:
+    """Return a bounded diagnostic that cannot accidentally persist a secret."""
+
+    return f"{type(exc).__name__}: learning sidecar operation failed"
+
+
+def _enqueue_learning_outbox(
+    db: sqlite3.Connection,
+    operation: str,
+    reference: Mapping[str, object],
+    exc: BaseException,
+    now_ms: int,
+) -> str:
+    encoded, digest, event_id = _learning_outbox_payload(operation, reference)
+    db.execute(
+        """INSERT OR IGNORE INTO worker_learning_outbox
+           (event_id, operation, payload_json, payload_sha256, created_ms,
+            last_attempt_ms, attempt_count, resolved_ms, last_error)
+           VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?)""",
+        (
+            event_id,
+            operation,
+            encoded,
+            digest,
+            int(now_ms),
+            int(now_ms),
+            _learning_outbox_error(exc),
+        ),
+    )
+    return event_id
+
+
+def _durable_learning_source_call(
+    db: sqlite3.Connection,
+    operation: str,
+    function: Callable[..., object],
+    *args: object,
+    outbox_reference: Mapping[str, object],
+    **kwargs: object,
+) -> object | None:
+    """Preserve source-event order and enqueue every uncommitted mutation."""
+
+    if (
+        not _learning_source_writes_healthy(db)
+        or _unresolved_learning_outbox_count(db)
+    ):
+        _enqueue_learning_outbox(
+            db,
+            operation,
+            outbox_reference,
+            RuntimeError("prior learning evidence is unresolved"),
+            _now_ms(),
+        )
+        return _LEARNING_SOURCE_CALL_FAILED
+    return _safe_learning_source_call(
+        db,
+        operation,
+        function,
+        *args,
+        outbox_reference=outbox_reference,
+        **kwargs,
+    )
+
+
+def _learning_source_writes_healthy(db: sqlite3.Connection) -> bool:
+    """Permit direct evidence writes only after affirmative refresh recovery."""
+
+    try:
+        health = db.execute(
+            """SELECT last_attempt_failed, last_success_ms
+               FROM worker_learning_refresh_health WHERE singleton=1"""
+        ).fetchone()
+        if (
+            health is None
+            or bool(health["last_attempt_failed"])
+            or health["last_success_ms"] is None
+        ):
+            return False
+        transition_table = db.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table'
+                 AND name='worker_learning_pending_candidate_transition'"""
+        ).fetchone()
+        if transition_table is not None:
+            pending = db.execute(
+                """SELECT 1
+                   FROM worker_learning_pending_candidate_transition
+                   LIMIT 1"""
+            ).fetchone()
+            if pending is not None:
+                return False
+    except (KeyError, sqlite3.DatabaseError):
+        return False
+    return True
+
+
+def _unresolved_learning_outbox_count(db: sqlite3.Connection) -> int:
+    return int(
+        db.execute(
+            """SELECT COUNT(*) FROM worker_learning_outbox
+               WHERE resolved_ms IS NULL"""
+        ).fetchone()[0]
+    )
+
+
+def _parse_learning_outbox_row(row: sqlite3.Row) -> tuple[str, dict[str, object]]:
+    operation = str(row["operation"])
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except (TypeError, ValueError) as exc:
+        raise learning_store.LearningIntegrityError(
+            "Learning outbox payload is not valid JSON."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise learning_store.LearningIntegrityError(
+            "Learning outbox payload is not an object."
+        )
+    canonical = _json(payload)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    expected_event_id = f"learning-outbox:{digest}"
+    if (
+        canonical != str(row["payload_json"])
+        or digest != str(row["payload_sha256"])
+        or expected_event_id != str(row["event_id"])
+        or operation not in _LEARNING_OUTBOX_OPERATIONS
+        or payload.get("schema") != _LEARNING_OUTBOX_SCHEMA
+        or payload.get("operation") != operation
+        or not isinstance(payload.get("reference"), dict)
+    ):
+        raise learning_store.LearningIntegrityError(
+            "Learning outbox identity or canonical payload is invalid."
+        )
+    reference = dict(payload["reference"])
+    if reference.get("policy") != POLICY or reference.get(
+        "model_version"
+    ) != POLICY_SPEC_HASH:
+        raise learning_store.LearningIntegrityError(
+            "Learning outbox policy identity does not match this worker."
+        )
+    return operation, reference
+
+
+def _replay_learning_outbox(db: sqlite3.Connection) -> int:
+    """Idempotently repair durable sidecar events from core ledger facts."""
+
+    rows = db.execute(
+        """SELECT * FROM worker_learning_outbox
+           WHERE resolved_ms IS NULL
+           ORDER BY rowid"""
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        operation = str(row["operation"])
+        savepoint = "worker_learning_outbox_replay"
+        db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            operation, reference = _parse_learning_outbox_row(row)
+            client_id = reference.get("client_id")
+            if operation in {"open_round_trip", "close_round_trip"} and (
+                not isinstance(client_id, str) or not client_id
+            ):
+                raise learning_store.LearningIntegrityError(
+                    "Learning outbox client reference is invalid."
+                )
+            now = _now_ms()
+            if operation == "capture_daily_label":
+                if set(reference) != {
+                    "candle_close_ms",
+                    "policy",
+                    "model_version",
+                }:
+                    raise learning_store.LearningIntegrityError(
+                        "Learning daily-label reference is invalid."
+                    )
+                candle_ms = reference.get("candle_close_ms")
+                if (
+                    not isinstance(candle_ms, int)
+                    or isinstance(candle_ms, bool)
+                    or candle_ms < 0
+                ):
+                    raise learning_store.LearningIntegrityError(
+                        "Learning daily-label candle reference is invalid."
+                    )
+                decision = db.execute(
+                    """SELECT candle_close_ms, policy, close_latest
+                       FROM worker_decisions WHERE candle_close_ms=?""",
+                    (candle_ms,),
+                ).fetchone()
+                if decision is None or str(decision["policy"]) != POLICY:
+                    raise learning_store.LearningIntegrityError(
+                        "Learning daily-label decision reference is missing."
+                    )
+                learning_store.capture_daily_label(
+                    db,
+                    {
+                        "candle_close_ms": int(decision["candle_close_ms"]),
+                        "close_latest": str(decision["close_latest"]),
+                    },
+                    POLICY,
+                    POLICY_SPEC_HASH,
+                    now,
+                )
+            elif operation == "open_round_trip":
+                if set(reference) != {"client_id", "policy", "model_version"}:
+                    raise learning_store.LearningIntegrityError(
+                        "Learning open-event reference is invalid."
+                    )
+                learning_store.open_round_trip(
+                    db, client_id, POLICY, POLICY_SPEC_HASH, now
+                )
+            elif operation == "close_round_trip":
+                if set(reference) != {
+                    "client_id",
+                    "policy",
+                    "model_version",
+                    "exact_pnl",
+                } or not isinstance(reference.get("exact_pnl"), bool):
+                    raise learning_store.LearningIntegrityError(
+                        "Learning close-event reference is invalid."
+                    )
+                result = learning_store.close_round_trip(
+                    db,
+                    client_id,
+                    POLICY,
+                    POLICY_SPEC_HASH,
+                    bool(reference["exact_pnl"]),
+                    now,
+                )
+                if result is None:
+                    raise learning_store.LearningIntegrityError(
+                        "Learning close-event cannot yet be reconstructed."
+                    )
+            else:
+                if (
+                    set(reference)
+                    != {
+                        "reason",
+                        "policy",
+                        "model_version",
+                        "archive_sequence",
+                    }
+                    or not isinstance(reference.get("reason"), str)
+                    or not isinstance(reference.get("archive_sequence"), int)
+                    or isinstance(reference.get("archive_sequence"), bool)
+                    or int(reference["archive_sequence"]) <= 0
+                ):
+                    raise learning_store.LearningIntegrityError(
+                        "Learning quarantine-event reference is invalid."
+                    )
+                learning_store.quarantine_open_round_trips(
+                    db,
+                    str(reference["reason"]),
+                    now,
+                    policy=POLICY,
+                    model_version=POLICY_SPEC_HASH,
+                )
+        except Exception as exc:
+            db.execute(f"ROLLBACK TO {savepoint}")
+            db.execute(f"RELEASE {savepoint}")
+            now = _now_ms()
+            db.execute(
+                """UPDATE worker_learning_outbox
+                   SET last_attempt_ms=?, attempt_count=attempt_count+1,
+                       last_error=? WHERE event_id=? AND resolved_ms IS NULL""",
+                (
+                    now,
+                    _learning_outbox_error(exc),
+                    str(row["event_id"]),
+                ),
+            )
+            if isinstance(exc, learning_store.LearningIntegrityError):
+                try:
+                    learning_store.record_source_error(
+                        db,
+                        f"outbox_replay:{operation}: "
+                        f"{type(exc).__name__}: {exc}",
+                        now,
+                    )
+                except Exception:
+                    pass
+            # Later events may depend on this mutation (capture before fill,
+            # open before close). Never manufacture a gap or binding from a
+            # suffix whose causal predecessor is still unresolved.
+            break
+        db.execute(f"RELEASE {savepoint}")
+        now = _now_ms()
+        db.execute(
+            """UPDATE worker_learning_outbox
+               SET resolved_ms=?, last_attempt_ms=?, attempt_count=attempt_count+1,
+                   last_error=NULL WHERE event_id=? AND resolved_ms IS NULL""",
+            (now, now, str(row["event_id"])),
+        )
+        resolved += 1
+    return resolved
+
+
+def _learning_db_path(source_db_path: Path | str) -> Path:
+    """Keep every aggregate physically scoped to exactly one source ledger."""
+
+    source = Path(source_db_path).resolve()
+    return source.with_name(f"{source.stem}-online-learning.sqlite3")
 
 
 def _execution_gate() -> None:
@@ -465,6 +909,11 @@ def _closed_candles(
 
 
 def _signal(market_data_client: object) -> dict[str, object]:
+    with localcontext(_DECIMAL_CONTEXT):
+        return _signal_in_context(market_data_client)
+
+
+def _signal_in_context(market_data_client: object) -> dict[str, object]:
     window = _closed_candles(
         market_data_client.klines(
             interval=INTERVAL, limit=LOOKBACK_DAYS + 2, symbol=SYMBOL
@@ -473,11 +922,36 @@ def _signal(market_data_client: object) -> dict[str, object]:
     old_close = window[0][1]
     latest_close = window[-1][1]
     momentum = latest_close / old_close - Decimal("1")
+    closes = [item[1] for item in window]
+    daily_returns = [
+        closes[index] / closes[index - 1] - Decimal("1")
+        for index in range(1, len(closes))
+    ]
+    volatility_window = daily_returns[-20:]
+    mean_return = sum(volatility_window, Decimal("0")) / Decimal(
+        len(volatility_window)
+    )
+    realized_volatility = (
+        sum(
+            ((value - mean_return) ** 2 for value in volatility_window),
+            Decimal("0"),
+        )
+        / Decimal(len(volatility_window))
+    ).sqrt()
+    features = {
+        "close": format(latest_close, "f"),
+        "return_1d": format(latest_close / closes[-2] - Decimal("1"), "f"),
+        "return_7d": format(latest_close / closes[-8] - Decimal("1"), "f"),
+        "momentum_30d": format(momentum, "f"),
+        "realized_volatility_20d": format(realized_volatility, "f"),
+    }
     return {
         "candle_close_ms": window[-1][0],
         "close_latest": latest_close,
         "close_30d": old_close,
         "momentum": momentum,
+        "feature_schema": "btc_daily_causal_v1",
+        "features": features,
         "target_long": momentum > MOMENTUM_THRESHOLD,
     }
 
@@ -584,7 +1058,324 @@ def _order_identity(order: Mapping[str, object], client_id: str, side: str) -> N
         raise WorkerHalt("Managed order side mismatch.")
 
 
+def _client_api_key_fingerprint(client: object) -> str:
+    """Return a one-way account binding without persisting credential material."""
+
+    api_key = getattr(client, "api_key", None)
+    if (
+        not isinstance(api_key, str)
+        or len(api_key) < 32
+        or not api_key.isascii()
+        or any(character.isspace() for character in api_key)
+    ):
+        raise AccountBindingError(
+            "Binance Testnet API key is missing or unsuitable for account binding."
+        )
+    return hashlib.sha256(api_key.encode("ascii")).hexdigest()
+
+
+def _assert_account_fingerprint(
+    db: sqlite3.Connection,
+    client: object,
+    *,
+    allow_unbound: bool,
+) -> tuple[str, bool]:
+    """Compare the caller with the bound account without exposing either value."""
+
+    candidate = _client_api_key_fingerprint(client)
+    bound = _state(db)["api_key_fingerprint_sha256"]
+    if bound is None:
+        if allow_unbound:
+            return candidate, False
+        raise AccountBindingError(
+            "Binance Testnet ledger is not yet bound to a proven API key."
+        )
+    if not isinstance(bound, str) or not re.fullmatch(r"[0-9a-f]{64}", bound):
+        raise AccountBindingError(
+            "Binance Testnet ledger account binding is invalid."
+        )
+    if bound != candidate:
+        raise AccountBindingError(
+            "Binance Testnet API key does not match this execution ledger."
+        )
+    return candidate, True
+
+
+def _latest_filled_buy_origin(db: sqlite3.Connection) -> sqlite3.Row | None:
+    return db.execute(
+        """SELECT client_id, exchange_order_id, executed_qty, net_base_qty,
+                  cumulative_quote_qty
+           FROM worker_order_intents
+           WHERE side='BUY' AND state='filled'
+           ORDER BY decision_ms DESC LIMIT 1"""
+    ).fetchone()
+
+
+def _validate_position_origin_order(
+    origin: Mapping[str, object],
+    remote: Mapping[str, object],
+    tracked_qty: Decimal,
+) -> None:
+    client_id = str(origin["client_id"])
+    _order_identity(remote, client_id, "BUY")
+    if str(remote.get("status", "")).upper() != "FILLED":
+        raise WorkerHalt("Worker BUY origin is no longer FILLED.")
+    stored_order_id = origin["exchange_order_id"]
+    remote_order_id = remote.get("orderId")
+    if (
+        stored_order_id is None
+        or isinstance(remote_order_id, bool)
+        or not str(remote_order_id).isascii()
+        or not str(remote_order_id).isdigit()
+        or int(str(remote_order_id)) <= 0
+        or str(remote_order_id) != str(stored_order_id)
+    ):
+        raise WorkerHalt("Worker BUY origin exchange order id no longer matches.")
+    remote_executed = _decimal(remote.get("executedQty"), "origin executed quantity")
+    stored_executed = _decimal(origin["executed_qty"], "stored origin quantity")
+    remote_quote = _decimal(
+        remote.get("cummulativeQuoteQty"), "origin cumulative quote"
+    )
+    stored_quote = _decimal(
+        origin["cumulative_quote_qty"], "stored origin cumulative quote"
+    )
+    origin_net = _decimal(origin["net_base_qty"], "stored origin net quantity")
+    if remote_executed != stored_executed or remote_quote != stored_quote:
+        raise WorkerHalt("Worker BUY origin execution no longer matches local state.")
+    if tracked_qty <= 0 or tracked_qty > origin_net:
+        raise WorkerHalt("Tracked BTC quantity exceeds its worker BUY provenance.")
+
+
+def _prove_legacy_pending_account(
+    db: sqlite3.Connection, client: object, state: Mapping[str, object]
+) -> None:
+    client_id = str(state["pending_client_id"])
+    side = str(state["pending_side"] or "")
+    intent = db.execute(
+        """SELECT client_id, side, exchange_order_id
+           FROM worker_order_intents WHERE client_id=?""",
+        (client_id,),
+    ).fetchone()
+    if intent is None or str(intent["side"]) != side or side not in {"BUY", "SELL"}:
+        raise AccountBindingError(
+            "Legacy pending order has inconsistent local provenance; account binding refused."
+        )
+    try:
+        remote = client.order_by_client_id(client_id, symbol=SYMBOL)
+    except Exception as exc:
+        raise AccountBindingError(
+            "Legacy pending order could not be proven on the supplied Testnet account."
+        ) from exc
+    if not isinstance(remote, Mapping):
+        raise AccountBindingError(
+            "Legacy pending order proof returned an invalid response."
+        )
+    try:
+        _order_identity(remote, client_id, side)
+        status = str(remote.get("status", "")).upper()
+        if status not in {
+            "NEW", "PARTIALLY_FILLED", "FILLED", "PENDING_CANCEL",
+            "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH",
+        }:
+            raise WorkerHalt("Legacy pending order status is invalid.")
+        order_id = remote.get("orderId")
+        order_id_text = str(order_id)
+        if (
+            isinstance(order_id, bool)
+            or not order_id_text.isascii()
+            or not order_id_text.isdigit()
+            or int(order_id_text) <= 0
+        ):
+            raise WorkerHalt("Legacy pending order id is invalid.")
+        stored_order_id = intent["exchange_order_id"]
+        if stored_order_id is not None and str(stored_order_id) != order_id_text:
+            raise WorkerHalt("Legacy pending exchange order id does not match.")
+    except WorkerHalt as exc:
+        raise AccountBindingError(
+            f"Legacy pending order proof failed: {exc}"
+        ) from exc
+
+
+def _legacy_ledger_is_pristine(
+    db: sqlite3.Connection, state: Mapping[str, object]
+) -> bool:
+    counts = db.execute(
+        """SELECT
+           (SELECT COUNT(*) FROM worker_decisions),
+           (SELECT COUNT(*) FROM worker_order_intents),
+           (SELECT COUNT(*) FROM worker_epochs)"""
+    ).fetchone()
+    return bool(
+        tuple(int(value) for value in counts) == (0, 0, 0)
+        and state["pending_client_id"] is None
+        and state["last_candle_close_ms"] is None
+        and _decimal(state["position_qty"], "tracked position") == 0
+        and _decimal(state["position_quote_cost"], "tracked position cost") == 0
+        and _decimal(state["realized_pnl_usdt"], "realized P&L") == 0
+        and int(state["completed_round_trips"]) == 0
+    )
+
+
+def _prove_legacy_flat_history(db: sqlite3.Connection, client: object) -> None:
+    """Bind non-pristine flat history only through its latest terminal order."""
+
+    intent = db.execute(
+        """SELECT client_id, side, state, exchange_order_id, executed_qty,
+                  cumulative_quote_qty, response_json
+           FROM worker_order_intents
+           WHERE state IN ('filled','terminal')
+           ORDER BY decision_ms DESC, updated_ms DESC, client_id DESC LIMIT 1"""
+    ).fetchone()
+    if intent is None:
+        raise AccountBindingError(
+            "Legacy non-pristine flat ledger has no active terminal order proof; "
+            "manual archival is required."
+        )
+    client_id = str(intent["client_id"])
+    side = str(intent["side"])
+    try:
+        remote = client.order_by_client_id(client_id, symbol=SYMBOL)
+    except Exception as exc:
+        raise AccountBindingError(
+            "Legacy flat ledger terminal order could not be proven on the supplied "
+            "Testnet account."
+        ) from exc
+    if not isinstance(remote, Mapping):
+        raise AccountBindingError(
+            "Legacy flat ledger terminal-order proof returned an invalid response."
+        )
+    try:
+        _order_identity(remote, client_id, side)
+        remote_status = str(remote.get("status", "")).upper()
+        if str(intent["state"]) == "filled":
+            if remote_status != "FILLED":
+                raise WorkerHalt("Latest filled order is no longer FILLED.")
+            stored_order_id = intent["exchange_order_id"]
+            if stored_order_id is None or str(remote.get("orderId")) != str(
+                stored_order_id
+            ):
+                raise WorkerHalt("Latest filled exchange order id does not match.")
+            remote_executed = _decimal(
+                remote.get("executedQty"), "terminal executed quantity"
+            )
+            stored_executed = _decimal(
+                intent["executed_qty"], "stored executed quantity"
+            )
+            if remote_executed != stored_executed:
+                raise WorkerHalt("Latest filled executed quantity does not match.")
+            if _decimal(
+                remote.get("cummulativeQuoteQty"), "terminal cumulative quote"
+            ) != _decimal(intent["cumulative_quote_qty"], "stored cumulative quote"):
+                raise WorkerHalt("Latest filled cumulative quote does not match.")
+        else:
+            try:
+                stored = json.loads(str(intent["response_json"]))
+            except (TypeError, ValueError) as exc:
+                raise WorkerHalt("Stored terminal order response is invalid.") from exc
+            if not isinstance(stored, Mapping):
+                raise WorkerHalt("Stored terminal order response is invalid.")
+            _order_identity(stored, client_id, side)
+            stored_status = str(stored.get("status", "")).upper()
+            if stored_status not in {
+                "CANCELED", "REJECTED", "EXPIRED", "EXPIRED_IN_MATCH",
+            } or remote_status != stored_status:
+                raise WorkerHalt("Latest terminal order status does not match.")
+            if str(remote.get("orderId")) != str(stored.get("orderId")):
+                raise WorkerHalt("Latest terminal exchange order id does not match.")
+            remote_executed = _decimal(
+                remote.get("executedQty", "0"), "terminal executed quantity"
+            )
+            if remote_executed != 0:
+                raise WorkerHalt("Latest terminal order unexpectedly has an execution.")
+            if _decimal(
+                remote.get("cummulativeQuoteQty", "0"), "terminal cumulative quote"
+            ) != _decimal(
+                stored.get("cummulativeQuoteQty", "0"), "stored cumulative quote"
+            ):
+                raise WorkerHalt("Latest terminal cumulative quote does not match.")
+    except WorkerHalt as exc:
+        raise AccountBindingError(
+            f"Legacy flat ledger terminal-order proof failed: {exc}"
+        ) from exc
+
+
+def _ensure_account_binding(db: sqlite3.Connection, client: object) -> None:
+    """Bind a legacy ledger only after a signed, state-appropriate proof."""
+
+    candidate, already_bound = _assert_account_fingerprint(
+        db, client, allow_unbound=True
+    )
+    if already_bound:
+        return
+
+    state = _state(db)
+    tracked_qty = _decimal(state["position_qty"], "tracked position")
+    if tracked_qty < 0:
+        raise AccountBindingError(
+            "Negative tracked position prevents Testnet account binding."
+        )
+    if tracked_qty > 0:
+        origin = _latest_filled_buy_origin(db)
+        if origin is None:
+            raise AccountBindingError(
+                "Legacy open position has no local BUY provenance; account binding refused."
+            )
+        client_id = str(origin["client_id"])
+        try:
+            remote = client.order_by_client_id(client_id, symbol=SYMBOL)
+        except Exception as exc:
+            raise AccountBindingError(
+                "Legacy open position BUY origin could not be proven on the supplied "
+                "Testnet account."
+            ) from exc
+        if not isinstance(remote, Mapping):
+            raise AccountBindingError(
+                "Legacy open position proof returned an invalid response."
+            )
+        try:
+            _validate_position_origin_order(origin, remote, tracked_qty)
+        except WorkerHalt as exc:
+            raise AccountBindingError(
+                f"Legacy open position proof failed: {exc}"
+            ) from exc
+    elif state["pending_client_id"]:
+        _prove_legacy_pending_account(db, client, state)
+    elif _legacy_ledger_is_pristine(db, state):
+        try:
+            account = client.account()
+        except Exception as exc:
+            raise AccountBindingError(
+                "Signed Binance Testnet account proof failed; ledger remains unbound."
+            ) from exc
+        if not isinstance(account, Mapping):
+            raise AccountBindingError(
+                "Signed Binance Testnet account proof returned an invalid response."
+            )
+    else:
+        _prove_legacy_flat_history(db, client)
+
+    now = _now_ms()
+    db.execute(
+        """UPDATE worker_state SET api_key_fingerprint_sha256=?, updated_ms=?
+           WHERE singleton=1 AND api_key_fingerprint_sha256 IS NULL""",
+        (candidate, now),
+    )
+    _, bound = _assert_account_fingerprint(db, client, allow_unbound=False)
+    if not bound:  # pragma: no cover - guarded by the assertion above
+        raise AccountBindingError("Binance Testnet account binding failed closed.")
+
+
 def _apply_filled(
+    db: sqlite3.Connection,
+    order: Mapping[str, object],
+    client_id: str,
+    side: str,
+) -> dict[str, object]:
+    with localcontext(_DECIMAL_CONTEXT):
+        return _apply_filled_in_context(db, order, client_id, side)
+
+
+def _apply_filled_in_context(
     db: sqlite3.Connection,
     order: Mapping[str, object],
     client_id: str,
@@ -697,6 +1488,40 @@ def _apply_filled(
                 now,
             ),
         )
+        if side == "BUY":
+            _durable_learning_source_call(
+                db,
+                "open_round_trip",
+                learning_store.open_round_trip,
+                db,
+                client_id,
+                POLICY,
+                POLICY_SPEC_HASH,
+                now,
+                outbox_reference={
+                    "client_id": client_id,
+                    "policy": POLICY,
+                    "model_version": POLICY_SPEC_HASH,
+                },
+            )
+        elif new_qty == 0:
+            _durable_learning_source_call(
+                db,
+                "close_round_trip",
+                learning_store.close_round_trip,
+                db,
+                client_id,
+                POLICY,
+                POLICY_SPEC_HASH,
+                bool(pnl_complete),
+                now,
+                outbox_reference={
+                    "client_id": client_id,
+                    "policy": POLICY,
+                    "model_version": POLICY_SPEC_HASH,
+                    "exact_pnl": bool(pnl_complete),
+                },
+            )
     execution_action = "bought" if side == "BUY" else "sold"
     return {
         "action": "halted" if unsupported else execution_action,
@@ -797,12 +1622,7 @@ def _verify_position_origin(
     db: sqlite3.Connection, client: object, tracked_qty: Decimal
 ) -> dict[str, object] | None:
     """Prove that local BTC came from a still-present worker BUY order."""
-    origin = db.execute(
-        """SELECT client_id, executed_qty, net_base_qty, cumulative_quote_qty
-           FROM worker_order_intents
-           WHERE side='BUY' AND state='filled'
-           ORDER BY decision_ms DESC LIMIT 1"""
-    ).fetchone()
+    origin = _latest_filled_buy_origin(db)
     if origin is None:
         reason = "Tracked BTC has no filled worker BUY provenance; worker halted."
         _halt(db, reason)
@@ -812,10 +1632,17 @@ def _verify_position_origin(
         remote = client.order_by_client_id(client_id, symbol=SYMBOL)
     except execution.BinanceTransportError as exc:
         return _transient_retry(db, f"Position-origin read outage: {exc}")
-    except Exception as exc:
+    except execution.BinanceOrderNotFoundError as exc:
         reason = (
             f"Worker BUY origin {client_id} is absent from Binance Spot Testnet; "
             f"a Testnet reset is suspected ({type(exc).__name__}: {exc})."
+        )
+        _halt(db, reason)
+        return {"action": "halted", "reason": reason}
+    except Exception as exc:
+        reason = (
+            f"Worker BUY origin {client_id} lookup failed without definitive "
+            f"Testnet-reset evidence ({type(exc).__name__}: {exc})."
         )
         _halt(db, reason)
         return {"action": "halted", "reason": reason}
@@ -824,22 +1651,7 @@ def _verify_position_origin(
         _halt(db, reason)
         return {"action": "halted", "reason": reason}
     try:
-        _order_identity(remote, client_id, "BUY")
-        if str(remote.get("status", "")).upper() != "FILLED":
-            raise WorkerHalt("Worker BUY origin is no longer FILLED.")
-        remote_executed = _decimal(remote.get("executedQty"), "origin executed quantity")
-        stored_executed = _decimal(origin["executed_qty"], "stored origin quantity")
-        remote_quote = _decimal(
-            remote.get("cummulativeQuoteQty"), "origin cumulative quote"
-        )
-        stored_quote = _decimal(
-            origin["cumulative_quote_qty"], "stored origin cumulative quote"
-        )
-        origin_net = _decimal(origin["net_base_qty"], "stored origin net quantity")
-        if remote_executed != stored_executed or remote_quote != stored_quote:
-            raise WorkerHalt("Worker BUY origin execution no longer matches local state.")
-        if tracked_qty <= 0 or tracked_qty > origin_net:
-            raise WorkerHalt("Tracked BTC quantity exceeds its worker BUY provenance.")
+        _validate_position_origin_order(origin, remote, tracked_qty)
     except WorkerHalt as exc:
         reason = f"Worker BUY provenance mismatch: {exc}"
         _halt(db, reason)
@@ -856,6 +1668,7 @@ def _persist_decision(
     requested_quote: Decimal | None = None,
     requested_qty: Decimal | None = None,
     require_desired: bool = False,
+    learning_refresh_healthy: bool = True,
 ) -> bool:
     """Atomically claim a candle and, when needed, prepare an order intent."""
     candle_ms = int(signal["candle_close_ms"])
@@ -867,17 +1680,49 @@ def _persist_decision(
         previous = state["last_candle_close_ms"]
         if previous is not None and int(previous) >= candle_ms:
             return False
+        capture_reference = {
+            "candle_close_ms": candle_ms,
+            "policy": POLICY,
+            "model_version": POLICY_SPEC_HASH,
+        }
+        if learning_refresh_healthy:
+            _durable_learning_source_call(
+                db,
+                "capture_daily_label",
+                learning_store.capture_daily_label,
+                db,
+                signal,
+                POLICY,
+                POLICY_SPEC_HASH,
+                now,
+                outbox_reference=capture_reference,
+            )
+        else:
+            # A candidate transition may be durably staged on the aggregate
+            # while the source registration still references its predecessor.
+            # Never label against that predecessor; keep the exact decision
+            # reference in the source-ledger outbox for ordered recovery.
+            _enqueue_learning_outbox(
+                db,
+                "capture_daily_label",
+                capture_reference,
+                RuntimeError("learning refresh is not healthy"),
+                now,
+            )
         db.execute(
             """INSERT INTO worker_decisions
                (candle_close_ms, policy, close_latest, close_30d, momentum,
-                target_long, action, client_id, created_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                feature_schema, feature_json, target_long, action, client_id,
+                created_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 candle_ms,
                 POLICY,
                 format(signal["close_latest"], "f"),
                 format(signal["close_30d"], "f"),
                 format(signal["momentum"], "f"),
+                str(signal["feature_schema"]),
+                _json(signal["features"]),
                 int(bool(signal["target_long"])),
                 action,
                 client_id,
@@ -1026,9 +1871,16 @@ def run_once(
         else execution.PublicMarketDataClient()
     )
     with closing(_connect(db_path)) as db:
+        _ensure_account_binding(db, api)
+        learning = _prepare_learning_before_decision(db_path)
+        learning_refresh_healthy = _learning_refresh_allows_source_mutation(
+            learning
+        )
         # Pending durable intent always takes precedence, including after a
         # prior halt.  This permits a restart to observe a delayed fill without
-        # ever posting the order again.
+        # ever posting the order again. Learning preparation deliberately runs
+        # first so a staged candidate transition cannot attribute this fill to
+        # its predecessor; unhealthy source writes are queued by the outbox.
         reconciled = _reconcile_pending(db, api)
         if reconciled is not None:
             return reconciled
@@ -1038,7 +1890,16 @@ def run_once(
             return {"action": "halted", "reason": state["halt_reason"]}
         if enforce_desired and not state["desired_running"]:
             return {"action": "stopped"}
+        state = _state(db)
         tracked_qty = _decimal(state["position_qty"], "tracked position")
+        unresolved_learning = _unresolved_learning_outbox_count(db)
+        if tracked_qty == 0 and unresolved_learning:
+            # Keep a flat ledger flat until prior trade evidence is durable.
+            # An existing long is still allowed to reach its risk-reducing SELL.
+            return {
+                "action": "learning_evidence_pending",
+                "unresolved_learning_outbox": unresolved_learning,
+            }
         if tracked_qty > 0:
             origin_result = _verify_position_origin(db, api, tracked_qty)
             if origin_result is not None:
@@ -1087,6 +1948,7 @@ def run_once(
                 _persist_decision(
                     db, signal, "hold_cash", None,
                     require_desired=enforce_desired,
+                    learning_refresh_healthy=learning_refresh_healthy,
                 )
             except WorkerStopped:
                 return {"action": "stopped"}
@@ -1101,6 +1963,7 @@ def run_once(
                 _persist_decision(
                     db, signal, "hold_long", None,
                     require_desired=enforce_desired,
+                    learning_refresh_healthy=learning_refresh_healthy,
                 )
             except WorkerStopped:
                 return {"action": "stopped"}
@@ -1121,6 +1984,24 @@ def run_once(
 
         candle_ms = int(signal["candle_close_ms"])
         if tracked_qty == 0:
+            if not learning_refresh_healthy:
+                _clear_transient_error(db)
+                try:
+                    _persist_decision(
+                        db,
+                        signal,
+                        "hold_cash",
+                        None,
+                        require_desired=enforce_desired,
+                        learning_refresh_healthy=False,
+                    )
+                except WorkerStopped:
+                    return {"action": "stopped"}
+                return {
+                    "action": "learning_refresh_unhealthy",
+                    "reason": "New entry deferred until learning recovery completes.",
+                    "candle_close_ms": candle_ms,
+                }
             if ENTRY_QUOTE_USDT < min_notional:
                 reason = (
                     f"Fixed {ENTRY_QUOTE_USDT} USDT entry is below Binance minimum "
@@ -1155,6 +2036,7 @@ def run_once(
                     side,
                     requested_quote=ENTRY_QUOTE_USDT,
                     require_desired=enforce_desired,
+                    learning_refresh_healthy=learning_refresh_healthy,
                 )
             except WorkerStopped:
                 return {"action": "stopped"}
@@ -1207,6 +2089,7 @@ def run_once(
             claimed = _persist_decision(
                 db, signal, "sell", client_id, side, requested_qty=quantity,
                 require_desired=enforce_desired,
+                learning_refresh_healthy=learning_refresh_healthy,
             )
         except WorkerStopped:
             return {"action": "stopped"}
@@ -1375,54 +2258,185 @@ def _set_desired(db_path: Path | str, desired: bool) -> None:
         )
 
 
-def _archive_epoch_and_reset(db_path: Path | str) -> dict[str, int]:
+def _is_definitive_order_not_found(exc: BaseException) -> bool:
+    """Accept only Binance's structured ``-2013`` order-query response."""
+
+    return bool(
+        isinstance(exc, execution.BinanceOrderNotFoundError)
+        and exc.method == "GET"
+        and exc.path == "/v3/order"
+        and exc.api_code == -2013
+        and exc.signed is True
+    )
+
+
+def _prove_open_position_origin_was_reset(
+    db: sqlite3.Connection, state: Mapping[str, object], client: object | None
+) -> None:
+    """Require definitive remote deletion before discarding a tracked position."""
+
+    tracked_qty = _decimal(state["position_qty"], "tracked position")
+    if tracked_qty == 0:
+        return
+    if tracked_qty < 0:
+        raise WorkerHalt("Testnet epoch reset refuses a negative tracked position.")
+    origin = db.execute(
+        """SELECT client_id, net_base_qty FROM worker_order_intents
+           WHERE side='BUY' AND state='filled'
+           ORDER BY decision_ms DESC LIMIT 1"""
+    ).fetchone()
+    if origin is None:
+        raise WorkerHalt(
+            "Testnet epoch reset refuses an open position without local BUY provenance."
+        )
+    origin_qty = _decimal(origin["net_base_qty"], "origin net quantity")
+    if origin_qty <= 0 or tracked_qty > origin_qty:
+        raise WorkerHalt(
+            "Testnet epoch reset refuses inconsistent local BUY provenance."
+        )
+    if client is None:
+        raise WorkerHalt(
+            "Testnet epoch reset needs a signed order lookup for the open position."
+        )
+    client_id = str(origin["client_id"])
+    try:
+        client.order_by_client_id(client_id, symbol=SYMBOL)
+    except Exception as exc:
+        if _is_definitive_order_not_found(exc):
+            return
+        raise WorkerHalt(
+            f"Testnet epoch reset could not prove that BUY origin {client_id} was "
+            f"deleted ({type(exc).__name__}: {exc})."
+        ) from exc
+    raise WorkerHalt(
+        f"Testnet epoch reset refuses to discard open position; BUY origin "
+        f"{client_id} still exists on Binance Spot Testnet."
+    )
+
+
+def _archive_epoch_and_reset(
+    db_path: Path | str, client: object | None = None
+) -> dict[str, int]:
     """Archive the active ledger in-place and atomically initialize a new epoch."""
-    with closing(_connect(db_path)) as db, _transaction(db):
-        state = dict(_state(db))
-        if state["desired_running"]:
-            raise WorkerHalt("Testnet epoch reset requires desired_running=false.")
-        if state["pending_client_id"]:
-            raise WorkerHalt("Testnet epoch reset refuses a pending managed intent.")
-        decisions = [dict(row) for row in db.execute(
-            "SELECT * FROM worker_decisions ORDER BY candle_close_ms"
-        )]
-        intents = [dict(row) for row in db.execute(
-            "SELECT * FROM worker_order_intents ORDER BY decision_ms, client_id"
-        )]
-        now = _now_ms()
-        cursor = db.execute(
-            """INSERT INTO worker_epochs
-               (archived_ms, reason, state_json, decision_count, order_count)
-               VALUES (?, 'binance_spot_testnet_epoch_reset', ?, ?, ?)""",
-            (now, _json(state), len(decisions), len(intents)),
-        )
-        epoch_id = int(cursor.lastrowid)
-        db.executemany(
-            """INSERT INTO worker_epoch_decisions
-               (epoch_id, candle_close_ms, record_json) VALUES (?, ?, ?)""",
-            [
-                (epoch_id, int(row["candle_close_ms"]), _json(row))
-                for row in decisions
-            ],
-        )
-        db.executemany(
-            """INSERT INTO worker_epoch_order_intents
-               (epoch_id, client_id, record_json) VALUES (?, ?, ?)""",
-            [(epoch_id, str(row["client_id"]), _json(row)) for row in intents],
-        )
-        db.execute("DELETE FROM worker_order_intents")
-        db.execute("DELETE FROM worker_decisions")
-        db.execute(
-            """UPDATE worker_state SET desired_running=0, halted=0,
-               halt_reason=NULL, position_qty='0', position_quote_cost='0',
-               last_candle_close_ms=NULL, pending_client_id=NULL, pending_side=NULL,
-               pending_decision_ms=NULL, pending_quote=NULL, pending_qty=NULL,
-               last_error=NULL, realized_pnl_usdt='0', pnl_complete=1,
-               pnl_incomplete_reason=NULL, completed_round_trips=0,
-               transient_failures=0, last_transient_error_ms=NULL,
-               created_ms=?, updated_ms=? WHERE singleton=1""",
-            (now, now),
-        )
+    reset_block_reason: str | None = None
+    epoch_id = 0
+    decisions: list[dict[str, object]] = []
+    intents: list[dict[str, object]] = []
+    with closing(_connect(db_path)) as db:
+        # A direct caller must establish or match the same account binding as
+        # the public reset path before any destructive transaction can begin.
+        _ensure_account_binding(db, client)
+        learning = _prepare_learning_before_decision(db_path)
+        if not _learning_refresh_allows_source_mutation(learning):
+            raise WorkerHalt(
+                "Testnet epoch reset requires a healthy learning-source refresh."
+            )
+        with _transaction(db):
+            _assert_account_fingerprint(db, client, allow_unbound=False)
+            state = dict(_state(db))
+            if state["desired_running"]:
+                raise WorkerHalt("Testnet epoch reset requires desired_running=false.")
+            if state["pending_client_id"]:
+                raise WorkerHalt("Testnet epoch reset refuses a pending managed intent.")
+            if _unresolved_learning_outbox_count(db):
+                raise WorkerHalt(
+                    "Testnet epoch reset refuses unresolved learning evidence."
+                )
+            if not _learning_source_writes_healthy(db):
+                raise WorkerHalt(
+                    "Testnet epoch reset refuses a pending learning transition."
+                )
+            # Re-check from the durable origin client id inside the same transaction
+            # that will clear the ledger. Direct callers cannot bypass this proof.
+            _prove_open_position_origin_was_reset(db, state, client)
+            decisions = [dict(row) for row in db.execute(
+                "SELECT * FROM worker_decisions ORDER BY candle_close_ms"
+            )]
+            intents = [dict(row) for row in db.execute(
+                "SELECT * FROM worker_order_intents ORDER BY decision_ms, client_id"
+            )]
+            archive_sequence = int(
+                db.execute("SELECT COUNT(*) FROM worker_epochs").fetchone()[0]
+            ) + 1
+            preserved_last_candle = state["last_candle_close_ms"]
+            if decisions:
+                archived_max_candle = max(
+                    int(row["candle_close_ms"]) for row in decisions
+                )
+                preserved_last_candle = max(
+                    archived_max_candle,
+                    (
+                        archived_max_candle
+                        if preserved_last_candle is None
+                        else int(preserved_last_candle)
+                    ),
+                )
+            now = _now_ms()
+            quarantine_result = _safe_learning_source_call(
+                db,
+                "epoch_reset_quarantine",
+                learning_store.quarantine_open_round_trips,
+                db,
+                "testnet_epoch_reset",
+                now,
+                policy=POLICY,
+                model_version=POLICY_SPEC_HASH,
+                outbox_reference={
+                    "reason": "testnet_epoch_reset",
+                    "policy": POLICY,
+                    "model_version": POLICY_SPEC_HASH,
+                    "archive_sequence": archive_sequence,
+                },
+            )
+            if quarantine_result is _LEARNING_SOURCE_CALL_FAILED:
+                # Commit the durable repair event while preserving every active
+                # provenance row.  A later reset can proceed only after replay.
+                reset_block_reason = (
+                    "Testnet epoch reset deferred because learning evidence "
+                    "quarantine is unresolved."
+                )
+            else:
+                archived_state = dict(state)
+                archived_state.pop("api_key_fingerprint_sha256", None)
+                archived_state["account_bound"] = True
+                cursor = db.execute(
+                    """INSERT INTO worker_epochs
+                       (archived_ms, reason, state_json, decision_count, order_count)
+                       VALUES (?, 'binance_spot_testnet_epoch_reset', ?, ?, ?)""",
+                    (now, _json(archived_state), len(decisions), len(intents)),
+                )
+                epoch_id = int(cursor.lastrowid)
+                db.executemany(
+                    """INSERT INTO worker_epoch_decisions
+                       (epoch_id, candle_close_ms, record_json) VALUES (?, ?, ?)""",
+                    [
+                        (epoch_id, int(row["candle_close_ms"]), _json(row))
+                        for row in decisions
+                    ],
+                )
+                db.executemany(
+                    """INSERT INTO worker_epoch_order_intents
+                       (epoch_id, client_id, record_json) VALUES (?, ?, ?)""",
+                    [
+                        (epoch_id, str(row["client_id"]), _json(row))
+                        for row in intents
+                    ],
+                )
+                db.execute("DELETE FROM worker_order_intents")
+                db.execute("DELETE FROM worker_decisions")
+                db.execute(
+                    """UPDATE worker_state SET desired_running=0, halted=0,
+                       halt_reason=NULL, position_qty='0', position_quote_cost='0',
+                       last_candle_close_ms=?, pending_client_id=NULL, pending_side=NULL,
+                       pending_decision_ms=NULL, pending_quote=NULL, pending_qty=NULL,
+                       last_error=NULL, realized_pnl_usdt='0', pnl_complete=1,
+                       pnl_incomplete_reason=NULL, completed_round_trips=0,
+                       transient_failures=0, last_transient_error_ms=NULL,
+                       created_ms=?, updated_ms=? WHERE singleton=1""",
+                    (preserved_last_candle, now, now),
+                )
+    if reset_block_reason is not None:
+        raise WorkerHalt(reset_block_reason)
     return {
         "reset_epoch_id": epoch_id,
         "archived_decisions": len(decisions),
@@ -1430,56 +2444,206 @@ def _archive_epoch_and_reset(db_path: Path | str) -> dict[str, int]:
     }
 
 
-def status_snapshot(
-    db_path: Path | str = DB_PATH, lock_path: Path | str = LOCK_PATH
-) -> dict[str, object]:
-    with closing(_connect(db_path)) as db:
-        state = dict(_state(db))
-        counts = db.execute(
-            """SELECT COUNT(*) AS intents,
-               COALESCE(SUM(state='filled'),0) AS filled
-               FROM worker_order_intents"""
-        ).fetchone()
-        latest = db.execute(
-            """SELECT candle_close_ms, momentum, action, client_id
-               FROM worker_decisions ORDER BY candle_close_ms DESC LIMIT 1"""
-        ).fetchone()
-        archived_epochs = int(
-            db.execute("SELECT COUNT(*) FROM worker_epochs").fetchone()[0]
+def _learning_status_nonfatal(db_path: Path | str) -> dict[str, object]:
+    try:
+        return learning_store.status_snapshot(
+            db_path, _learning_db_path(db_path)
         )
-    qty = _decimal(state["position_qty"], "tracked position")
-    return {
-        "policy": state["active_policy"],
-        "policy_model_version": state["policy_spec_hash"],
-        "configured_policy": POLICY,
-        "policy_match": (
-            state["active_policy"] == POLICY
-            and state["policy_spec_hash"] == POLICY_SPEC_HASH
+    except Exception as exc:
+        return {
+            "schema": learning_store.SCHEMA_VERSION,
+            "mode": "proposal_only_manual_review_required",
+            "status": "learning_status_unavailable",
+            "last_error": f"{type(exc).__name__}: {exc}",
+            "proposal_ready_for_review": False,
+            "automatic_activation_enabled": False,
+            "writes_active_config": False,
+            "testnet_execution_eligible": False,
+            "paper_eligible": False,
+            "real_money_eligible": False,
+            "real_orders_enabled": False,
+            "live_trading_enabled": False,
+        }
+
+
+def _record_learning_refresh_error(
+    db_path: Path | str, exc: Exception, attempted_ms: int
+) -> None:
+    """Atomically persist refresh health and any immutable integrity evidence."""
+
+    message = f"refresh: {type(exc).__name__}: {exc}"
+    try:
+        with closing(_connect(db_path)) as db, _transaction(db):
+            if isinstance(exc, learning_store.LearningIntegrityError):
+                latest = db.execute(
+                    """SELECT message, created_ms FROM worker_learning_source_errors
+                       ORDER BY created_ms DESC LIMIT 1"""
+                ).fetchone()
+                duplicate_age = (
+                    None
+                    if latest is None
+                    else attempted_ms - int(latest["created_ms"])
+                )
+                if not (
+                    latest is not None
+                    and str(latest["message"]) == message
+                    and duplicate_age is not None
+                    and 0 <= duplicate_age < 60 * 60 * 1000
+                ):
+                    learning_store.record_source_error(
+                        db, message, attempted_ms
+                    )
+            learning_store.mark_refresh_failure(
+                db,
+                f"{type(exc).__name__}: {exc}",
+                attempted_ms,
+            )
+    except Exception:
+        pass
+
+
+def _force_learning_refresh_unhealthy(
+    snapshot: dict[str, object], message: str, now_ms: int
+) -> dict[str, object]:
+    snapshot["status"] = "learning_refresh_unhealthy"
+    snapshot["proposal_ready_for_review"] = False
+    snapshot["last_refresh_error"] = message
+    snapshot["refresh_health"] = {
+        "healthy": False,
+        "last_attempt_failed": True,
+        "sanitized_error": message,
+        "attempted_ms": now_ms,
+        "last_success_ms": (
+            snapshot.get("refresh_health", {}).get("last_success_ms")
+            if isinstance(snapshot.get("refresh_health"), Mapping)
+            else None
         ),
-        "momentum_threshold": format(MOMENTUM_THRESHOLD, "f"),
-        "entry_quote_usdt": format(ENTRY_QUOTE_USDT, "f"),
-        "symbol": SYMBOL,
-        "market_data_source": "binance_public_spot",
-        "execution_environment": "binance_spot_testnet",
-        "running": _lock_active(lock_path),
-        "desired_running": bool(state["desired_running"]),
-        "halted": bool(state["halted"]),
-        "halt_reason": state["halt_reason"],
-        "position": "cash" if qty == 0 else "long",
-        "tracked_position_qty": format(qty, "f"),
-        "tracked_position_cost_usdt": state["position_quote_cost"],
-        "realized_pnl_usdt": state["realized_pnl_usdt"],
-        "pnl_complete": bool(state["pnl_complete"]),
-        "pnl_incomplete_reason": state["pnl_incomplete_reason"],
-        "completed_round_trips": int(state["completed_round_trips"]),
-        "archived_epochs": archived_epochs,
-        "transient_failures": int(state["transient_failures"]),
-        "last_error": state["last_error"],
-        "pending_client_id": state["pending_client_id"],
-        "last_candle_close_ms": state["last_candle_close_ms"],
-        "intents": int(counts["intents"]),
-        "filled_orders": int(counts["filled"]),
-        "latest_decision": dict(latest) if latest else None,
+    }
+    latest = snapshot.get("latest")
+    if isinstance(latest, dict):
+        latest["status"] = "learning_refresh_unhealthy"
+        latest["proposal_ready_for_review"] = False
+        latest["last_error"] = message
+    return snapshot
+
+
+def _refresh_learning_nonfatal(db_path: Path | str) -> dict[str, object]:
+    attempted_ms = _now_ms()
+    try:
+        learning_store.refresh(
+            db_path, _learning_db_path(db_path), now_ms=attempted_ms
+        )
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        _record_learning_refresh_error(db_path, exc, attempted_ms)
+        snapshot = _learning_status_nonfatal(db_path)
+        return _force_learning_refresh_unhealthy(
+            snapshot, message, attempted_ms
+        )
+    try:
+        with closing(_connect(db_path)) as db:
+            learning_store.mark_refresh_success(db, attempted_ms)
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        snapshot = _learning_status_nonfatal(db_path)
+        return _force_learning_refresh_unhealthy(
+            snapshot, message, attempted_ms
+        )
+    # Re-read after clearing health; refresh() may have returned a snapshot
+    # carrying the prior failure overlay.
+    return _learning_status_nonfatal(db_path)
+
+
+def _learning_refresh_allows_source_mutation(
+    snapshot: Mapping[str, object],
+) -> bool:
+    """Require affirmative refresh health and no staged candidate transition."""
+
+    health = snapshot.get("refresh_health")
+    if not isinstance(health, Mapping):
+        return False
+    if health.get("healthy") is not True or health.get("last_attempt_failed") is True:
+        return False
+    status = str(snapshot.get("status", ""))
+    latest = snapshot.get("latest")
+    latest_status = (
+        str(latest.get("status", "")) if isinstance(latest, Mapping) else ""
+    )
+    blocked_statuses = {
+        "candidate_transition_pending",
+        "learning_refresh_unhealthy",
+        "learning_status_unavailable",
+    }
+    return status not in blocked_statuses and latest_status not in blocked_statuses
+
+
+def _prepare_learning_before_decision(
+    db_path: Path | str,
+) -> dict[str, object]:
+    """Recover aggregate/source transitions before replaying causal evidence."""
+
+    first = _refresh_learning_nonfatal(db_path)
+    if not _learning_refresh_allows_source_mutation(first):
+        return first
+
+    adoption_failed = False
+    with closing(_connect(db_path)) as db:
+        revision_before = int(db.execute(
+            """SELECT learning_revision FROM worker_learning_meta
+               WHERE singleton=1"""
+        ).fetchone()[0])
+        _replay_learning_outbox(db)
+        if _unresolved_learning_outbox_count(db) == 0:
+            adopted = _safe_learning_source_call(
+                db,
+                "adopt_open_round_trip",
+                learning_store.adopt_open_round_trip,
+                db,
+                POLICY,
+                POLICY_SPEC_HASH,
+                _now_ms(),
+            )
+            adoption_failed = adopted is _LEARNING_SOURCE_CALL_FAILED
+        revision_after = int(db.execute(
+            """SELECT learning_revision FROM worker_learning_meta
+               WHERE singleton=1"""
+        ).fetchone()[0])
+    if adoption_failed:
+        attempted_ms = _now_ms()
+        exc = learning_store.LearningStoreError(
+            "Legacy learning-source adoption is temporarily unavailable."
+        )
+        _record_learning_refresh_error(db_path, exc, attempted_ms)
+        return _force_learning_refresh_unhealthy(
+            _learning_status_nonfatal(db_path),
+            f"{type(exc).__name__}: {exc}",
+            attempted_ms,
+        )
+
+    if revision_after == revision_before:
+        return _learning_status_nonfatal(db_path)
+
+    # Recompute the aggregate after ordered replay/adoption so the readiness
+    # watermark and any transition staged by this refresh are current before
+    # the execution decision starts.
+    return _refresh_learning_nonfatal(db_path)
+
+
+def learning_snapshot(
+    db_path: Path | str = DB_PATH, *, refresh: bool = False
+) -> dict[str, object]:
+    """Read proposal-only learning progress without requiring API credentials."""
+
+    if not refresh:
+        return _learning_status_nonfatal(db_path)
+    # Ensure the source schema exists and adopt any legacy managed open position.
+    with closing(_connect(db_path)):
+        pass
+    return _refresh_learning_nonfatal(db_path)
+
+
+def _caller_environment_status() -> dict[str, bool]:
+    return {
         "caller_env_credentials_present": bool(
             os.getenv("BINANCE_TESTNET_API_KEY")
             and os.getenv("BINANCE_TESTNET_SECRET_KEY")
@@ -1491,6 +2655,125 @@ def status_snapshot(
             os.getenv("BINANCE_ORDER_EXECUTION_ENABLED") == "testnet"
         ),
     }
+
+
+def _unavailable_status_snapshot(
+    db_path: Path | str,
+    lock_path: Path | str,
+    exc: BaseException,
+) -> dict[str, object]:
+    detail = " ".join(str(exc).split())[:500]
+    error = type(exc).__name__ if not detail else f"{type(exc).__name__}: {detail}"
+    return {
+        "status": "worker_status_unavailable",
+        "status_available": False,
+        "status_error": error,
+        "execution_state_known": False,
+        "configured_policy": POLICY,
+        "policy": None,
+        "policy_model_version": None,
+        "policy_match": False,
+        "momentum_threshold": format(MOMENTUM_THRESHOLD, "f"),
+        "entry_quote_usdt": format(ENTRY_QUOTE_USDT, "f"),
+        "symbol": SYMBOL,
+        "market_data_source": "binance_public_spot",
+        "execution_environment": "binance_spot_testnet",
+        "account_bound": None,
+        "running": _lock_active(lock_path),
+        "desired_running": None,
+        "halted": None,
+        "halt_reason": None,
+        "position": "unknown",
+        "tracked_position_qty": None,
+        "tracked_position_cost_usdt": None,
+        "realized_pnl_usdt": None,
+        "pnl_complete": None,
+        "pnl_incomplete_reason": None,
+        "completed_round_trips": None,
+        "archived_epochs": None,
+        "unresolved_learning_outbox": None,
+        "transient_failures": None,
+        "last_error": None,
+        "pending_client_id": None,
+        "last_candle_close_ms": None,
+        "intents": None,
+        "filled_orders": None,
+        "latest_decision": None,
+        "learning": _learning_status_nonfatal(db_path),
+        **_caller_environment_status(),
+    }
+
+
+def status_snapshot(
+    db_path: Path | str = DB_PATH, lock_path: Path | str = LOCK_PATH
+) -> dict[str, object]:
+    try:
+        with closing(_connect_read_only(db_path)) as db:
+            # One deferred read transaction pins all fields to the same SQLite
+            # snapshot while the worker may concurrently commit a fill/reset.
+            db.execute("BEGIN")
+            try:
+                state = dict(_state(db))
+                counts = db.execute(
+                    """SELECT COUNT(*) AS intents,
+                       COALESCE(SUM(state='filled'),0) AS filled
+                       FROM worker_order_intents"""
+                ).fetchone()
+                latest = db.execute(
+                    """SELECT candle_close_ms, momentum, action, client_id
+                       FROM worker_decisions ORDER BY candle_close_ms DESC LIMIT 1"""
+                ).fetchone()
+                archived_epochs = int(
+                    db.execute("SELECT COUNT(*) FROM worker_epochs").fetchone()[0]
+                )
+                unresolved_learning_outbox = _unresolved_learning_outbox_count(db)
+            finally:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+        qty = _decimal(state["position_qty"], "tracked position")
+        return {
+            "status": "available",
+            "status_available": True,
+            "status_error": None,
+            "execution_state_known": True,
+            "policy": state["active_policy"],
+            "policy_model_version": state["policy_spec_hash"],
+            "configured_policy": POLICY,
+            "policy_match": (
+                state["active_policy"] == POLICY
+                and state["policy_spec_hash"] == POLICY_SPEC_HASH
+            ),
+            "momentum_threshold": format(MOMENTUM_THRESHOLD, "f"),
+            "entry_quote_usdt": format(ENTRY_QUOTE_USDT, "f"),
+            "symbol": SYMBOL,
+            "market_data_source": "binance_public_spot",
+            "execution_environment": "binance_spot_testnet",
+            "account_bound": state["api_key_fingerprint_sha256"] is not None,
+            "running": _lock_active(lock_path),
+            "desired_running": bool(state["desired_running"]),
+            "halted": bool(state["halted"]),
+            "halt_reason": state["halt_reason"],
+            "position": "cash" if qty == 0 else "long",
+            "tracked_position_qty": format(qty, "f"),
+            "tracked_position_cost_usdt": state["position_quote_cost"],
+            "realized_pnl_usdt": state["realized_pnl_usdt"],
+            "pnl_complete": bool(state["pnl_complete"]),
+            "pnl_incomplete_reason": state["pnl_incomplete_reason"],
+            "completed_round_trips": int(state["completed_round_trips"]),
+            "archived_epochs": archived_epochs,
+            "unresolved_learning_outbox": unresolved_learning_outbox,
+            "transient_failures": int(state["transient_failures"]),
+            "last_error": state["last_error"],
+            "pending_client_id": state["pending_client_id"],
+            "last_candle_close_ms": state["last_candle_close_ms"],
+            "intents": int(counts["intents"]),
+            "filled_orders": int(counts["filled"]),
+            "latest_decision": dict(latest) if latest else None,
+            "learning": _learning_status_nonfatal(db_path),
+            **_caller_environment_status(),
+        }
+    except Exception as exc:
+        return _unavailable_status_snapshot(db_path, lock_path, exc)
 
 
 def run_forever(
@@ -1524,6 +2807,11 @@ def run_forever(
     api_poll = max(API_POLL_SECONDS, float(api_poll_seconds))
     next_api_poll = 0.0
     with _process_lock(_account_lock_path(lock_path)), _process_lock(lock_path):
+        with closing(_connect(db_path)) as db:
+            _ensure_account_binding(db, api)
+        # Recover or bind any aggregate learner candidate before the next daily
+        # decision can seal a label. This sidecar call is deliberately nonfatal.
+        _prepare_learning_before_decision(db_path)
         try:
             while True:
                 with closing(_connect(db_path)) as db:
@@ -1549,6 +2837,7 @@ def run_forever(
                     market_data_client=market,
                     enforce_desired=True,
                 )
+                _refresh_learning_nonfatal(db_path)
                 delay = max(api_poll, float(result.get("backoff_seconds", 0)))
                 next_api_poll = time.monotonic() + delay
                 if result.get("action") == "halted":
@@ -1597,22 +2886,40 @@ def _control_locked(
         _reset_gate()
         if _lock_active(lock_path):
             raise WorkerHalt("Testnet epoch reset requires the worker to be stopped.")
-        with closing(_connect(db_path)) as db:
-            state = _state(db)
-            if state["desired_running"]:
-                raise WorkerHalt("Testnet epoch reset requires desired_running=false.")
-            if state["pending_client_id"]:
-                raise WorkerHalt("Testnet epoch reset refuses a pending managed intent.")
-        api = client if client is not None else execution.Client()
-        try:
-            open_orders = api.open_orders(symbol=SYMBOL)
-        except Exception as exc:
-            raise WorkerHalt(f"Testnet reset open-order check failed: {exc}") from exc
-        if not isinstance(open_orders, list):
-            raise WorkerHalt("Testnet reset open-order response is invalid.")
-        if open_orders:
-            raise WorkerHalt("Testnet epoch reset refuses existing BTCUSDT open orders.")
-        archive = _archive_epoch_and_reset(db_path)
+        account_lock_path = _account_lock_path(lock_path)
+        if _lock_active(account_lock_path):
+            raise WorkerHalt(
+                "Testnet epoch reset refuses an active account-wide execution lease."
+            )
+        # Hold the same account-wide lease as the execution loop throughout the
+        # remote checks and local archive, closing the check/use race with a
+        # directly launched worker.
+        with _process_lock(account_lock_path):
+            api = client if client is not None else execution.Client()
+            with closing(_connect(db_path)) as db:
+                state = _state(db)
+                if state["desired_running"]:
+                    raise WorkerHalt(
+                        "Testnet epoch reset requires desired_running=false."
+                    )
+                if state["pending_client_id"]:
+                    raise WorkerHalt(
+                        "Testnet epoch reset refuses a pending managed intent."
+                    )
+                _ensure_account_binding(db, api)
+            try:
+                open_orders = api.open_orders(symbol=SYMBOL)
+            except Exception as exc:
+                raise WorkerHalt(
+                    f"Testnet reset open-order check failed: {exc}"
+                ) from exc
+            if not isinstance(open_orders, list):
+                raise WorkerHalt("Testnet reset open-order response is invalid.")
+            if open_orders:
+                raise WorkerHalt(
+                    "Testnet epoch reset refuses existing BTCUSDT open orders."
+                )
+            archive = _archive_epoch_and_reset(db_path, api)
         return {**status_snapshot(db_path, lock_path), **archive}
     if command != "start":
         raise ValueError("Worker control action must be start, stop, status, or reset.")
@@ -1636,7 +2943,9 @@ def _control_locked(
             "Another Binance Testnet policy worker already owns the account-wide "
             "execution lease. Stop that worker before starting this policy."
         )
+    api = client if client is not None else execution.Client()
     with closing(_connect(db_path)) as db:
+        _assert_account_fingerprint(db, api, allow_unbound=True)
         state = _state(db)
         if state["halted"] and not state["pending_client_id"]:
             raise WorkerHalt(
@@ -1745,9 +3054,11 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AccountBindingError",
     "ACCOUNT_LOCK_PATH",
     "CONTROL_LOCK_PATH",
     "DB_PATH",
+    "LEARNING_DB_PATH",
     "LOCK_PATH",
     "POLICY",
     "POLICY_CONFIG_PATH",
@@ -1756,6 +3067,7 @@ __all__ = [
     "SYMBOL",
     "WorkerHalt",
     "control",
+    "learning_snapshot",
     "run_forever",
     "run_once",
     "status_snapshot",

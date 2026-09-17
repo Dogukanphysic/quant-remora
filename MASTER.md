@@ -501,7 +501,8 @@ sonucu ayrı gösterir. V1 kayıpları silinmez ve v2 başarısı gibi sunulmaz.
 | Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 0 |
 | Binance public Testnet | VPN ile bağlantı, saat, BTCUSDT ve minimum notional doğrulandı |
 | Binance imzalı Testnet | Güvenli betik tamamlandı; anahtarlar dosyaya yazılmadı |
-| Binance background worker | `%10` Testnet policy çalışıyor; 30g momentum `%18,0901`, `long`, 1 niyet / 1 dolum, `0,00013000 BTC`, maliyet `9,96557640 USDT` |
+| Binance background worker — 17 Eylül 2026 anlık görüntüsü | `%10` Testnet policy çalışıyor; 30g momentum `%18,0901`, `long`, 1 niyet / 1 dolum, `0,00013000 BTC`, maliyet `9,96557640 USDT` |
+| Binance Testnet online öğrenme — 17 Eylül 2026 anlık görüntüsü | Append-only günlük etiket ve kesin tur kanıtı; kapanmış kesin tur 0, otomatik config değişimi kapalı |
 
 Bu tablo yerel `paper-status`, public Binance doctor ve operatörün imzalı Testnet
 doğrulama sonucuna dayanır. Daha sonraki canlı durum için `paper-status` ve
@@ -553,9 +554,11 @@ python agent.py train-binance-testnet-policy
 # Ayrı 10 USDT Testnet yürütme pilotunu başlatma ve izleme
 & .\scripts\start-binance-testnet-agent.ps1
 python agent.py binance-testnet-agent-status
+python agent.py binance-testnet-learning-status
 python agent.py binance-testnet-agent-stop
 
-# Yalnız Binance Testnet dönemsel olarak hesabı sıfırladıktan ve worker durduktan sonra
+# Yalnız Binance Testnet dönemsel olarak hesabı sıfırladıktan, worker durduktan ve
+# açık yerel pozisyon varsa kaynak BUY emri yapılandırılmış -2013 ile silinmişse
 & .\scripts\reset-binance-testnet-agent.ps1
 ```
 
@@ -573,6 +576,44 @@ hedefi değiştiğinde 10 USDT sanal emir verir. Model sürümü ve politika kim
 SQLite defterine bağlanır; eski `%20` kayıtları korunur. `%10` adayının son Binance
 Spot tanı yılı `-%10,44` olduğu için bu bir kârlılık veya gerçek para terfisi değildir;
 15 dakikalık kontrol ve challenger sermaye için de hâlâ uygun değildir.
+Yürütme defteri doğrulanmış Testnet API anahtarının yalnız SHA-256 parmak izine
+bağlanır; anahtar/secret kalıcı depoya ve durum çıktısına yazılmaz. Start, çalışma ve reset
+aynı API anahtarı bağını kanıtlar. Reset son işlenmiş mum sınırını koruduğu için aynı günlük
+mumda yeniden emir üretmez.
+
+Testnet online öğrenme hattı karar zamanındaki nedensel günlük özellikleri append-only
+kaydeder. Etiket yalnız tam bir sonraki UTC günlük kapanışla mühürlenir; bir günlük
+süreklilik bozulursa örnek eğitime alınmaz ve boşluk karantinaya yazılır. Gerçek emir
+kanıtı yalnız alış ve satış dolumları kesin uzlaştırılmış kapanmış Testnet turundan,
+gerçek maliyet ve P&L ile üretilir. Mevcut `%10` alış pozisyonu açık kalır ve etkin
+policy tarafından yönetilir; challenger'a sonuç uydurulmaz.
+
+Politika defterlerindeki değişmez kayıtlar her kaynak deftere özel
+`state/<kaynak-defter-adı>-online-learning.sqlite3` içinde tutulur; farklı policy/model
+kaynakları aynı aggregate içinde birleştirilmez. Kaynak defter ve aggregate kimliği
+tam olarak bir policy/model çiftine mühürlenir. İlk fit 60 günlük etikette yapılır; aday çıkmazsa en az 30
+yeni etiketten sonra `%3/%5/%10/%15/%20` sabit eşik ızgarası yeniden taranabilir.
+Bir aday dondurulduğunda yeni fit yapılmaz; performans ve incumbent üstünlüğü yalnız
+dondurma sonrasındaki dokunulmamış sonuçlarla değerlendirilir. Dondurma sınırındaki
+tek sonuç embargo olarak dışarıda kalır. Sonraki bir veri boşluğu adayı append-only
+emeklilik kaydıyla kapatır ve kesintisiz yeni bölüm ayrı yaşam döngüsü başlatır.
+Eğitim etiketleri yalnız
+toplam veri-yeterliliği sayımına girer. İnceleme önerisi için toplam en az 200 ileri
+toplanmış etiket, 60 dondurma
+sonrası etiket, challenger geçişiyle eşleşen 8 kesin kapanmış Testnet turu, hem günlük
+kohortta hem gerçek turlarda pozitif net sonuç, PF `>=1,15`, azami düşüş `<=%15`,
+incumbent üstünlüğü ve sıfır güvenlik ihlali birlikte gerekir.
+`proposal_ready_for_review` otomatik terfi değildir:
+aktif config yazılmaz, hot-swap yapılmaz, paper/real/live bayrakları açılmaz.
+Çözülmemiş execution-learning outbox olayı, başarısız son yenileme veya şema/öğrenici
+sürüm uyuşmazlığı hazır durumunu fail-closed olarak kapatır. Günlük etiket, BUY-open,
+SELL-close ve epoch-karantina olayları kalıcı eklenme sırasıyla oynatılır; ilk hata
+çözülmeden sonraki olay çalışmaz. Her kaynak kanıt değişikliği aynı transaction'da
+`learning_revision` değerini artırır. Aggregate yalnız aynı değeri
+`ingested_source_revision` olarak mühürlediyse güncel kabul edilir.
+Aday kaynak bağı iki aşamalı kalıcı geçişle uygulanır. Pending geçiş doğrudan öğrenme
+yazımını ve yeni alışları kapatır; restart aynı geçişi idempotent tamamlar. Öğrenici
+sürümü değişirse eski aggregate açık arşiv/migrasyon olmadan yeni sürüme taşınmaz.
 
 ## 15. Dosya ve durum haritası
 
@@ -589,13 +630,17 @@ Spot tanı yılı `-%10,44` olduğu için bu bir kârlılık veya gerçek para t
 | `binance_execution.py` | Public Spot GET-only mum istemcisi ile ayrı Testnet-only HMAC, market filtreleri, alış/satış ve `myTrades` uzlaştırması |
 | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT sanal pozisyon, kalıcı emir niyeti ve tekrar koruması |
 | `testnet_policy_trainer.py` | Ön-kayıtlı eşikler, iki-piyasa maliyet kapıları ve Testnet-only config üretimi |
+| `testnet_online_learner.py` | Sabit eşik ızgarasını maliyetli nedensel örneklerde değerlendiren, yalnız inceleme önerisi üreten saf challenger motoru |
+| `testnet_learning_store.py` | Politika defterlerinden değişmez etiket/tur aktarımı, karantina, fit takvimi ve kalıcı öğrenme durumu |
 | `config/binance-testnet-active-policy.json` | Aktif policy, model/veri sürümü, sabit 10 USDT ve gerçek para kapıları |
 | `reports/binance-testnet-active-policy.md` | Eğitim sonucu, yakın dönem Spot tanısı ve kullanım sınırları |
+| `reports/binance-testnet-online-learning.md` | Testnet online öğrenme verisi, dondurma ve inceleme kapıları |
 | `scripts/setup-binance-testnet.ps1` | Anahtarları kaydetmeden hesap ve `/order/test` doğrulaması |
 | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi ve çift kapıyla detached Testnet worker başlatma |
 | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş Testnet dönemini aynı SQLite içinde arşivleyip yeni epoch açma |
 | `state/paper.sqlite3` | Canlı sanal durumun tek kaynağı |
 | `state/binance-testnet-<policy>-<model>.sqlite3` | Politika/model sürümüne ayrılmış Testnet karar, emir niyeti, dolum, pozisyon ve sanal P&L defteri |
+| `state/<kaynak-defter-adı>-online-learning.sqlite3` | Tek yürütme defterine bağlı, kimlik denetimli günlük etiket, kesin tur ve dondurulmuş challenger kayıtları |
 | `state/bollinger-v2-model.json` | Güncel çıkarım artefaktı |
 | `reports/bollinger-v2-training.json` | Tekrarlanabilir eğitim sonucu |
 | `reports/bollinger-v2-research.md` | Araştırma kararı ve kanıt özeti |
@@ -615,7 +660,7 @@ ve mümkünse challenger girişi aynı transaction içinde yazılır.
 `v3_paper_state`, `v3_paper_decisions` ve `v3_paper_executions` V3 testini V2
 muhasebesinden ayırır. Testnet reseti aktif satırları `worker_epochs` ve ilgili epoch
 tablolarına aynı transaction içinde taşır; denetim geçmişini silmez. 17 Eylül 2026'da
-tam otomatik test paketi **256/256** geçti.
+tam otomatik test paketi **354/354** geçti.
 
 ## 16. Bilinen sınırlar
 

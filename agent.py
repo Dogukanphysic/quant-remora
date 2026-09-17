@@ -414,6 +414,8 @@ def main():
                    help='Binance Spot Testnet workerını güvenli biçimde durdur')
     sub.add_parser('binance-testnet-agent-reset',
                    help='Aylık Testnet sıfırlamasından sonra durmuş worker defterini arşivle')
+    sub.add_parser('binance-testnet-learning-status',
+                   help='Testnet günlük öğrenme ve dondurulmuş challenger kanıtını göster')
     sub.add_parser('binance-testnet-account',
                    help='Ortam değişkenlerindeki Testnet anahtarıyla bakiye ve açık emirleri uzlaştır')
     order_check = sub.add_parser('binance-testnet-order-check',
@@ -769,6 +771,14 @@ def main():
     if args.command == 'binance-execution-doctor':
         import binance_execution
         print(json.dumps(binance_execution.public_doctor(), indent=2, ensure_ascii=True))
+        return
+    if args.command == 'binance-testnet-learning-status':
+        import binance_testnet_worker
+        print(json.dumps(
+            binance_testnet_worker.learning_snapshot(refresh=False),
+            indent=2,
+            ensure_ascii=True,
+        ))
         return
     if args.command.startswith('binance-testnet-agent-'):
         import binance_testnet_worker

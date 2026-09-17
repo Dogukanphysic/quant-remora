@@ -65,6 +65,8 @@ simülasyondur.
 | Binance veri/yürütme adapterı | `binance_execution.py` | Public Spot GET-only mumlar ile ayrı Testnet-only HMAC/emir/dolum istemcileri |
 | Testnet policy trainer | `testnet_policy_trainer.py` | Ön-kayıtlı momentum eşiklerini iki piyasada maliyet ve dönem kapılarıyla değerlendirip Testnet-only config üretme |
 | Binance Testnet worker | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT pozisyon, SQLite niyet defteri ve süreç kontrolü |
+| Testnet online learner | `testnet_online_learner.py` | Sabit eşik ızgarası, maliyetli getiri ölçümü ve yalnız incelemeye açık challenger raporu |
+| Testnet öğrenme deposu | `testnet_learning_store.py` | Tek kaynak defterden değişmez etiket/tur aktarımı, karantina, fit takvimi ve sürüm bağlı durum |
 | Güvenli Testnet başlatma | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi, ön kontrol, açık onay ve detached worker ortamı |
 | Testnet epoch reseti | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş dönemi aynı SQLite içinde arşivleyip temiz aktif epoch açma |
 | Kalıcılık | `state/paper.sqlite3` | Durum, olay, portföy ve ileri öğrenme kayıtları |
@@ -372,12 +374,18 @@ iki ayrı anahtar gerekir: `BINANCE_TESTNET_WORKER_ENABLED=true` ve
 `BINANCE_ORDER_EXECUTION_ENABLED=testnet`. Kimlik bilgileri güvenli başlatma
 PowerShell işlemi ile onun ön kontrol çocuklarında geçici olarak bulunur; sonunda
 temizlenir. Başarılı başlangıçtan sonra yalnız detached worker kendi kopyasını tutar.
+Yürütme defteri ilk kesin uzlaştırmada Testnet API anahtarının SHA-256 parmak izine
+bağlanır. Ham anahtar veya secret saklanmaz, parmak izi durum çıktısına verilmez.
+Sonraki start, çalışma ve reset aynı API anahtarı bağını kanıtlamadan defteri kullanamaz.
 
 Testnet'in dönemsel hesap sıfırlamasından sonra reset yalnız worker durmuşken,
-bekleyen niyet ve BTCUSDT açık emri yokken çalışır. Ayrı reset kapısı ve açık onay
-gerekir. Worker durumu, kararlar ve emir niyetleri aynı SQLite transaction'ında
+bekleyen niyet ve BTCUSDT açık emri yokken çalışır. Yerel pozisyon açıksa kaynak BUY
+emrinin imzalı `GET /v3/order` sorgusunda yapılandırılmış `-2013` ile silindiği kesin
+olarak kanıtlanmalıdır; transport veya genel istemci hatası kanıt değildir. Ayrı reset
+kapısı ve açık onay gerekir. Worker durumu, kararlar ve emir niyetleri aynı SQLite transaction'ında
 append-only epoch tablolarına arşivlenir; kontrol mutex'i eşzamanlı start/stop/reset
-yarışını engeller.
+yarışını engeller. Son işlenmiş mum sınırı yeni epoch'a taşınır; aynı günlük mumda
+istemci kimliği yeniden kullanılarak ikinci emir açılamaz.
 
 ```mermaid
 sequenceDiagram
@@ -404,6 +412,92 @@ sequenceDiagram
         W->>D: Record one decision for the closed day
     end
 ```
+
+### Binance Testnet challenger öğrenme hattı
+
+Testnet öğrenmesi yürütmeden ayrılmış iki katmanlı bir defter kullanır. Her
+politika/model defteri, karar anında bilinen günlük nedensel özellikleri append-only
+olarak saklar. Yeni tamamlanmış günlük mum geldiğinde yalnız bir önceki karar mumu ile
+arasında tam `DAY_MS` varsa ileri günlük getiri hesaplanır ve örnek hash ile
+mühürlenir. Kesinti veya veri boşluğu nedeniyle aralık daha uzunsa sonuç tek günlük
+etiket gibi kullanılmaz; boşluk karantinaya kaydedilir.
+
+İkinci kanıt tipi gerçek Testnet turudur. BUY dolumu açık turu maliyet ve miktarla
+başlatır. Ancak eşleşen SELL dolumu pozisyonu tamamen kapattığında ve dolum/P&L
+uzlaştırması kesinse tur kapanmış kanıt olur. Belirsiz, kısmi veya kayıp kaynak emir
+eğitim kanıtı üretmez. Hâlihazırdaki `%10` policy'nin açık BTC pozisyonu aynı policy
+tarafından çıkışa kadar yönetilir; öğrenme geçişi bu pozisyonu kapatmaz veya başka
+modele mal etmez.
+
+Her kaynak defterdeki kayıtlar kimlikleriyle ve idempotent biçimde o deftere özel
+`state/<kaynak-defter-adı>-online-learning.sqlite3` içine alınır. Aggregate veritabanı
+tam olarak bir `source_ledger_id` ve bir policy/model çiftine bağlanır; kaynak
+defterde ikinci bir policy/model kaydı kabul edilmez ve farklı kimliklerin kanıtı
+fiziksel olarak karıştırılmaz. Günlük etiketleri, kesin kapanmış turları,
+dondurulmuş öğrenme koşularını ve son durumu bir arada tutar. Mühürlü etiket, boşluk,
+tur, emeklilik ve hata kanıtı sonradan yeniden yazılmaz. Outbox çözüm bilgisi,
+yenileme sağlığı ve registration yaşam döngüsü kontrollü mutable durumdur. İlk seçim
+aday üretemezse en az 30 yeni etiket sonra yeniden denenebilir.
+Bir aday dondurulduğunda seçim durur ve aynı sürüm kendi kesin dondurma-sonrası
+kohortuyla izlenir. Dondurma sınırındaki tek örnek embargo olarak performanstan
+çıkarılır. Dondurma sonrası süreklilik boşluğu adayı emekli eder ve yeni kesintisiz
+bölüm ayrı bir eğitim yaşam döngüsü başlatır.
+
+```mermaid
+flowchart TD
+    C[Closed UTC daily candle] --> D[Persist causal decision features]
+    D --> X{Exactly one day after prior decision?}
+    X -- No --> Q[Quarantine continuity gap]
+    X -- Yes --> S[Seal append-only forward label]
+    B[Reconciled BUY fill] --> O[Open exact Testnet round trip]
+    O --> E{Reconciled SELL fully flat?}
+    E -- No --> H[Keep open or quarantine ambiguity]
+    E -- Yes --> R[Seal cost and exact P&L evidence]
+    S --> L[Source-bound learning database]
+    R --> L
+    L --> T{60 labels, or 30 more after no candidate?}
+    T -- No --> W[Collect only]
+    T -- Yes --> G[Evaluate 3/5/10/15/20 percent thresholds]
+    G --> F[Freeze challenger artifact]
+    F --> P[Collect strictly post-freeze evidence]
+    P --> V{All review gates pass?}
+    V -- No --> W
+    V -- Yes --> Y[proposal_ready_for_review]
+```
+
+İlk fit 60 geçerli günlük etikette çalışır; aday çıkmazsa en az 30 yeni etiketten
+sonra sabit `{%3, %5, %10, %15, %20}` eşiği yeniden karşılaştırılabilir. Eğitimde
+görülen sonuçlar adayın performans ve üstünlük metriklerine katılmaz; yalnız toplam
+veri-yeterliliği sayımına dahildir. Üretilen artifact dondurulur, yeni fit durur ve bu
+metrikler yalnız dondurma zamanından sonra oluşan dokunulmamış etiketlerde hesaplanır.
+Günlük PF bileşik sermaye eğrisinin dönemsel P&L değerlerinden, gerçek tur PF'si ise
+uzlaştırılmış USDT P&L değerlerinden hesaplanır.
+Kapı kararları yuvarlanmamış `Decimal` metriklerle verilir; 12 basamaklı değerler
+yalnız rapor gösterimidir ve sınırdaki sonucu yukarı yuvarlayarak geçiremez.
+
+`proposal_ready_for_review` için toplam en az 200 ileri toplanmış günlük etiket, en az 60 kesin
+dondurma-sonrası etiket ve challenger geçişiyle eşleşen en az 8 kesin kapanmış Testnet
+turu gerekir. Hem günlük ileri kohortun hem eşleşen gerçek turların maliyet sonrası
+neti pozitif, PF'si en az `1,15`, azami düşüşü en fazla `%15` olmalı; challenger aynı
+günlük örneklerde incumbent'ı geçmeli ve güvenlik ihlali olmamalıdır. Bu sonuç yürütme
+yetkisi değildir. Öğrenme katmanı aktif config'i yazamaz, çalışan sürece hot-swap
+yapamaz ve paper, real veya live bayraklarını açamaz. Operatör durumu
+`python agent.py binance-testnet-learning-status` ile okuyabilir.
+Durum komutu salt okunurdur. Günlük etiket, BUY-open, SELL-close ve epoch-karantina
+olayları kalıcı outbox'ta eklenme sırasıyla oynatılır; ilk başarısız olay çözülmeden
+sonraki olay uygulanmaz. Çözülmemiş outbox, başarısız son yenileme veya
+`learning_revision != ingested_source_revision` koşulu eski hazır sonucunu
+`stale_source_evidence`/fail-closed olarak geçersiz kılar. Worker yeni girişleri kanıt
+outbox'ı çözülene kadar bekletir; mevcut long pozisyonun risk azaltan satışı engellenmez.
+Adayın kaynak kaydına bağlanması önce kaynakta kalıcı bir bloklayıcı, sonra aggregate
+pending state/event, kaynak apply ve aggregate acknowledge adımlarıyla ilerler. Her
+ara durum yeniden oynatılabilir; pending varken durum hazır sayılamaz ve doğrudan
+öğrenme yazımı yapılamaz. Öğrenici sürüm uyuşmazlığı otomatik yorumlanmaz; ayrı,
+denetlenebilir bir arşiv/migrasyon yapılana kadar fail-closed kalır.
+
+Mevcut `%10` incumbent'ın son 365 günlük Binance Spot tanısı `-%10,44`, PF `0,678`
+ve kapanmış Testnet tur sayısı sıfırdır. Bu yüzden mimari, eğitim etkin olsa bile kâr
+veya terfi sonucu bildirmez.
 
 Binance'e özgü OI, funding, long/short oranı, order-book depth, short/kaldıraç,
 reconciliation ve watchdog alanları saklı fakat pasiftir. Spot veriden türetilmiş
@@ -739,7 +833,7 @@ güncel toplam özkaynak `999,9112799645061 USD`, v2 dönem P&L'ı `0 USD`'dir. 
 damgasında challenger `collecting`, eşleşmiş event/skor sayısı `0`dır. Ayrık mikro
 hesap `100 USD`, açık/kapalı işlem `0 / 0`; ana sermaye yetkisi kapalıdır. Bu anlık görüntü kârlılık göstergesi değildir;
 sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. 17 Eylül
-2026'daki son doğrulamada tam test paketi **256/256** geçmiştir.
+2026'daki son doğrulamada tam test paketi **354/354** geçmiştir.
 
 Aynı gün V3 etkinleştirildikten sonraki doğrulamada ilk `adaptive_probe` işlemi
 77.869,99 USD referanstan 15 USD maliyetle açıldı; stop 77.667,95 ve hedef

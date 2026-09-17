@@ -1,5 +1,6 @@
 import json
 import os
+from decimal import ROUND_DOWN, getcontext, setcontext
 from pathlib import Path
 import subprocess
 import sys
@@ -12,12 +13,25 @@ import binance_testnet_worker as worker
 
 DAY_MS = 86_400_000
 NOW_MS = 200 * DAY_MS + 12 * 60 * 60 * 1000
+TEST_API_KEY_A = "A1b2C3d4" * 8
+TEST_API_KEY_B = "Z9y8X7w6" * 8
 ENABLED_ENV = {
     "BINANCE_TESTNET_WORKER_ENABLED": "true",
     "BINANCE_ORDER_EXECUTION_ENABLED": "testnet",
-    "BINANCE_TESTNET_API_KEY": "test-key",
+    "BINANCE_TESTNET_API_KEY": TEST_API_KEY_A,
     "BINANCE_TESTNET_SECRET_KEY": "test-secret",
 }
+
+
+def definitive_order_not_found():
+    return worker.execution.BinanceOrderNotFoundError(
+        'Binance HTTP 400: {"code":-2013,"msg":"Order does not exist."}',
+        method="GET",
+        path="/v3/order",
+        http_status=400,
+        api_code=-2013,
+        signed=True,
+    )
 
 
 class Rules:
@@ -54,7 +68,8 @@ class FakeMarketData:
 
 
 class FakeClient:
-    def __init__(self, klines):
+    def __init__(self, klines, *, api_key=TEST_API_KEY_A):
+        self.api_key = api_key
         self.market_data = FakeMarketData(klines)
         self.buy_calls = []
         self.sell_calls = []
@@ -73,6 +88,7 @@ class FakeClient:
         self.buy_commission_asset = "BTC"
         self.sell_commission = "0.1"
         self.sell_commission_asset = "USDT"
+        self.sell_quote = "12"
 
     def klines(self, interval="1d", limit=32, symbol=worker.SYMBOL):
         raise AssertionError("Testnet execution client must not supply signal candles")
@@ -147,7 +163,7 @@ class FakeClient:
             client_order_id,
             "SELL",
             str(quantity),
-            "12",
+            self.sell_quote,
             commission=self.sell_commission,
             commission_asset=self.sell_commission_asset,
         )
@@ -236,6 +252,312 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(status["momentum_threshold"], "0.10")
         self.assertTrue(status["policy_match"])
 
+    def test_signal_persists_versioned_causal_daily_features(self):
+        client = FakeClient(daily_closes(100, 109))
+
+        result = run_once(db_path=self.db_path, client=client)
+
+        self.assertEqual(result["action"], "hold_cash")
+        with worker.closing(worker._connect(self.db_path)) as db:
+            row = db.execute(
+                "SELECT feature_schema, feature_json FROM worker_decisions"
+            ).fetchone()
+        features = json.loads(row["feature_json"])
+        self.assertEqual(row["feature_schema"], "btc_daily_causal_v1")
+        self.assertEqual(
+            set(features),
+            {
+                "close",
+                "return_1d",
+                "return_7d",
+                "momentum_30d",
+                "realized_volatility_20d",
+            },
+        )
+        self.assertEqual(features["close"], "109.00000000")
+        self.assertEqual(features["momentum_30d"], "0.09")
+
+    def test_signal_is_independent_of_process_decimal_context(self):
+        candles = daily_closes(100, 110)
+        near_threshold = "110.0000000000000000000000000000000000000001"
+        for index in (1, 2, 3, 4):
+            candles[-1][index] = near_threshold
+        market = FakeMarketData(candles)
+        baseline = worker._signal(market)
+        baseline_db = Path(self.temp.name) / "signal-context-a.sqlite3"
+        baseline_action = run_once(
+            db_path=baseline_db, client=FakeClient(candles)
+        )
+        original = getcontext().copy()
+        try:
+            getcontext().prec = 6
+            getcontext().rounding = ROUND_DOWN
+            changed = worker._signal(market)
+            changed_db = Path(self.temp.name) / "signal-context-b.sqlite3"
+            changed_action = run_once(
+                db_path=changed_db, client=FakeClient(candles)
+            )
+        finally:
+            setcontext(original)
+
+        self.assertEqual(changed, baseline)
+        self.assertEqual(changed_action, baseline_action)
+        self.assertEqual(baseline_action["action"], "bought")
+        with worker.closing(worker._connect(baseline_db)) as first, \
+                worker.closing(worker._connect(changed_db)) as second:
+            first_features = first.execute(
+                "SELECT feature_json FROM worker_decisions"
+            ).fetchone()[0]
+            second_features = second.execute(
+                "SELECT feature_json FROM worker_decisions"
+            ).fetchone()[0]
+        self.assertEqual(second_features, first_features)
+        self.assertTrue(baseline["target_long"])
+        self.assertGreater(baseline["momentum"], worker.MOMENTUM_THRESHOLD)
+
+    def test_consecutive_daily_decisions_seal_once_and_gap_is_quarantined(self):
+        client = FakeClient(daily_closes(100, 109, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+        )
+
+        client.daily = daily_closes(101, 110, final_day=201)
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            self.assertEqual(
+                run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+            )
+            self.assertEqual(
+                run_once(db_path=self.db_path, client=client)["action"], "waiting"
+            )
+
+        client.daily = daily_closes(102, 111, final_day=203)
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + 3 * DAY_MS):
+            self.assertEqual(
+                run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+            )
+
+        with worker.closing(worker._connect(self.db_path)) as db:
+            labels = db.execute(
+                "SELECT sample_json FROM worker_learning_daily_labels"
+            ).fetchall()
+            gaps = db.execute(
+                "SELECT reason FROM worker_learning_daily_gaps"
+            ).fetchall()
+        self.assertEqual(len(labels), 1)
+        sample = json.loads(labels[0]["sample_json"])
+        self.assertEqual(
+            sample["label_available_ts"] - sample["decision_ts"], DAY_MS
+        )
+        self.assertEqual(
+            [row["reason"] for row in gaps], ["non_contiguous_daily_horizon"]
+        )
+
+    def test_failed_daily_label_capture_stays_pending_until_exact_replay(self):
+        client = FakeClient(daily_closes(100, 109, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+        )
+        worker._refresh_learning_nonfatal(self.db_path)
+
+        client.daily = daily_closes(100, 109, final_day=201)
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS), \
+                patch.object(
+                    worker.learning_store,
+                    "capture_daily_label",
+                    side_effect=RuntimeError("temporary label capture outage"),
+                ):
+            decision = run_once(db_path=self.db_path, client=client)
+            still_blocked = worker._refresh_learning_nonfatal(self.db_path)
+
+        self.assertEqual(decision["action"], "hold_cash")
+        self.assertEqual(
+            still_blocked["status"], "blocked_by_unresolved_learning_outbox"
+        )
+        self.assertFalse(still_blocked["proposal_ready_for_review"])
+        self.assertEqual(
+            still_blocked["evidence"]["unresolved_learning_outbox"], 1
+        )
+        self.assertEqual(
+            still_blocked["evidence"]["source_learning_revision"],
+            still_blocked["evidence"]["ingested_source_revision"],
+        )
+        raw = worker.sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                raw.execute("SELECT COUNT(*) FROM worker_decisions").fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                raw.execute(
+                    "SELECT COUNT(*) FROM worker_learning_daily_labels"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            raw.close()
+
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            worker._prepare_learning_before_decision(self.db_path)
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                label = db.execute(
+                    """SELECT decision_candle_close_ms, label_candle_close_ms
+                       FROM worker_learning_daily_labels"""
+                ).fetchone()
+                pending = worker._unresolved_learning_outbox_count(db)
+        self.assertEqual(
+            tuple(label),
+            (200 * DAY_MS - 1, 201 * DAY_MS - 1),
+        )
+        self.assertEqual(pending, 0)
+        caught_up_after_replay = worker.learning_snapshot(self.db_path)
+        self.assertNotEqual(
+            caught_up_after_replay["status"],
+            "blocked_by_unresolved_learning_outbox",
+        )
+        self.assertEqual(
+            caught_up_after_replay["evidence"]["source_learning_revision"],
+            caught_up_after_replay["evidence"]["ingested_source_revision"],
+        )
+        recovered = worker._refresh_learning_nonfatal(self.db_path)
+        self.assertNotEqual(
+            recovered["status"], "blocked_by_unresolved_learning_outbox"
+        )
+        self.assertEqual(recovered["evidence"]["unresolved_learning_outbox"], 0)
+        self.assertEqual(
+            recovered["evidence"]["source_learning_revision"],
+            recovered["evidence"]["ingested_source_revision"],
+        )
+
+    def test_pending_candidate_transition_defers_capture_without_source_write(self):
+        client = FakeClient(daily_closes(100, 109, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+        )
+        transition = {
+            "schema": worker.learning_store.SCHEMA_VERSION,
+            "kind": "testnet_candidate_source_transition",
+            "retiring_candidate_sha256": None,
+            "replacement_candidate_sha256": "f" * 64,
+            "break_gap_id": None,
+            "break_gap_sha256": None,
+            "boundary_sample_sha256": None,
+            "boundary_decision_ts": None,
+        }
+        worker.learning_store._stage_source_candidate_transition(
+            self.db_path, transition, NOW_MS + 1
+        )
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            signal = worker._signal(
+                FakeMarketData(daily_closes(100, 109, final_day=201))
+            )
+            with worker.closing(worker._connect(self.db_path)) as db, patch.object(
+                worker.learning_store,
+                "capture_daily_label",
+                side_effect=AssertionError("capture reached stale source binding"),
+            ) as capture:
+                persisted = worker._persist_decision(
+                    db,
+                    signal,
+                    "hold_cash",
+                    None,
+                    learning_refresh_healthy=True,
+                )
+                pending = db.execute(
+                    """SELECT operation, resolved_ms
+                       FROM worker_learning_outbox
+                       WHERE operation='capture_daily_label'"""
+                ).fetchone()
+                transition_count = int(db.execute(
+                    """SELECT COUNT(*)
+                       FROM worker_learning_pending_candidate_transition"""
+                ).fetchone()[0])
+
+        self.assertTrue(persisted)
+        capture.assert_not_called()
+        self.assertEqual(tuple(pending), ("capture_daily_label", None))
+        self.assertEqual(transition_count, 1)
+
+    def test_outbox_replay_stops_at_first_failed_causal_event(self):
+        client = FakeClient(daily_closes(100, 109, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+        )
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            signal_201 = worker._signal(
+                FakeMarketData(daily_closes(100, 109, final_day=201))
+            )
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + 2 * DAY_MS):
+            signal_202 = worker._signal(
+                FakeMarketData(daily_closes(100, 109, final_day=202))
+            )
+        with worker.closing(worker._connect(self.db_path)) as db, \
+                patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS), \
+                patch.object(
+                    worker.learning_store,
+                    "capture_daily_label",
+                    side_effect=RuntimeError("capture outage"),
+                ):
+            self.assertTrue(worker._persist_decision(
+                db, signal_201, "hold_cash", None
+            ))
+            self.assertTrue(worker._persist_decision(
+                db, signal_202, "hold_cash", None
+            ))
+
+        real_capture = worker.learning_store.capture_daily_label
+        calls = []
+
+        def fail_first(*args, **kwargs):
+            calls.append(int(args[1]["candle_close_ms"]))
+            if len(calls) == 1:
+                raise RuntimeError("first replay still unavailable")
+            return real_capture(*args, **kwargs)
+
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + 2 * DAY_MS), \
+                patch.object(
+                    worker.learning_store,
+                    "capture_daily_label",
+                    side_effect=fail_first,
+                ), worker.closing(worker._connect(self.db_path)) as db:
+            worker._replay_learning_outbox(db)
+            attempts_after_failure = [
+                int(row[0])
+                for row in db.execute(
+                    """SELECT attempt_count FROM worker_learning_outbox
+                       WHERE resolved_ms IS NULL ORDER BY rowid"""
+                )
+            ]
+            labels_after_failure = db.execute(
+                "SELECT COUNT(*) FROM worker_learning_daily_labels"
+            ).fetchone()[0]
+            gaps_after_failure = db.execute(
+                "SELECT COUNT(*) FROM worker_learning_daily_gaps"
+            ).fetchone()[0]
+            repaired = worker._replay_learning_outbox(db)
+            labels = [
+                tuple(row)
+                for row in db.execute(
+                    """SELECT decision_candle_close_ms, label_candle_close_ms
+                       FROM worker_learning_daily_labels
+                       ORDER BY decision_candle_close_ms"""
+                )
+            ]
+            unresolved = worker._unresolved_learning_outbox_count(db)
+
+        self.assertEqual(attempts_after_failure, [2, 1])
+        self.assertEqual(labels_after_failure, 0)
+        self.assertEqual(gaps_after_failure, 0)
+        self.assertEqual(repaired, 2)
+        self.assertEqual(
+            labels,
+            [
+                (200 * DAY_MS - 1, 201 * DAY_MS - 1),
+                (201 * DAY_MS - 1, 202 * DAY_MS - 1),
+            ],
+        )
+        self.assertEqual(unresolved, 0)
+        self.assertEqual(calls, [201 * DAY_MS - 1] * 2 + [202 * DAY_MS - 1])
+
     def test_policy_config_rejects_execution_scope_or_trained_rule_changes(self):
         mutations = (
             ("environment", "https://api.binance.com"),
@@ -281,6 +603,25 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(worker.WorkerHalt, "does not match"):
             worker._connect(self.db_path)
 
+    def test_legacy_worker_state_schema_adds_nullable_account_binding(self):
+        with worker.closing(worker._connect(self.db_path)):
+            pass
+        with worker.closing(worker.sqlite3.connect(self.db_path)) as db:
+            db.execute(
+                "ALTER TABLE worker_state DROP COLUMN api_key_fingerprint_sha256"
+            )
+
+        with worker.closing(worker._connect(self.db_path)) as db:
+            columns = {
+                str(row[1]) for row in db.execute("PRAGMA table_info(worker_state)")
+            }
+            fingerprint = db.execute(
+                "SELECT api_key_fingerprint_sha256 FROM worker_state WHERE singleton=1"
+            ).fetchone()[0]
+
+        self.assertIn("api_key_fingerprint_sha256", columns)
+        self.assertIsNone(fingerprint)
+
     def test_signal_candles_and_execution_use_separate_clients(self):
         execution_client = FakeClient(daily_closes(100, 109))
         public_market = execution_client.market_data
@@ -295,6 +636,30 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(public_market.kline_calls, 1)
         self.assertEqual(execution_client.open_order_calls, 1)
         self.assertFalse(hasattr(public_market, "place_market_buy"))
+
+    def test_first_signed_use_binds_account_without_status_leak(self):
+        client = FakeClient(daily_closes(100, 109))
+
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "hold_cash"
+        )
+
+        expected = worker.hashlib.sha256(TEST_API_KEY_A.encode("ascii")).hexdigest()
+        with worker.closing(worker._connect(self.db_path)) as db:
+            stored = db.execute(
+                "SELECT api_key_fingerprint_sha256 FROM worker_state WHERE singleton=1"
+            ).fetchone()[0]
+        self.assertEqual(stored, expected)
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        rendered = json.dumps(status, sort_keys=True)
+        self.assertTrue(status["account_bound"])
+        self.assertNotIn("api_key_fingerprint_sha256", status)
+        self.assertNotIn(expected, rendered)
+        self.assertNotIn(TEST_API_KEY_A, rendered)
+
+        other = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_B)
+        with self.assertRaisesRegex(worker.AccountBindingError, "does not match"):
+            run_once(db_path=self.db_path, client=other)
 
     def test_default_clients_are_testnet_execution_and_public_market_data(self):
         execution_client = FakeClient(daily_closes(100, 109))
@@ -374,6 +739,167 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(status["realized_pnl_usdt"], "1.9")
         self.assertEqual(status["completed_round_trips"], 1)
         self.assertTrue(status["pnl_complete"])
+        with worker.closing(worker._connect(self.db_path)) as db:
+            evidence = db.execute(
+                """SELECT status, exact_pnl, realized_pnl_usdt, net_return
+                   FROM worker_learning_round_trips
+                   ORDER BY created_ms, status"""
+            ).fetchall()
+        self.assertEqual([row["status"] for row in evidence], ["open", "closed"])
+        self.assertEqual(evidence[1]["exact_pnl"], 1)
+        self.assertEqual(evidence[1]["realized_pnl_usdt"], "1.9")
+        self.assertEqual(evidence[1]["net_return"], "0.19")
+
+    def test_failed_managed_buy_learning_event_replays_before_legacy_adoption(self):
+        warmup = FakeClient(daily_closes(100, 109, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=warmup)["action"], "hold_cash"
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute(
+                """UPDATE worker_learning_registrations
+                   SET true_forward_decision_created_cutoff_ms=?,
+                       freeze_cutoff_candle_ms=?, frozen_candidate_json='{}',
+                       frozen_candidate_sha256=?
+                   WHERE policy=? AND model_version=?""",
+                (
+                    NOW_MS - 1,
+                    NOW_MS - DAY_MS,
+                    "f" * 64,
+                    worker.POLICY,
+                    worker.POLICY_SPEC_HASH,
+                ),
+            )
+
+        client = FakeClient(daily_closes(100, 125, final_day=201))
+        healthy = {
+            "status": "collecting",
+            "refresh_health": {
+                "healthy": True,
+                "last_attempt_failed": False,
+            },
+        }
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS), \
+                patch.object(
+                    worker,
+                    "_prepare_learning_before_decision",
+                    return_value=healthy,
+                ), patch.object(
+            worker.learning_store,
+            "open_round_trip",
+            side_effect=RuntimeError("temporary source write outage"),
+        ):
+            bought = run_once(db_path=self.db_path, client=client)
+
+        self.assertEqual(bought["action"], "bought")
+        raw = worker.sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                raw.execute(
+                    """SELECT COUNT(*) FROM worker_learning_outbox
+                       WHERE resolved_ms IS NULL"""
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                raw.execute(
+                    "SELECT COUNT(*) FROM worker_learning_round_trips"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            raw.close()
+
+        with worker.closing(worker._connect(self.db_path)) as db:
+            first_replay = worker._replay_learning_outbox(db)
+            repaired = db.execute(
+                """SELECT source_kind, entry_candidate_bound
+                   FROM worker_learning_round_trips WHERE status='open'"""
+            ).fetchone()
+            pending = worker._unresolved_learning_outbox_count(db)
+            second_replay = worker._replay_learning_outbox(db)
+            record_count = db.execute(
+                "SELECT COUNT(*) FROM worker_learning_round_trips"
+            ).fetchone()[0]
+
+        self.assertEqual(repaired["source_kind"], "managed_buy_fill")
+        self.assertEqual(repaired["entry_candidate_bound"], 1)
+        self.assertEqual(first_replay, 1)
+        self.assertEqual(pending, 0)
+        self.assertEqual(second_replay, 0)
+        self.assertEqual(record_count, 1)
+
+    def test_failed_losing_close_learning_event_is_durably_replayed(self):
+        client = FakeClient(daily_closes(100, 125, final_day=200))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+        client.daily = daily_closes(120, 100, final_day=201)
+        client.sell_quote = "8"
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS), \
+                patch.object(
+                    worker.learning_store,
+                    "close_round_trip",
+                    side_effect=RuntimeError("temporary close evidence outage"),
+                ):
+            sold = run_once(db_path=self.db_path, client=client)
+
+        self.assertEqual(sold["action"], "sold")
+        self.assertEqual(sold["realized_pnl_usdt"], "-2.1")
+        raw = worker.sqlite3.connect(self.db_path)
+        try:
+            outbox = raw.execute(
+                """SELECT operation, resolved_ms FROM worker_learning_outbox
+                   WHERE operation='close_round_trip'"""
+            ).fetchone()
+            statuses = raw.execute(
+                """SELECT status FROM worker_learning_round_trips
+                   ORDER BY created_ms, status"""
+            ).fetchall()
+        finally:
+            raw.close()
+        self.assertEqual(outbox, ("close_round_trip", None))
+        self.assertEqual([row[0] for row in statuses], ["open"])
+
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            worker._prepare_learning_before_decision(self.db_path)
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                repaired = db.execute(
+                    """SELECT status, exact_pnl, realized_pnl_usdt
+                       FROM worker_learning_round_trips
+                       WHERE status='closed'"""
+                ).fetchone()
+                pending = worker._unresolved_learning_outbox_count(db)
+
+        self.assertEqual(repaired["status"], "closed")
+        self.assertEqual(repaired["exact_pnl"], 1)
+        self.assertEqual(repaired["realized_pnl_usdt"], "-2.1")
+        self.assertEqual(pending, 0)
+
+    def test_existing_managed_position_is_adopted_without_inventing_features(self):
+        client = FakeClient(daily_closes(100, 125))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute("DELETE FROM worker_learning_round_trips")
+            db.execute(
+                "UPDATE worker_decisions SET feature_schema=NULL, feature_json=NULL"
+            )
+
+        worker._prepare_learning_before_decision(self.db_path)
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            adopted = db.execute(
+                """SELECT status, source_kind, entry_feature_status,
+                          entry_feature_json
+                   FROM worker_learning_round_trips"""
+            ).fetchone()
+        self.assertEqual(adopted["status"], "open")
+        self.assertEqual(adopted["source_kind"], "legacy_open_position_adopted")
+        self.assertEqual(
+            adopted["entry_feature_status"], "diagnostic_missing_legacy_feature"
+        )
+        self.assertIsNone(adopted["entry_feature_json"])
 
     def test_btc_sell_commission_reduces_tracked_quantity_and_cost(self):
         client = FakeClient(daily_closes(100, 125, final_day=200))
@@ -402,6 +928,45 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(status["tracked_position_cost_usdt"], "0")
         self.assertEqual(status["realized_pnl_usdt"], "2")
         self.assertTrue(status["pnl_complete"])
+
+    def test_fill_accounting_is_independent_of_process_decimal_context(self):
+        def execute_round_trip(db_path):
+            client = FakeClient(daily_closes(100, 125, final_day=200))
+            client.buy_quantity = "0.001999999"
+            buy = run_once(db_path=db_path, client=client)
+            client.daily = daily_closes(120, 100, final_day=201)
+            with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+                sell = run_once(db_path=db_path, client=client)
+            status = worker.status_snapshot(db_path, self.lock_path)
+            with worker.closing(worker._connect(db_path)) as db:
+                sell_row = dict(db.execute(
+                    """SELECT executed_qty, realized_pnl_usdt
+                       FROM worker_order_intents WHERE side='SELL'"""
+                ).fetchone())
+            return buy, sell, {
+                "tracked_position_qty": status["tracked_position_qty"],
+                "tracked_position_cost_usdt": status[
+                    "tracked_position_cost_usdt"
+                ],
+                "realized_pnl_usdt": status["realized_pnl_usdt"],
+                "completed_round_trips": status["completed_round_trips"],
+                "sell_requested_qty": client.sell_calls[0][0],
+                "sell_row": sell_row,
+            }
+
+        baseline = execute_round_trip(Path(self.temp.name) / "decimal-a.sqlite3")
+        original = getcontext().copy()
+        try:
+            getcontext().prec = 3
+            getcontext().rounding = ROUND_DOWN
+            changed = execute_round_trip(
+                Path(self.temp.name) / "decimal-b.sqlite3"
+            )
+        finally:
+            setcontext(original)
+
+        self.assertEqual(changed, baseline)
+        self.assertEqual(baseline[2]["sell_requested_qty"], "0.001999")
 
     def test_third_asset_commission_persists_and_blocks_exact_pnl_claim(self):
         client = FakeClient(daily_closes(100, 125))
@@ -535,6 +1100,62 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertTrue(result["running"])
         self.assertTrue(result["desired_running"])
 
+    def test_unhealthy_learning_defers_pending_fill_evidence_after_preparation(self):
+        first = FakeClient(daily_closes(100, 125))
+        first.buy_error = TimeoutError("response lost")
+        first.lookup_error = LookupError("temporarily unavailable")
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=first)["action"], "halted"
+        )
+        client_id = first.buy_calls[0][2]
+        with worker.closing(worker._connect(self.db_path)) as db:
+            worker.learning_store.mark_refresh_failure(
+                db, "candidate transition recovery unavailable", NOW_MS + 1
+            )
+
+        restarted = FakeClient(daily_closes(100, 125))
+        restarted.orders[client_id] = restarted.filled_order(
+            client_id, "BUY", "0.001", "10"
+        )
+        events = []
+        real_lookup = restarted.order_by_client_id
+
+        def lookup_after_prepare(*args, **kwargs):
+            events.append("reconcile")
+            return real_lookup(*args, **kwargs)
+
+        unhealthy = {
+            "status": "learning_refresh_unhealthy",
+            "refresh_health": {
+                "healthy": False,
+                "last_attempt_failed": True,
+            },
+        }
+
+        def prepare(_db_path):
+            events.append("prepare")
+            return unhealthy
+
+        restarted.order_by_client_id = lookup_after_prepare
+        with patch.object(
+            worker, "_prepare_learning_before_decision", side_effect=prepare
+        ):
+            reconciled = run_once(db_path=self.db_path, client=restarted)
+
+        self.assertEqual(reconciled["action"], "bought")
+        self.assertEqual(events[:2], ["prepare", "reconcile"])
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            pending = db.execute(
+                """SELECT operation, resolved_ms
+                   FROM worker_learning_outbox
+                   WHERE operation='open_round_trip'"""
+            ).fetchone()
+            evidence_count = int(db.execute(
+                "SELECT COUNT(*) FROM worker_learning_round_trips"
+            ).fetchone()[0])
+        self.assertEqual(tuple(pending), ("open_round_trip", None))
+        self.assertEqual(evidence_count, 0)
+
     def test_start_failure_clears_desired_running(self):
         with patch.object(worker, "_lock_active", return_value=False), \
                 patch.object(worker.subprocess, "Popen", side_effect=OSError("boom")):
@@ -565,6 +1186,28 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.WorkerHalt, "already running"):
                 worker.control("start", db_path=self.db_path, lock_path=self.lock_path)
         popen.assert_not_called()
+
+    def test_start_rejects_api_key_from_another_bound_ledger(self):
+        account_a = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_A)
+        run_once(db_path=self.db_path, client=account_a)
+        account_b = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_B)
+
+        with patch.object(worker, "_lock_active", return_value=False), \
+                patch.object(worker.subprocess, "Popen") as popen, \
+                self.assertRaisesRegex(
+                    worker.AccountBindingError, "does not match"
+                ):
+            worker.control(
+                "start",
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account_b,
+            )
+
+        popen.assert_not_called()
+        self.assertFalse(
+            worker.status_snapshot(self.db_path, self.lock_path)["desired_running"]
+        )
 
     def test_start_rejects_policy_config_changed_after_import(self):
         changed = json.loads(json.dumps(worker.POLICY_CONFIG))
@@ -602,6 +1245,28 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(worker._account_lock_path(old_policy), worker.ACCOUNT_LOCK_PATH)
         custom = Path(self.temp.name) / "another-policy.lock"
         self.assertNotEqual(worker._account_lock_path(custom), worker.ACCOUNT_LOCK_PATH)
+
+    def test_learning_aggregate_path_is_unique_to_each_source_ledger(self):
+        first = Path(self.temp.name) / "first.sqlite3"
+        second = Path(self.temp.name) / "second.sqlite3"
+
+        self.assertEqual(
+            worker._learning_db_path(first),
+            first.with_name("first-online-learning.sqlite3").resolve(),
+        )
+        self.assertEqual(
+            worker._learning_db_path(second),
+            second.with_name("second-online-learning.sqlite3").resolve(),
+        )
+        self.assertNotEqual(
+            worker._learning_db_path(first), worker._learning_db_path(second)
+        )
+        self.assertEqual(
+            worker.LEARNING_DB_PATH,
+            worker.DB_PATH.with_name(
+                f"{worker.DB_PATH.stem}-online-learning.sqlite3"
+            ),
+        )
 
     def test_start_refuses_account_lease_owned_by_another_policy(self):
         account_lock = worker._account_lock_path(self.lock_path)
@@ -668,11 +1333,30 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
                 "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
             )
 
+    def test_reset_allows_a_flat_local_ledger_without_origin_lookup(self):
+        client = FakeClient(daily_closes(100, 109))
+        client.lookup_error = AssertionError("flat reset must not query an origin")
+
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ):
+            result = worker.control(
+                "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
+            )
+
+        self.assertEqual(result["position"], "cash")
+        self.assertEqual(result["reset_epoch_id"], 1)
+        self.assertEqual(client.lookup_calls, [])
+
     def test_reset_atomically_archives_ledger_and_starts_fresh_epoch(self):
         client = FakeClient(daily_closes(100, 125))
         self.assertEqual(
             run_once(db_path=self.db_path, client=client)["action"], "bought"
         )
+        # Spot Testnet may periodically delete its order epoch. Only Binance's
+        # structured GET /v3/order -2013 response authorizes discarding a local
+        # tracked position during reset.
+        client.lookup_error = definitive_order_not_found()
 
         with patch.dict(
             os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
@@ -699,6 +1383,8 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
                 "(SELECT COUNT(*) FROM worker_order_intents)"
             ).fetchone()
         self.assertIn('"position_qty":"0.001"', epoch[0])
+        self.assertIn('"account_bound":true', epoch[0])
+        self.assertNotIn("api_key_fingerprint", epoch[0])
         self.assertEqual((epoch[1], epoch[2]), (1, 1))
         self.assertIn('"client_id":"qr-b-', archived_order[0])
         self.assertEqual(tuple(active_counts), (0, 0))
@@ -722,6 +1408,302 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+
+    def test_reset_preserves_last_candle_and_prevents_client_id_reuse(self):
+        client = FakeClient(daily_closes(100, 125))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+        first_client_id = client.buy_calls[0][2]
+        client.lookup_error = definitive_order_not_found()
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ):
+            reset = worker.control(
+                "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
+            )
+
+        self.assertEqual(reset["position"], "cash")
+        resumed = FakeClient(daily_closes(100, 125))
+        same_candle = run_once(db_path=self.db_path, client=resumed)
+        self.assertEqual(same_candle["action"], "waiting")
+        self.assertEqual(resumed.buy_calls, [])
+        self.assertEqual(reset["last_candle_close_ms"], same_candle["candle_close_ms"])
+        with worker.closing(worker._connect(self.db_path)) as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM worker_order_intents").fetchone()[0],
+                0,
+            )
+            archived = db.execute(
+                "SELECT client_id FROM worker_epoch_order_intents"
+            ).fetchone()[0]
+        self.assertEqual(archived, first_client_id)
+
+    def test_failed_reset_quarantine_is_durable_and_blocks_archive(self):
+        client = FakeClient(daily_closes(100, 125))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+        client.lookup_error = definitive_order_not_found()
+
+        with patch.object(
+            worker.learning_store,
+            "quarantine_open_round_trips",
+            side_effect=RuntimeError("temporary quarantine outage"),
+        ):
+            with self.assertRaisesRegex(worker.WorkerHalt, "deferred"):
+                worker._archive_epoch_and_reset(self.db_path, client)
+            with self.assertRaisesRegex(worker.WorkerHalt, "unresolved"):
+                worker._archive_epoch_and_reset(self.db_path, client)
+            learning = worker.learning_snapshot(self.db_path)
+
+        self.assertEqual(
+            learning["status"], "blocked_by_unresolved_learning_outbox"
+        )
+        self.assertFalse(learning["proposal_ready_for_review"])
+        self.assertEqual(learning["evidence"]["unresolved_learning_outbox"], 1)
+        raw = worker.sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                raw.execute("SELECT COUNT(*) FROM worker_epochs").fetchone()[0], 0
+            )
+            self.assertEqual(
+                raw.execute("SELECT COUNT(*) FROM worker_order_intents").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                raw.execute(
+                    """SELECT COUNT(*) FROM worker_learning_outbox
+                       WHERE resolved_ms IS NULL"""
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            raw.close()
+
+        worker._prepare_learning_before_decision(self.db_path)
+        repaired = worker._archive_epoch_and_reset(self.db_path, client)
+        self.assertEqual(repaired["reset_epoch_id"], 1)
+        self.assertEqual(repaired["archived_orders"], 1)
+
+    def test_direct_reset_refuses_to_erase_position_when_origin_still_exists(self):
+        client = FakeClient(daily_closes(100, 125))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ), self.assertRaisesRegex(worker.WorkerHalt, "still exists"):
+            worker.control(
+                "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
+            )
+        with self.assertRaisesRegex(worker.WorkerHalt, "still exists"):
+            worker._archive_epoch_and_reset(self.db_path, client)
+
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertEqual(status["position"], "long")
+        self.assertEqual(status["intents"], 1)
+        self.assertEqual(status["archived_epochs"], 0)
+
+    def test_reset_rejects_ambiguous_origin_lookup_and_preserves_ledger(self):
+        client = FakeClient(daily_closes(100, 125))
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=client)["action"], "bought"
+        )
+
+        for lookup_error in (
+            LookupError("not found"),
+            ValueError("unstructured -2013 text"),
+            worker.execution.BinanceTransportError("connection lost"),
+            worker.execution.BinanceOrderNotFoundError(
+                "wrong endpoint",
+                method="GET",
+                path="/v3/account",
+                http_status=400,
+                api_code=-2013,
+                signed=True,
+            ),
+        ):
+            with self.subTest(error=type(lookup_error).__name__):
+                client.lookup_error = lookup_error
+                with patch.dict(
+                    os.environ,
+                    {"BINANCE_TESTNET_RESET_ENABLED": "reset"},
+                    clear=False,
+                ), self.assertRaisesRegex(worker.WorkerHalt, "could not prove"):
+                    worker.control(
+                        "reset",
+                        db_path=self.db_path,
+                        lock_path=self.lock_path,
+                        client=client,
+                    )
+                status = worker.status_snapshot(self.db_path, self.lock_path)
+                self.assertEqual(status["position"], "long")
+                self.assertEqual(status["intents"], 1)
+                self.assertEqual(status["archived_epochs"], 0)
+
+    def test_other_api_key_cannot_turn_minus_2013_into_reset_authority(self):
+        account_a = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_A)
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=account_a)["action"], "bought"
+        )
+        account_b = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_B)
+        account_b.lookup_error = definitive_order_not_found()
+
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ), self.assertRaisesRegex(worker.AccountBindingError, "does not match"):
+            worker.control(
+                "reset",
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account_b,
+            )
+
+        self.assertEqual(account_b.lookup_calls, [])
+        preserved = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertEqual(preserved["position"], "long")
+        self.assertEqual(preserved["intents"], 1)
+        self.assertEqual(preserved["archived_epochs"], 0)
+        self.assertTrue(preserved["account_bound"])
+
+        account_a.lookup_error = definitive_order_not_found()
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ):
+            reset = worker.control(
+                "reset",
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account_a,
+            )
+        self.assertEqual(reset["position"], "cash")
+        self.assertEqual(reset["reset_epoch_id"], 1)
+        self.assertTrue(reset["account_bound"])
+
+    def test_legacy_unbound_open_position_requires_present_exact_origin_to_bind(self):
+        account_a = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_A)
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=account_a)["action"], "bought"
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute(
+                "UPDATE worker_state SET api_key_fingerprint_sha256=NULL "
+                "WHERE singleton=1"
+            )
+
+        account_b = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_B)
+        account_b.lookup_error = definitive_order_not_found()
+        with self.assertRaisesRegex(
+            worker.AccountBindingError, "could not be proven"
+        ):
+            run_once(db_path=self.db_path, client=account_b)
+        self.assertFalse(
+            worker.status_snapshot(self.db_path, self.lock_path)["account_bound"]
+        )
+
+        resumed_a = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_A)
+        resumed_a.orders.update(account_a.orders)
+        result = run_once(db_path=self.db_path, client=resumed_a)
+        self.assertEqual(result["action"], "waiting")
+        self.assertTrue(
+            worker.status_snapshot(self.db_path, self.lock_path)["account_bound"]
+        )
+
+    def test_legacy_unbound_pending_order_requires_exact_remote_proof(self):
+        first = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_A)
+        first.buy_error = TimeoutError("response lost")
+        first.lookup_error = LookupError("temporarily not found")
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=first)["action"], "halted"
+        )
+        client_id = first.buy_calls[0][2]
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute(
+                "UPDATE worker_state SET api_key_fingerprint_sha256=NULL "
+                "WHERE singleton=1"
+            )
+
+        wrong = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_B)
+        wrong.lookup_error = definitive_order_not_found()
+        with self.assertRaisesRegex(
+            worker.AccountBindingError, "could not be proven"
+        ):
+            run_once(db_path=self.db_path, client=wrong)
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertFalse(status["account_bound"])
+        self.assertEqual(status["pending_client_id"], client_id)
+
+        resumed = FakeClient(daily_closes(100, 125), api_key=TEST_API_KEY_A)
+        resumed.orders[client_id] = resumed.filled_order(
+            client_id, "BUY", "0.001", "10"
+        )
+        reconciled = run_once(db_path=self.db_path, client=resumed)
+        self.assertEqual(reconciled["action"], "bought")
+        self.assertTrue(
+            worker.status_snapshot(self.db_path, self.lock_path)["account_bound"]
+        )
+
+    def test_legacy_flat_history_cannot_bind_from_generic_other_account(self):
+        account_a = FakeClient(
+            daily_closes(100, 125, final_day=200), api_key=TEST_API_KEY_A
+        )
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=account_a)["action"], "bought"
+        )
+        account_a.daily = daily_closes(120, 100, final_day=201)
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            self.assertEqual(
+                run_once(db_path=self.db_path, client=account_a)["action"], "sold"
+            )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute(
+                "UPDATE worker_state SET api_key_fingerprint_sha256=NULL "
+                "WHERE singleton=1"
+            )
+
+        account_b = FakeClient(
+            daily_closes(120, 100, final_day=201), api_key=TEST_API_KEY_B
+        )
+        account_b.lookup_error = definitive_order_not_found()
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS), \
+                self.assertRaisesRegex(
+                    worker.AccountBindingError, "could not be proven"
+                ):
+            run_once(db_path=self.db_path, client=account_b)
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertFalse(status["account_bound"])
+        self.assertEqual(status["completed_round_trips"], 1)
+        self.assertEqual(status["intents"], 2)
+
+        resumed_a = FakeClient(
+            daily_closes(120, 100, final_day=201), api_key=TEST_API_KEY_A
+        )
+        resumed_a.orders.update(account_a.orders)
+        with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
+            result = run_once(db_path=self.db_path, client=resumed_a)
+        self.assertEqual(result["action"], "waiting")
+        self.assertTrue(
+            worker.status_snapshot(self.db_path, self.lock_path)["account_bound"]
+        )
+
+    def test_reset_refuses_active_account_wide_execution_lease(self):
+        client = FakeClient(daily_closes(100, 109))
+        account_lock = worker._account_lock_path(self.lock_path)
+
+        def active_only(path):
+            return Path(path) == account_lock
+
+        with patch.dict(
+            os.environ, {"BINANCE_TESTNET_RESET_ENABLED": "reset"}, clear=False
+        ), patch.object(worker, "_lock_active", side_effect=active_only), \
+                self.assertRaisesRegex(worker.WorkerHalt, "account-wide"):
+            worker.control(
+                "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
+            )
+
+        self.assertEqual(client.open_order_calls, 0)
 
     def test_stop_between_intent_and_post_aborts_without_order(self):
         client = FakeClient(daily_closes(100, 125))
@@ -781,6 +1763,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
             run_once(db_path=self.db_path, client=client)["action"], "bought"
         )
         client.orders.clear()  # Simulate Binance Spot Testnet's periodic reset.
+        client.lookup_error = definitive_order_not_found()
         client.daily = daily_closes(120, 100, final_day=201)
 
         with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
@@ -840,6 +1823,278 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(status["halted"])
         self.assertIsNone(status["pending_client_id"])
 
+    def test_learning_refresh_failure_never_halts_execution_worker(self):
+        client = FakeClient(daily_closes(100, 109))
+        worker._set_desired(self.db_path, True)
+        real_run_once = worker.run_once
+
+        def decide_then_stop(**kwargs):
+            result = real_run_once(**kwargs)
+            worker._set_desired(self.db_path, False)
+            return result
+
+        with patch.object(worker, "run_once", side_effect=decide_then_stop), \
+                patch.object(
+                    worker.learning_store,
+                    "refresh",
+                    side_effect=RuntimeError("learner unavailable"),
+                ):
+            result = worker.run_forever(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                poll_seconds=0.1,
+                client=client,
+                market_data_client=client.market_data,
+            )
+
+        self.assertFalse(result["halted"])
+        self.assertEqual(result["position"], "cash")
+        with worker.closing(worker._connect(self.db_path)) as db:
+            errors = db.execute(
+                "SELECT message FROM worker_learning_source_errors"
+            ).fetchall()
+        self.assertEqual(errors, [])
+        learning = worker.learning_snapshot(self.db_path)
+        self.assertEqual(learning["status"], "learning_refresh_unhealthy")
+        self.assertFalse(learning["proposal_ready_for_review"])
+        self.assertTrue(learning["refresh_health"]["last_attempt_failed"])
+
+    def test_successful_learning_refresh_clears_transient_health_failure(self):
+        with patch.object(
+            worker.learning_store,
+            "refresh",
+            side_effect=worker.sqlite3.OperationalError("database is busy"),
+        ):
+            failed = worker._refresh_learning_nonfatal(self.db_path)
+
+        self.assertEqual(failed["status"], "learning_refresh_unhealthy")
+        self.assertFalse(failed["proposal_ready_for_review"])
+        pure_failed = worker.learning_snapshot(self.db_path)
+        self.assertTrue(
+            pure_failed["refresh_health"]["last_attempt_failed"]
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM worker_learning_source_errors"
+                ).fetchone()[0],
+                0,
+            )
+
+        recovered = worker._refresh_learning_nonfatal(self.db_path)
+        self.assertFalse(
+            recovered["refresh_health"]["last_attempt_failed"]
+        )
+        self.assertTrue(recovered["refresh_health"]["healthy"])
+        self.assertNotEqual(recovered["status"], "learning_refresh_unhealthy")
+        pure_recovered = worker.learning_snapshot(self.db_path)
+        self.assertEqual(
+            pure_recovered["refresh_health"], recovered["refresh_health"]
+        )
+
+    def test_learning_integrity_failure_is_persistent_safety_evidence(self):
+        with patch.object(
+            worker.learning_store,
+            "refresh",
+            side_effect=worker.learning_store.LearningIntegrityError(
+                "source seal changed"
+            ),
+        ):
+            failed = worker._refresh_learning_nonfatal(self.db_path)
+
+        self.assertIn("source seal changed", failed["last_refresh_error"])
+        with worker.closing(worker._connect(self.db_path)) as db:
+            errors = db.execute(
+                "SELECT message FROM worker_learning_source_errors"
+            ).fetchall()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("LearningIntegrityError", errors[0]["message"])
+
+        blocked = worker.learning_snapshot(self.db_path, refresh=True)
+        self.assertEqual(blocked["status"], "blocked_by_safety_violation")
+        self.assertEqual(blocked["evidence"]["safety_violations"], 1)
+        self.assertFalse(blocked["proposal_ready_for_review"])
+
+    def test_refresh_integrity_error_and_health_marker_commit_atomically(self):
+        with worker.closing(worker._connect(self.db_path)) as db:
+            revision_before = int(db.execute(
+                """SELECT learning_revision FROM worker_learning_meta
+                   WHERE singleton=1"""
+            ).fetchone()[0])
+
+        with patch.object(
+            worker.learning_store,
+            "refresh",
+            side_effect=worker.learning_store.LearningIntegrityError(
+                "source seal changed"
+            ),
+        ), patch.object(
+            worker.learning_store,
+            "mark_refresh_failure",
+            side_effect=RuntimeError("health write failed"),
+        ):
+            returned = worker._refresh_learning_nonfatal(self.db_path)
+
+        self.assertEqual(returned["status"], "learning_refresh_unhealthy")
+        self.assertFalse(returned["proposal_ready_for_review"])
+        with worker.closing(worker._connect(self.db_path)) as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM worker_learning_source_errors"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                int(db.execute(
+                    """SELECT learning_revision FROM worker_learning_meta
+                       WHERE singleton=1"""
+                ).fetchone()[0]),
+                revision_before,
+            )
+            self.assertEqual(
+                int(db.execute(
+                    """SELECT last_attempt_failed
+                       FROM worker_learning_refresh_health WHERE singleton=1"""
+                ).fetchone()[0]),
+                0,
+            )
+
+    def test_learning_recovery_precedes_first_execution_cycle_after_lock(self):
+        client = FakeClient(daily_closes(100, 109))
+        worker._set_desired(self.db_path, True)
+        events = []
+        real_run_once = worker.run_once
+
+        def refresh(db_path):
+            events.append("refresh")
+            self.assertTrue(worker._lock_active(self.lock_path))
+            self.assertTrue(
+                worker._lock_active(worker._account_lock_path(self.lock_path))
+            )
+            return {"status": "collecting"}
+
+        def decide_then_stop(**kwargs):
+            events.append("run_once")
+            result = real_run_once(**kwargs)
+            worker._set_desired(self.db_path, False)
+            return result
+
+        with patch.object(
+            worker, "_refresh_learning_nonfatal", side_effect=refresh
+        ), patch.object(worker, "run_once", side_effect=decide_then_stop):
+            result = worker.run_forever(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                poll_seconds=0.1,
+                client=client,
+                market_data_client=client.market_data,
+            )
+
+        self.assertFalse(result["halted"])
+        self.assertGreaterEqual(events.count("refresh"), 2)
+        self.assertEqual(events[:2], ["refresh", "run_once"])
+
+    def test_learning_schema_failure_never_blocks_execution_cycle(self):
+        client = FakeClient(daily_closes(100, 109))
+
+        with patch.object(
+            worker.learning_store,
+            "ensure_source_schema",
+            side_effect=RuntimeError("learning schema unavailable"),
+        ):
+            result = run_once(db_path=self.db_path, client=client)
+
+        self.assertEqual(result["action"], "hold_cash")
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertFalse(status["halted"])
+        self.assertEqual(status["latest_decision"]["action"], "hold_cash")
+        self.assertEqual(client.buy_calls, [])
+        self.assertEqual(client.sell_calls, [])
+
+    def test_learning_source_sidecar_persists_only_integrity_failures(self):
+        transient_db = Path(self.temp.name) / "learning-transient.sqlite3"
+        with patch.object(
+            worker.learning_store,
+            "capture_daily_label",
+            side_effect=RuntimeError("temporary learner failure"),
+        ):
+            transient = run_once(
+                db_path=transient_db,
+                client=FakeClient(daily_closes(100, 109)),
+            )
+        self.assertEqual(transient["action"], "hold_cash")
+        with worker.closing(worker._connect(transient_db)) as db:
+            transient_errors = db.execute(
+                "SELECT message FROM worker_learning_source_errors"
+            ).fetchall()
+        self.assertEqual(transient_errors, [])
+
+        integrity_db = Path(self.temp.name) / "learning-integrity.sqlite3"
+        with patch.object(
+            worker.learning_store,
+            "capture_daily_label",
+            side_effect=worker.learning_store.LearningIntegrityError(
+                "daily evidence changed"
+            ),
+        ):
+            integrity = run_once(
+                db_path=integrity_db,
+                client=FakeClient(daily_closes(100, 109)),
+            )
+        self.assertEqual(integrity["action"], "hold_cash")
+        with worker.closing(worker._connect(integrity_db)) as db:
+            integrity_errors = db.execute(
+                "SELECT message FROM worker_learning_source_errors"
+            ).fetchall()
+        self.assertEqual(len(integrity_errors), 1)
+        self.assertIn("LearningIntegrityError", integrity_errors[0]["message"])
+
+    def test_learning_status_is_proposal_only_and_starts_collecting(self):
+        client = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=client)
+        config_before = worker.POLICY_CONFIG_PATH.read_bytes()
+
+        status = worker.learning_snapshot(self.db_path)
+
+        self.assertEqual(worker.POLICY_CONFIG_PATH.read_bytes(), config_before)
+        self.assertEqual(status["mode"], "proposal_only_manual_review_required")
+        self.assertFalse(status["proposal_ready_for_review"])
+        self.assertFalse(status["automatic_activation_enabled"])
+        self.assertFalse(status["writes_active_config"])
+        self.assertEqual(status["evidence"]["finalized_daily_labels"], 0)
+        self.assertEqual(status["cadence"]["first_training_at_daily_labels"], 60)
+
+    def test_learning_status_default_is_strictly_read_only(self):
+        with worker.closing(worker._connect(self.db_path)):
+            pass
+        aggregate_path = worker._learning_db_path(self.db_path)
+        self.assertFalse(aggregate_path.exists())
+        before = self.db_path.read_bytes()
+
+        with patch.object(
+            worker,
+            "_connect",
+            side_effect=AssertionError("read-only status must not initialize schema"),
+        ):
+            status = worker.learning_snapshot(self.db_path)
+
+        self.assertEqual(self.db_path.read_bytes(), before)
+        self.assertFalse(aggregate_path.exists())
+        self.assertEqual(status["mode"], "proposal_only_manual_review_required")
+        self.assertFalse(status["proposal_ready_for_review"])
+
+    def test_learning_status_cli_explicitly_disables_refresh(self):
+        import agent
+
+        with patch.object(
+            sys, "argv", ["agent.py", "binance-testnet-learning-status"]
+        ), patch.object(
+            worker, "learning_snapshot", return_value={"status": "collecting"}
+        ) as snapshot, patch("builtins.print"):
+            agent.main()
+
+        snapshot.assert_called_once_with(refresh=False)
+
     def test_api_cycles_are_at_least_sixty_seconds_apart(self):
         client = FakeClient(daily_closes(100, 109))
         worker._set_desired(self.db_path, True)
@@ -886,6 +2141,84 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertTrue(status["caller_env_worker_enabled"])
         self.assertTrue(status["caller_env_execution_enabled"])
         self.assertNotIn("credentials_present", status)
+
+    def test_status_is_read_only_and_does_not_initialize_missing_ledger(self):
+        self.assertFalse(self.db_path.exists())
+
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+
+        self.assertEqual(status["status"], "worker_status_unavailable")
+        self.assertFalse(status["status_available"])
+        self.assertFalse(status["execution_state_known"])
+        self.assertEqual(status["position"], "unknown")
+        self.assertFalse(self.db_path.exists())
+
+    def test_status_does_not_replay_or_adopt_learning_evidence(self):
+        with worker.closing(worker._connect(self.db_path)) as db:
+            event_id = worker._enqueue_learning_outbox(
+                db,
+                "capture_daily_label",
+                {
+                    "candle_close_ms": NOW_MS,
+                    "policy": worker.POLICY,
+                    "model_version": worker.POLICY_SPEC_HASH,
+                },
+                RuntimeError("capture unavailable"),
+                NOW_MS,
+            )
+
+        with patch.object(
+            worker, "_connect", side_effect=AssertionError("writer opened")
+        ), patch.object(worker, "_replay_learning_outbox") as replay, patch.object(
+            worker.learning_store, "adopt_open_round_trip"
+        ) as adopt:
+            status = worker.status_snapshot(self.db_path, self.lock_path)
+
+        self.assertTrue(status["status_available"])
+        self.assertEqual(status["unresolved_learning_outbox"], 1)
+        replay.assert_not_called()
+        adopt.assert_not_called()
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            pending = db.execute(
+                """SELECT attempt_count, resolved_ms, last_error
+                   FROM worker_learning_outbox WHERE event_id=?""",
+                (event_id,),
+            ).fetchone()
+        self.assertEqual(int(pending["attempt_count"]), 1)
+        self.assertIsNone(pending["resolved_ms"])
+        self.assertEqual(
+            pending["last_error"],
+            "RuntimeError: learning sidecar operation failed",
+        )
+
+    def test_status_reads_one_consistent_sqlite_snapshot(self):
+        with worker.closing(worker._connect(self.db_path)):
+            pass
+        real_state = worker._state
+
+        def read_state_then_commit_new_epoch(db):
+            self.assertTrue(db.in_transaction)
+            row = real_state(db)
+            with worker.closing(worker.sqlite3.connect(self.db_path)) as writer:
+                writer.execute(
+                    """INSERT INTO worker_epochs
+                       (archived_ms, reason, state_json, decision_count,
+                        order_count) VALUES (?, ?, ?, 0, 0)""",
+                    (NOW_MS, "concurrent test epoch", "{}"),
+                )
+                writer.commit()
+            return row
+
+        with patch.object(worker, "_state", side_effect=read_state_then_commit_new_epoch):
+            status = worker.status_snapshot(self.db_path, self.lock_path)
+
+        self.assertTrue(status["status_available"])
+        self.assertEqual(status["archived_epochs"], 0)
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertEqual(
+                int(db.execute("SELECT COUNT(*) FROM worker_epochs").fetchone()[0]),
+                1,
+            )
 
     def test_both_execution_gates_are_required(self):
         client = FakeClient(daily_closes(100, 125))

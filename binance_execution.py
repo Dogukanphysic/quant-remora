@@ -11,7 +11,14 @@ deterministic client order id.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import (
+    Context,
+    Decimal,
+    InvalidOperation,
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 import hashlib
 import hmac
 import json
@@ -33,6 +40,7 @@ SYMBOL = "BTCUSDT"
 MIN_TESTNET_QUOTE_USD = Decimal("5")
 MAX_TESTNET_QUOTE_USD = Decimal("25")
 RECV_WINDOW = 5000
+_DECIMAL_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 
 _CLIENT_ORDER_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,36}$")
 _SYMBOL = re.compile(r"^[A-Z0-9]{2,20}$")
@@ -48,6 +56,31 @@ class AmbiguousOrderError(RuntimeError):
 
 class BinanceTransportError(ConnectionError):
     """A public or signed read request could not be completed."""
+
+
+class BinanceAPIError(ValueError):
+    """A structured, non-transient error returned by Binance's REST API."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str,
+        path: str,
+        http_status: int,
+        api_code: int | None,
+        signed: bool,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.path = path
+        self.http_status = http_status
+        self.api_code = api_code
+        self.signed = signed
+
+
+class BinanceOrderNotFoundError(BinanceAPIError):
+    """Definitive ``-2013`` response to a signed ``GET /v3/order`` lookup."""
 
 
 class PublicMarketDataClient:
@@ -225,11 +258,17 @@ def sign(params: dict[str, object], secret: str) -> tuple[str, str]:
 
 
 def floor_step(value: object, step: object) -> Decimal:
-    number = _decimal(value, "Quantity")
-    increment = _decimal(step, "Step size")
-    if number < 0 or increment <= 0:
-        raise ValueError("Quantity must be non-negative and step size must be positive.")
-    return (number / increment).to_integral_value(rounding=ROUND_DOWN) * increment
+    with localcontext(_DECIMAL_CONTEXT):
+        number = _decimal(value, "Quantity")
+        increment = _decimal(step, "Step size")
+        if number < 0 or increment <= 0:
+            raise ValueError(
+                "Quantity must be non-negative and step size must be positive."
+            )
+        return (
+            (number / increment).to_integral_value(rounding=ROUND_DOWN)
+            * increment
+        )
 
 
 def parse_symbol_rules(exchange_info: object, symbol: str = SYMBOL) -> SymbolRules:
@@ -364,7 +403,8 @@ class Client:
                 body = response.read().decode("utf-8")
             return json.loads(body)
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            decoded = exc.read().decode("utf-8", errors="replace")
+            detail = decoded[:500]
             message = f"Binance HTTP {exc.code}: {detail}"
             if method == "POST" and exc.code >= 500:
                 raise AmbiguousOrderError(
@@ -372,7 +412,35 @@ class Client:
                 ) from exc
             if method == "GET" and (exc.code in (418, 429) or exc.code >= 500):
                 raise BinanceTransportError(message) from exc
-            raise ValueError(message) from exc
+            try:
+                error_body = json.loads(decoded)
+            except (json.JSONDecodeError, TypeError):
+                error_body = None
+            api_code = (
+                error_body.get("code")
+                if isinstance(error_body, dict)
+                and isinstance(error_body.get("code"), int)
+                and not isinstance(error_body.get("code"), bool)
+                else None
+            )
+            error_type = (
+                BinanceOrderNotFoundError
+                if (
+                    signed
+                    and method == "GET"
+                    and path == "/v3/order"
+                    and api_code == -2013
+                )
+                else BinanceAPIError
+            )
+            raise error_type(
+                message,
+                method=method,
+                path=path,
+                http_status=exc.code,
+                api_code=api_code,
+                signed=signed,
+            ) from exc
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
             if method == "POST":
                 raise AmbiguousOrderError(
@@ -650,6 +718,7 @@ def public_doctor() -> dict[str, object]:
 __all__ = [
     "BASE_URL", "PUBLIC_MARKET_DATA_BASE_URLS", "SYMBOL",
     "MIN_TESTNET_QUOTE_USD", "MAX_TESTNET_QUOTE_USD", "AmbiguousOrderError",
-    "BinanceTransportError", "PublicMarketDataClient", "SymbolRules", "sign",
+    "BinanceTransportError", "BinanceAPIError", "BinanceOrderNotFoundError",
+    "PublicMarketDataClient", "SymbolRules", "sign",
     "floor_step", "parse_symbol_rules", "net_base_quantity", "Client", "public_doctor",
 ]

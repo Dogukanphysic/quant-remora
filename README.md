@@ -360,8 +360,73 @@ eski `%20` defteri silinmez veya yeni kararlarla karıştırılmaz. Durum ve dur
 
 ```powershell
 python agent.py binance-testnet-agent-status
+python agent.py binance-testnet-learning-status
 python agent.py binance-testnet-agent-stop
 ```
+
+### Testnet ileri öğrenme challenger'ı
+
+Testnet worker, etkin `%10` eşiğini çalışırken değiştirmez. Her tamamlanmış UTC gününde
+yalnız karar anında bilinen nedensel özellikleri saklar; bir sonraki **tam** UTC günlük
+kapanış geldikten sonra bir günlük ileri getiriyi değişmez etiket olarak mühürler.
+Karar ve etiket mumları arasında tam bir gün yoksa satır eğitim verisine çevrilmez;
+boşluk karantinaya alınır. Böylece kesinti sonrası çok günlük getirinin yanlışlıkla
+tek günlük sonuç sayılması önlenir.
+
+Testnet emir kanıtı bu günlük etiketlerden ayrıdır. Yalnız eksiksiz uzlaştırılmış alış
+ve satış dolumuna sahip kapanmış bir tur, gerçek Testnet maliyeti ve kesin P&L ile
+işlem kanıtı olur. Açık `%10` pozisyonu etkin policy'ye aittir; challenger kurulurken
+kapatılmaz, başka modele devredilmez ve eksik sonuçla eğitim örneği yapılmaz.
+
+Etiketler ile kapanmış turlar, kaynak yürütme defterine bire bir bağlı
+`state/<kaynak-defter-adı>-online-learning.sqlite3` dosyasına kimlikleriyle eklenir.
+Kaynak defter tam olarak bir policy/model kaydına, aggregate depo da kaynak kimliğiyle
+birlikte aynı policy/model çiftine mühürlenir. Farklı policy/model kanıtı görülürse
+yenileme kapalı kalır ve kayıtlar aynı öğrenme havuzunda karıştırılmaz.
+İlk eğitim 60 geçerli günlük etikette yapılır. Uygun challenger çıkmazsa seçim en az
+30 yeni etiket geldikten sonra yeniden denenebilir. Bir challenger üretildiğinde
+artefakt dondurulur ve yeni fit yapılmadan kesin ileri kohortu tamamlanır. Eğitimde
+görülen sonuçlar challenger performansının veya incumbent üstünlüğünün kanıtı sayılmaz;
+bu metrikler yalnız dondurma zamanından sonra oluşan dokunulmamış etiketlerde hesaplanır.
+Fit sınırındaki tek günlük sonuç, aday kimliği henüz karara bağlanmadığı için embargo
+olarak saklanır ve aday performansına katılmaz. Dondurma sonrasında bir günlük veri
+boşluğu oluşursa aday emekli edilir; kesintisiz yeni bölüm kendi yaşam döngüsünü başlatır.
+Eğitim etiketleri yalnız 200 etiketlik toplam veri-yeterliliği sayımına dahildir.
+
+Bir challenger ancak aşağıdaki koşulların tamamını sağlarsa
+`proposal_ready_for_review` olabilir:
+
+- toplam veri-yeterliliği için en az 200 ileri toplanmış günlük etiket;
+- dondurulduktan sonra en az 60 kesin ileri etiket;
+- challenger geçişiyle eşleşen en az 8 kesin P&L'lı kapanmış Testnet turu;
+- hem ileri günlük kohortta hem eşleşen gerçek turlarda pozitif net sonuç,
+  PF `>=1,15` ve azami düşüş `<=%15`;
+- aynı örneklerde etkin incumbent'tan daha iyi sonuç;
+- güvenlik ihlali bulunmaması.
+
+Bu statü yalnız insan incelemesine hazır bir öneridir. Öğrenme hattı aktif config'i
+yazmaz, çalışan worker'a hot-swap yapmaz ve paper, gerçek para ya da live emir
+bayrağını açmaz. Mevcut son 365 günlük Spot tanısı `-%10,44`, PF `0,678` ve henüz
+kapanmış Testnet turu yoktur; bu nedenle şu anda kâr veya terfi iddiası yoktur.
+Günlük etiket, BUY ile açılan tur, SELL ile kapanan tur ve epoch karantinası yazımları
+kalıcı outbox ile korunur. Olaylar eklenme sırasıyla oynatılır; ilk hata çözülmeden
+sonraki olay işlenmez. Outbox çözülmemişse, son yenileme başarısızsa, kaynak/öğrenici
+sürümü uyuşmuyorsa veya kaynak `learning_revision` değeri aggregate'in
+`ingested_source_revision` değerinden ilerideyse durum fail-closed kalır ve öneri
+hazır sayılmaz.
+Bir adayın kaynak kaydına bağlanması iki aşamalı ve kalıcı bir geçiştir. Geçiş yarıda
+kalırsa kaynak yazımları outbox'a ertelenir, durum `candidate_transition_pending`
+olur ve yeniden başlatma geçişi idempotent biçimde tamamlamadan yeni alış açamaz.
+Öğrenici sürümü değiştiğinde eski aggregate otomatik olarak yeni sürümün kanıtı
+sayılmaz; açık bir arşiv/migrasyon yapılana kadar sürüm uyuşmazlığı fail-closed kalır.
+Öğrenme durumunu kimlik bilgisi vermeden görmek için:
+
+```powershell
+python agent.py binance-testnet-learning-status
+```
+
+Ayrıntılı veri ve terfi sözleşmesi
+`reports/binance-testnet-online-learning.md` dosyasındadır.
 
 Binance Spot Testnet hesabı dönemsel olarak sıfırlanırsa önce worker'ı durdurun,
 ardından güvenli reset betiğini çalıştırın:
@@ -373,7 +438,10 @@ python agent.py binance-testnet-agent-stop
 
 Betik gizli anahtarları yalnız işlem ortamında tutar ve
 `BINANCE TESTNET DEFTERINI ARSIVLE VE SIFIRLA` onay cümlesini ister. Reset ancak
-worker tamamen durmuşsa, bekleyen niyet ve BTCUSDT açık emri yoksa yapılır. Aktif
+worker tamamen durmuşsa, bekleyen niyet ve BTCUSDT açık emri yoksa yapılır. Yerel
+pozisyon açıksa ayrıca imzalı `GET /v3/order` sorgusunun kaynak alış emri için
+yapılandırılmış Binance `-2013` cevabı vermesi gerekir; ağ hatası veya belirsiz cevap
+defteri sıfırlayamaz. Aktif
 durum, kararlar ve emir niyetleri aynı SQLite veritabanındaki değişmez epoch
 tablolarına tek transaction içinde arşivlenir; önceki dönemler silinmez.
 
@@ -382,6 +450,12 @@ yönetir. Testnet hesabının önceden verdiği BTC bakiyesini pozisyon saymaz. 
 niyeti POST isteğinden önce ayrı SQLite defterine yazılır; belirsiz cevapta aynı
 POST tekrarlanmaz, istemci kimliğiyle uzlaştırılır ve kanıtlanamayan durumda
 worker kapanır.
+
+Defter ilk doğrulanmış kullanımda Testnet API anahtarının tek yönlü SHA-256
+parmak izine bağlanır; anahtarın veya secret'ın kendisi yazılmaz ve durum çıktısında
+parmak izi gösterilmez. Sonraki start, çalışma ve reset aynı API anahtarını kanıtlamalıdır.
+Reset arşivlenen son mum sınırını korur; aynı günlük mumda aynı istemci kimliğiyle
+ikinci emir üretilemez.
 
 Komutları elle çalıştırmak gerekirse:
 
@@ -499,7 +573,7 @@ fazla doğrulanmamış risk açar.
 Bu tablo, 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
 doğrulanmış anlık görüntüdür. Daha sonraki canlı durum için `paper-status` esas alınır.
 Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. 17 Eylül 2026 tarihli
-son kod doğrulamasında tam test paketi **256/256** geçti.
+son kod doğrulamasında tam test paketi **354/354** geçti.
 
 ## Durumu okuma
 
