@@ -482,7 +482,7 @@ fazla doğrulanmamış risk açar.
 Bu tablo, 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
 doğrulanmış anlık görüntüdür. Daha sonraki canlı durum için `paper-status` esas alınır.
 Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. 17 Eylül 2026 tarihli
-son kod doğrulamasında tam test paketi **241/241** geçti.
+son kod doğrulamasında tam test paketi **242/242** geçti.
 
 ## Durumu okuma
 

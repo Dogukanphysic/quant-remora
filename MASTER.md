@@ -501,7 +501,7 @@ sonucu ayrı gösterir. V1 kayıpları silinmez ve v2 başarısı gibi sunulmaz.
 | Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 0 |
 | Binance public Testnet | VPN ile bağlantı, saat, BTCUSDT ve minimum notional doğrulandı |
 | Binance imzalı Testnet | Güvenli betik tamamlandı; anahtarlar dosyaya yazılmadı |
-| Binance background worker | Kod ve test hazır; operatör güvenli başlatmasını bekliyor |
+| Binance background worker | Çalışıyor; `hold_cash`, 30g momentum `%18,0901`, emir niyeti/dolum `0 / 0` |
 
 Bu tablo yerel `paper-status`, public Binance doctor ve operatörün imzalı Testnet
 doğrulama sonucuna dayanır. Daha sonraki canlı durum için `paper-status` ve
@@ -607,7 +607,7 @@ ve mümkünse challenger girişi aynı transaction içinde yazılır.
 `v3_paper_state`, `v3_paper_decisions` ve `v3_paper_executions` V3 testini V2
 muhasebesinden ayırır. Testnet reseti aktif satırları `worker_epochs` ve ilgili epoch
 tablolarına aynı transaction içinde taşır; denetim geçmişini silmez. 17 Eylül 2026'da
-tam otomatik test paketi **241/241** geçti.
+tam otomatik test paketi **242/242** geçti.
 
 ## 16. Bilinen sınırlar
 

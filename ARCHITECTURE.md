@@ -728,7 +728,7 @@ güncel toplam özkaynak `999,9112799645061 USD`, v2 dönem P&L'ı `0 USD`'dir. 
 damgasında challenger `collecting`, eşleşmiş event/skor sayısı `0`dır. Ayrık mikro
 hesap `100 USD`, açık/kapalı işlem `0 / 0`; ana sermaye yetkisi kapalıdır. Bu anlık görüntü kârlılık göstergesi değildir;
 sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. 17 Eylül
-2026'daki son doğrulamada tam test paketi **241/241** geçmiştir.
+2026'daki son doğrulamada tam test paketi **242/242** geçmiştir.
 
 Aynı gün V3 etkinleştirildikten sonraki doğrulamada ilk `adaptive_probe` işlemi
 77.869,99 USD referanstan 15 USD maliyetle açıldı; stop 77.667,95 ve hedef

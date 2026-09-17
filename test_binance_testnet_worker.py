@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -196,6 +198,27 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.clock.stop()
         self.env.stop()
         self.temp.cleanup()
+
+    @unittest.skipUnless(os.name == "nt", "Windows detached-process regression")
+    def test_pid_alive_supports_detached_windows_worker(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=(
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ),
+        )
+        try:
+            self.assertTrue(worker._pid_alive(child.pid))
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+        self.assertFalse(worker._pid_alive(child.pid))
 
     def test_cash_signal_records_once_without_an_order(self):
         client = FakeClient(daily_closes(100, 119))
