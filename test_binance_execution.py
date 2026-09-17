@@ -1,6 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import json
 import os
+import threading
 from decimal import ROUND_DOWN, getcontext, setcontext
 import unittest
 from unittest.mock import patch
@@ -370,11 +372,14 @@ class BinanceExecutionTests(unittest.TestCase):
 
     def test_order_not_found_is_structured_only_for_order_query(self):
         client = binance_execution.Client("key", "secret")
+        server_time = BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode())
         error = HTTPError(
             "https://testnet.binance.vision/api/v3/order", 400, "missing", {},
             BytesIO(b'{"code":-2013,"msg":"Order does not exist."}'),
         )
-        with patch.object(binance_execution, "urlopen", side_effect=error), \
+        with patch.object(
+            binance_execution, "urlopen", side_effect=[server_time, error]
+        ), \
                 self.assertRaises(
                     binance_execution.BinanceOrderNotFoundError
                 ) as caught:
@@ -388,11 +393,14 @@ class BinanceExecutionTests(unittest.TestCase):
 
     def test_minus_2013_from_another_endpoint_is_not_order_not_found_proof(self):
         client = binance_execution.Client("key", "secret")
+        server_time = BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode())
         error = HTTPError(
             "https://testnet.binance.vision/api/v3/account", 400, "missing", {},
             BytesIO(b'{"code":-2013,"msg":"unexpected"}'),
         )
-        with patch.object(binance_execution, "urlopen", side_effect=error), \
+        with patch.object(
+            binance_execution, "urlopen", side_effect=[server_time, error]
+        ), \
                 self.assertRaises(binance_execution.BinanceAPIError) as caught:
             client.account()
 
@@ -401,6 +409,256 @@ class BinanceExecutionTests(unittest.TestCase):
         )
         self.assertEqual(caught.exception.path, "/v3/account")
         self.assertEqual(caught.exception.api_code, -2013)
+
+    def test_signed_request_uses_monotonic_binance_server_time(self):
+        client = binance_execution.Client("key", "secret")
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            BytesIO(json.dumps({"balances": []}).encode()),
+        ]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9):
+            self.assertEqual(client.account(), {"balances": []})
+
+        self.assertEqual(opener.call_count, 2)
+        self.assertIn("/v3/time", opener.call_args_list[0].args[0].full_url)
+        signed_url = opener.call_args_list[1].args[0].full_url
+        self.assertIn("/v3/account?", signed_url)
+        self.assertIn("timestamp=1700000000000", signed_url)
+        self.assertIn("recvWindow=5000", signed_url)
+        self.assertIn("signature=", signed_url)
+
+    def test_server_time_sync_rejects_malformed_or_slow_samples(self):
+        invalid_values = (
+            True,
+            "1700000000000",
+            0,
+            1,
+            None,
+            1_700_000_000_000.0,
+            9_223_372_036_854_775_807,
+        )
+        for invalid in invalid_values:
+            with self.subTest(server_time=invalid):
+                client = binance_execution.Client("key", "secret")
+                response = BytesIO(json.dumps({"serverTime": invalid}).encode())
+                with patch.object(binance_execution, "urlopen", return_value=response) as opener, \
+                        patch.object(
+                            binance_execution.time, "monotonic_ns", return_value=10**9
+                        ), self.assertRaisesRegex(
+                            binance_execution.BinanceTransportError, "invalid"
+                        ):
+                    client.account()
+                self.assertEqual(opener.call_count, 1)
+
+        for invalid_payload in ({}, []):
+            with self.subTest(payload=invalid_payload):
+                client = binance_execution.Client("key", "secret")
+                response = BytesIO(json.dumps(invalid_payload).encode())
+                with patch.object(binance_execution, "urlopen", return_value=response), \
+                        patch.object(
+                            binance_execution.time, "monotonic_ns", return_value=10**9
+                        ), self.assertRaisesRegex(
+                            binance_execution.BinanceTransportError, "invalid"
+                        ):
+                    client.account()
+
+        client = binance_execution.Client("key", "secret")
+        response = BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode())
+        with patch.object(binance_execution, "urlopen", return_value=response) as opener, \
+                patch.object(
+                    binance_execution.time,
+                    "monotonic_ns",
+                    side_effect=[0, 0, 1_000_000_000],
+                ), self.assertRaisesRegex(
+                    binance_execution.BinanceTransportError, "too slow"
+                ):
+            client.account()
+        self.assertEqual(opener.call_count, 1)
+
+    def test_signed_get_minus_1021_resyncs_and_retries_exactly_once(self):
+        client = binance_execution.Client("key", "secret")
+        first_error = HTTPError(
+            "https://testnet.binance.vision/api/v3/account", 400, "clock", {},
+            BytesIO(b'{"code":-1021,"msg":"Timestamp outside recvWindow"}'),
+        )
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            first_error,
+            BytesIO(json.dumps({"serverTime": 1_700_000_001_000}).encode()),
+            BytesIO(json.dumps({"balances": []}).encode()),
+        ]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9):
+            self.assertEqual(client.account(), {"balances": []})
+
+        self.assertEqual(opener.call_count, 4)
+        account_urls = [
+            call.args[0].full_url for call in opener.call_args_list
+            if "/v3/account?" in call.args[0].full_url
+        ]
+        self.assertEqual(len(account_urls), 2)
+        self.assertIn("timestamp=1700000000000", account_urls[0])
+        self.assertIn("timestamp=1700000001000", account_urls[1])
+
+    def test_second_signed_get_minus_1021_becomes_transport_error(self):
+        client = binance_execution.Client("key", "secret")
+        errors = [
+            HTTPError(
+                "https://testnet.binance.vision/api/v3/account", 400, "clock", {},
+                BytesIO(b'{"code":-1021,"msg":"Timestamp outside recvWindow"}'),
+            ),
+            HTTPError(
+                "https://testnet.binance.vision/api/v3/account", 400, "clock", {},
+                BytesIO(b'{"code":-1021,"msg":"Timestamp outside recvWindow"}'),
+            ),
+        ]
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            errors[0],
+            BytesIO(json.dumps({"serverTime": 1_700_000_001_000}).encode()),
+            errors[1],
+        ]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9), \
+                self.assertRaisesRegex(
+                    binance_execution.BinanceTransportError, "resynchronization"
+                ):
+            client.account()
+        self.assertEqual(opener.call_count, 4)
+
+    def test_post_minus_1021_is_never_replayed(self):
+        client = binance_execution.Client("key", "secret")
+        error = HTTPError(
+            "https://testnet.binance.vision/api/v3/order", 400, "clock", {},
+            BytesIO(b'{"code":-1021,"msg":"Timestamp outside recvWindow"}'),
+        )
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            error,
+        ]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9), \
+                self.assertRaises(binance_execution.BinanceAPIError) as caught:
+            client._request(
+                "POST", "/v3/order", {"symbol": "BTCUSDT"}, signed=True
+            )
+
+        self.assertEqual(caught.exception.api_code, -1021)
+        self.assertEqual(opener.call_count, 2)
+        self.assertEqual(
+            sum(call.args[0].get_method() == "POST" for call in opener.call_args_list),
+            1,
+        )
+        self.assertIsNone(client._server_time_ms)
+
+    def test_failed_minus_1021_resync_clears_rejected_clock_before_post(self):
+        client = binance_execution.Client("key", "secret")
+        clock_error = HTTPError(
+            "https://testnet.binance.vision/api/v3/account", 400, "clock", {},
+            BytesIO(b'{"code":-1021,"msg":"Timestamp outside recvWindow"}'),
+        )
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            clock_error,
+            URLError("time endpoint unavailable"),
+            BytesIO(json.dumps({"serverTime": 1_700_000_001_000}).encode()),
+            BytesIO(json.dumps({"orderId": 1}).encode()),
+        ]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9):
+            with self.assertRaises(binance_execution.BinanceTransportError):
+                client.account()
+            self.assertIsNone(client._server_time_ms)
+            result = client._request(
+                "POST", "/v3/order", {"symbol": "BTCUSDT"}, signed=True
+            )
+
+        self.assertEqual(result, {"orderId": 1})
+        self.assertEqual(opener.call_count, 5)
+        time_calls = [
+            call for call in opener.call_args_list
+            if "/v3/time" in call.args[0].full_url
+        ]
+        post_calls = [
+            call for call in opener.call_args_list
+            if call.args[0].get_method() == "POST"
+        ]
+        self.assertEqual(len(time_calls), 3)
+        self.assertEqual(len(post_calls), 1)
+
+    def test_cached_server_clock_advances_monotonically_without_wall_clock(self):
+        client = binance_execution.Client("key", "secret")
+        responses = [
+            BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode()),
+            BytesIO(json.dumps({"balances": []}).encode()),
+            BytesIO(json.dumps({"balances": []}).encode()),
+        ]
+        monotonic_values = [0, 0, 0, 0, 1_000_000_000, 1_000_000_000]
+        with patch.object(binance_execution, "urlopen", side_effect=responses) as opener, \
+                patch.object(
+                    binance_execution.time,
+                    "monotonic_ns",
+                    side_effect=monotonic_values,
+                ), patch.object(binance_execution.time, "time", return_value=-1):
+            client.account()
+            client.account()
+
+        self.assertEqual(opener.call_count, 3)
+        account_urls = [
+            call.args[0].full_url for call in opener.call_args_list
+            if "/v3/account?" in call.args[0].full_url
+        ]
+        self.assertIn("timestamp=1700000000000", account_urls[0])
+        self.assertIn("timestamp=1700000001000", account_urls[1])
+
+    def test_initial_server_time_sync_is_single_flight(self):
+        client = binance_execution.Client("key", "secret")
+        first_fetch_entered = threading.Event()
+        release_first_fetch = threading.Event()
+        second_thread_started = threading.Event()
+
+        def fetch_time(_request, timeout):
+            self.assertEqual(timeout, 15)
+            first_fetch_entered.set()
+            self.assertTrue(release_first_fetch.wait(2))
+            return BytesIO(json.dumps({"serverTime": 1_700_000_000_000}).encode())
+
+        def sync(index):
+            if index == 1:
+                second_thread_started.set()
+            return client._sync_server_time()
+
+        with patch.object(binance_execution, "urlopen", side_effect=fetch_time) as opener, \
+                patch.object(binance_execution.time, "monotonic_ns", return_value=10**9):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(sync, 0)
+                self.assertTrue(first_fetch_entered.wait(2))
+                second = executor.submit(sync, 1)
+                self.assertTrue(second_thread_started.wait(2))
+                release_first_fetch.set()
+                generations = [first.result(), second.result()]
+
+        self.assertEqual(generations, [1, 1])
+        self.assertEqual(opener.call_count, 1)
+
+    def test_timestamp_at_cache_ttl_boundary_remains_signable(self):
+        client = binance_execution.Client("key", "secret")
+        ttl_ns = binance_execution.SERVER_TIME_TTL_SECONDS * 1_000_000_000
+        client._server_time_ms = 1_700_000_000_000
+        client._server_time_anchor_ns = 0
+        client._server_time_synced_ns = 0
+        client._server_time_generation = 1
+
+        with patch.object(
+            binance_execution.time,
+            "monotonic_ns",
+            side_effect=[ttl_ns, ttl_ns + 1],
+        ):
+            timestamp, generation = client._signed_timestamp()
+
+        self.assertEqual(generation, 1)
+        self.assertEqual(timestamp, 1_700_000_300_000)
 
 
 if __name__ == "__main__":

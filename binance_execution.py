@@ -24,6 +24,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -40,6 +41,10 @@ SYMBOL = "BTCUSDT"
 MIN_TESTNET_QUOTE_USD = Decimal("5")
 MAX_TESTNET_QUOTE_USD = Decimal("25")
 RECV_WINDOW = 5000
+SERVER_TIME_TTL_SECONDS = 300
+SERVER_TIME_MAX_RTT_MS = 1000
+MIN_SERVER_TIME_MS = 946_684_800_000  # 2000-01-01T00:00:00Z
+MAX_SERVER_TIME_MS = 4_102_444_800_000  # 2100-01-01T00:00:00Z
 _DECIMAL_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 
 _CLIENT_ORDER_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,36}$")
@@ -381,16 +386,178 @@ class Client:
         self.secret = secret or os.getenv("BINANCE_TESTNET_SECRET_KEY")
         self.base_url = BASE_URL
 
+        # Binance validates SIGNED timestamps against its own clock.  Keep the
+        # server-time sample process-local because a monotonic anchor is not
+        # meaningful after a restart.  The generation prevents concurrent
+        # stale requests from repeatedly invalidating a newer sample.
+        self._server_time_lock = threading.Lock()
+        self._server_time_ms: int | None = None
+        self._server_time_anchor_ns: int | None = None
+        self._server_time_synced_ns: int | None = None
+        self._server_time_generation = 0
+
+    def _server_time_is_fresh_locked(self, now_ns: int) -> bool:
+        return (
+            self._server_time_ms is not None
+            and self._server_time_anchor_ns is not None
+            and self._server_time_synced_ns is not None
+            and now_ns >= self._server_time_synced_ns
+            and now_ns - self._server_time_synced_ns
+            <= SERVER_TIME_TTL_SECONDS * 1_000_000_000
+        )
+
+    def _sync_server_time(
+        self,
+        *,
+        force: bool = False,
+        observed_generation: int | None = None,
+    ) -> int:
+        """Return a fresh in-memory Binance clock generation.
+
+        Synchronization is single-flight.  When another request has already
+        replaced the generation that produced ``-1021``, callers reuse that
+        newer sample instead of fetching time again.
+        """
+
+        with self._server_time_lock:
+            return self._sync_server_time_locked(
+                force=force,
+                observed_generation=observed_generation,
+            )
+
+    def _sync_server_time_locked(
+        self,
+        *,
+        force: bool = False,
+        observed_generation: int | None = None,
+    ) -> int:
+        """Synchronize while ``_server_time_lock`` is already held."""
+
+        now_ns = time.monotonic_ns()
+        if (
+            force
+            and observed_generation is not None
+            and observed_generation != self._server_time_generation
+            and self._server_time_is_fresh_locked(now_ns)
+        ):
+            return self._server_time_generation
+        if not force and self._server_time_is_fresh_locked(now_ns):
+            return self._server_time_generation
+
+        started_ns = time.monotonic_ns()
+        try:
+            value = self._request_once("GET", "/v3/time", {}, False)
+        except BinanceTransportError:
+            raise
+        except Exception as exc:
+            raise BinanceTransportError(
+                "Binance server-time synchronization failed."
+            ) from exc
+        finished_ns = time.monotonic_ns()
+        elapsed_ns = finished_ns - started_ns
+        if elapsed_ns < 0 or elapsed_ns >= SERVER_TIME_MAX_RTT_MS * 1_000_000:
+            raise BinanceTransportError(
+                "Binance server-time synchronization sample was too slow."
+            )
+        server_time = value.get("serverTime") if isinstance(value, dict) else None
+        if (
+            isinstance(server_time, bool)
+            or not isinstance(server_time, int)
+            or not MIN_SERVER_TIME_MS <= server_time <= MAX_SERVER_TIME_MS
+        ):
+            raise BinanceTransportError(
+                "Binance server-time synchronization returned an invalid value."
+            )
+
+        self._server_time_ms = server_time
+        self._server_time_anchor_ns = started_ns + elapsed_ns // 2
+        self._server_time_synced_ns = finished_ns
+        self._server_time_generation += 1
+        return self._server_time_generation
+
+    def _signed_timestamp(self) -> tuple[int, int]:
+        with self._server_time_lock:
+            # Sync and read the anchor under one lock so another request cannot
+            # invalidate or replace the generation between those two steps.
+            generation = self._sync_server_time_locked()
+            now_ns = time.monotonic_ns()
+            if (
+                generation != self._server_time_generation
+                or self._server_time_ms is None
+                or self._server_time_anchor_ns is None
+            ):
+                raise BinanceTransportError(
+                    "Binance server-time synchronization expired before signing."
+                )
+            elapsed_ns = now_ns - self._server_time_anchor_ns
+            if elapsed_ns < 0:
+                raise BinanceTransportError(
+                    "The local monotonic clock moved backwards while signing."
+                )
+            return (
+                self._server_time_ms + elapsed_ns // 1_000_000,
+                generation,
+            )
+
+    def _invalidate_server_time(self, observed_generation: int) -> None:
+        with self._server_time_lock:
+            if observed_generation != self._server_time_generation:
+                return
+            self._server_time_ms = None
+            self._server_time_anchor_ns = None
+            self._server_time_synced_ns = None
+
     def _request(self, method: str, path: str, params: dict[str, object] | None = None,
                  signed: bool = False) -> object:
         method = method.upper()
-        values = dict(params or {})
+        original_values = dict(params or {})
+        if not signed:
+            return self._request_once(method, path, original_values, False)
+        if not self.api_key or not self.secret:
+            raise ValueError("Binance Testnet API credentials are missing.")
+
+        for attempt in range(2):
+            timestamp, generation = self._signed_timestamp()
+            values = dict(original_values)
+            values.setdefault("recvWindow", RECV_WINDOW)
+            # A caller-supplied timestamp must never survive a resynchronization
+            # retry with its old signature.
+            values["timestamp"] = timestamp
+            try:
+                return self._request_once(method, path, values, True)
+            except BinanceAPIError as exc:
+                if exc.api_code != -1021:
+                    raise
+                if method != "GET":
+                    self._invalidate_server_time(generation)
+                    raise
+                if attempt:
+                    self._invalidate_server_time(generation)
+                    raise BinanceTransportError(
+                        "Binance rejected a signed GET after server-time resynchronization."
+                    ) from exc
+                # Clear only the sample that Binance rejected.  If another
+                # thread already published a newer generation this is a no-op.
+                # A failed refresh must not leave a known-bad timestamp usable
+                # by the next request, especially a POST.
+                self._invalidate_server_time(generation)
+                self._sync_server_time(
+                    force=True,
+                    observed_generation=generation,
+                )
+        raise AssertionError("unreachable signed-request retry state")
+
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        values: dict[str, object],
+        signed: bool,
+    ) -> object:
         headers = {"User-Agent": "quant-remora/1"}
         if signed:
             if not self.api_key or not self.secret:
                 raise ValueError("Binance Testnet API credentials are missing.")
-            values.setdefault("recvWindow", RECV_WINDOW)
-            values.setdefault("timestamp", int(time.time() * 1000))
             payload, signature = sign(values, self.secret)
             query = payload + "&signature=" + signature
             headers["X-MBX-APIKEY"] = self.api_key

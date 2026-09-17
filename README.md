@@ -315,7 +315,10 @@ izler. Bu defter sanal bakiyeyi değiştirmez.
 
 Gerçek para desteği kapalıdır. Adapter yalnız `https://testnet.binance.vision/api`
 adresini kabul eder; HMAC imzası, hesap/açık emir uzlaştırması, `/order/test`, benzersiz
-istemci emir kimliği ve 5–25 USDT Testnet emir tavanı uygular.
+istemci emir kimliği ve 5–25 USDT Testnet emir tavanı uygular. İmzalı istek zamanı
+public `/api/v3/time` yanıtından process-local monotonic saate bağlanır. `-1021`
+alan salt okunur imzalı GET bir kez yeni imza ile yinelenebilir; POST hiçbir durumda
+otomatik yeniden gönderilmez.
 
 Anahtarları diske veya komut geçmişine yazmadan bağlantıyı doğrulamak için güvenli
 yardımcı betiği çalıştırın. Betik API key ve secret key değerlerini ekranda göstermeden
@@ -573,7 +576,7 @@ fazla doğrulanmamış risk açar.
 Bu tablo, 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
 doğrulanmış anlık görüntüdür. Daha sonraki canlı durum için `paper-status` esas alınır.
 Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. 17 Eylül 2026 tarihli
-son kod doğrulamasında tam test paketi **354/354** geçti.
+son kod doğrulamasında tam test paketi **367/367** geçti.
 
 ## Durumu okuma
 

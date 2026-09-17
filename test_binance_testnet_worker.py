@@ -1788,6 +1788,115 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(worker.status_snapshot(self.db_path, self.lock_path)["halted"])
         self.assertEqual(client.sell_calls, [])
 
+    def test_clock_skew_halt_recovery_preserves_and_reproves_open_position(self):
+        client = FakeClient(daily_closes(100, 125, final_day=200))
+        bought = run_once(db_path=self.db_path, client=client)
+        self.assertEqual(bought["action"], "bought")
+        reason = (
+            f"Worker BUY origin {bought['client_id']} lookup failed without definitive "
+            "Testnet-reset evidence (BinanceAPIError: Binance HTTP 400: "
+            '{"code":-1021,"msg":"Timestamp for this request is outside of the '
+            'recvWindow."}).'
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            worker._halt(db, reason)
+
+        before = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertTrue(before["halted"])
+        self.assertEqual(before["tracked_position_qty"], "0.001")
+        self.assertTrue(
+            worker._recover_timestamp_halt(
+                self.db_path, self.lock_path, client
+            )
+        )
+
+        after = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertFalse(after["halted"])
+        self.assertIsNone(after["halt_reason"])
+        self.assertIsNone(after["last_error"])
+        self.assertEqual(after["tracked_position_qty"], "0.001")
+        self.assertEqual(after["intents"], before["intents"])
+        self.assertEqual(after["filled_orders"], before["filled_orders"])
+        self.assertIn((bought["client_id"], worker.SYMBOL), client.lookup_calls)
+
+    def test_start_recovers_only_proven_clock_skew_read_halt(self):
+        client = FakeClient(daily_closes(100, 125, final_day=200))
+        bought = run_once(db_path=self.db_path, client=client)
+        reason = (
+            f"Worker BUY origin {bought['client_id']} lookup failed without definitive "
+            "Testnet-reset evidence (BinanceAPIError: Binance HTTP 400: "
+            '{"code":-1021,"msg":"Timestamp for this request is outside of the '
+            'recvWindow."}).'
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            worker._halt(db, reason)
+
+        child = Mock()
+        child.poll.return_value = None
+        with patch.object(
+            worker, "_lock_active", side_effect=[False, False, True, True, True]
+        ), patch.object(worker.subprocess, "Popen", return_value=child), \
+                patch.object(worker.time, "sleep"):
+            result = worker.control(
+                "start",
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=client,
+            )
+
+        self.assertTrue(result["running"])
+        self.assertTrue(result["desired_running"])
+        self.assertFalse(result["halted"])
+        self.assertEqual(result["tracked_position_qty"], "0.001")
+        self.assertEqual(client.buy_calls, [("10", worker.SYMBOL, bought["client_id"])])
+
+    def test_clock_skew_halt_recovery_keeps_halt_on_origin_mismatch(self):
+        client = FakeClient(daily_closes(100, 125, final_day=200))
+        bought = run_once(db_path=self.db_path, client=client)
+        self.assertEqual(bought["action"], "bought")
+        reason = (
+            f"Worker BUY origin {bought['client_id']} lookup failed without definitive "
+            "Testnet-reset evidence (BinanceAPIError: Binance HTTP 400: "
+            '{"code":-1021,"msg":"Timestamp for this request is outside of the '
+            'recvWindow."}).'
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            worker._halt(db, reason)
+        client.orders[bought["client_id"]]["executedQty"] = "0.002"
+
+        with self.assertRaisesRegex(worker.WorkerHalt, "no longer matches"):
+            worker._recover_timestamp_halt(
+                self.db_path, self.lock_path, client
+            )
+
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertTrue(status["halted"])
+        self.assertEqual(status["halt_reason"], reason)
+        self.assertEqual(status["tracked_position_qty"], "0.001")
+
+    def test_clock_skew_halt_recovery_requires_free_tracked_btc(self):
+        client = FakeClient(daily_closes(100, 125, final_day=200))
+        bought = run_once(db_path=self.db_path, client=client)
+        reason = (
+            f"Worker BUY origin {bought['client_id']} lookup failed without definitive "
+            "Testnet-reset evidence (BinanceAPIError: Binance HTTP 400: "
+            '{"code":-1021,"msg":"Timestamp for this request is outside of the '
+            'recvWindow."}).'
+        )
+        with worker.closing(worker._connect(self.db_path)) as db:
+            worker._halt(db, reason)
+        client.free_btc = "0"
+
+        with self.assertRaisesRegex(worker.WorkerHalt, "enough free BTC"):
+            worker._recover_timestamp_halt(
+                self.db_path, self.lock_path, client
+            )
+
+        status = worker.status_snapshot(self.db_path, self.lock_path)
+        self.assertTrue(status["halted"])
+        self.assertEqual(status["halt_reason"], reason)
+        self.assertEqual(status["tracked_position_qty"], "0.001")
+
     def test_foreground_restart_reconciles_halted_pending_before_exit(self):
         first = FakeClient(daily_closes(100, 125))
         first.buy_error = TimeoutError("response lost")

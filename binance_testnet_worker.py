@@ -1365,6 +1365,122 @@ def _ensure_account_binding(db: sqlite3.Connection, client: object) -> None:
         raise AccountBindingError("Binance Testnet account binding failed closed.")
 
 
+def _is_recoverable_timestamp_halt(state: sqlite3.Row) -> bool:
+    """Recognize only legacy pre-order signed-read ``-1021`` halts."""
+
+    if not state["halted"] or state["pending_client_id"]:
+        return False
+    reason = state["halt_reason"]
+    if not isinstance(reason, str):
+        return False
+    safe_read_prefixes = (
+        "Worker BUY origin ",
+        "Open-order safety check failed:",
+        "USDT balance safety check failed:",
+        "BTC balance safety check failed:",
+    )
+    return (
+        reason.startswith(safe_read_prefixes)
+        and "BinanceAPIError: Binance HTTP 400:" in reason
+        and re.search(r'"code"\s*:\s*-1021(?:\D|$)', reason) is not None
+        and "Timestamp for this request is outside of the recvWindow" in reason
+    )
+
+
+def _recover_timestamp_halt(
+    db_path: Path | str,
+    lock_path: Path | str,
+    client: object,
+) -> bool:
+    """Clear a legacy clock-skew halt only after full remote read proof.
+
+    Position, intent, decision, and learning records are immutable in this
+    repair path.  Any remote outage or mismatch leaves the halt intact.
+    """
+
+    with _process_lock(_account_lock_path(lock_path)):
+        with closing(_connect(db_path)) as db:
+            state = _state(db)
+            if not _is_recoverable_timestamp_halt(state):
+                return False
+            original_reason = str(state["halt_reason"])
+            _assert_account_fingerprint(db, client, allow_unbound=False)
+
+            try:
+                account = client.account()
+                open_orders = client.open_orders(symbol=SYMBOL)
+            except Exception as exc:
+                raise WorkerHalt(
+                    "Clock-skew recovery could not complete signed account checks."
+                ) from exc
+            if not isinstance(account, Mapping):
+                raise WorkerHalt(
+                    "Clock-skew recovery received an invalid account response."
+                )
+            if not isinstance(open_orders, list):
+                raise WorkerHalt(
+                    "Clock-skew recovery received an invalid open-order response."
+                )
+            if open_orders:
+                raise WorkerHalt(
+                    "Clock-skew recovery refuses existing BTCUSDT open orders."
+                )
+
+            tracked_qty = _decimal(state["position_qty"], "tracked position")
+            if tracked_qty < 0:
+                raise WorkerHalt(
+                    "Clock-skew recovery refuses a negative tracked position."
+                )
+            if tracked_qty > 0:
+                free_base = _free_balance(account, BASE_ASSET)
+                if free_base < tracked_qty:
+                    raise WorkerHalt(
+                        "Clock-skew recovery cannot prove enough free BTC for the "
+                        "tracked position."
+                    )
+                origin = _latest_filled_buy_origin(db)
+                if origin is None:
+                    raise WorkerHalt(
+                        "Clock-skew recovery cannot prove the tracked BUY origin."
+                    )
+                client_id = str(origin["client_id"])
+                try:
+                    remote = client.order_by_client_id(client_id, symbol=SYMBOL)
+                except Exception as exc:
+                    raise WorkerHalt(
+                        "Clock-skew recovery could not read the tracked BUY origin."
+                    ) from exc
+                if not isinstance(remote, Mapping):
+                    raise WorkerHalt(
+                        "Clock-skew recovery received an invalid BUY-origin response."
+                    )
+                _validate_position_origin_order(origin, remote, tracked_qty)
+
+            now = _now_ms()
+            with _transaction(db):
+                current = _state(db)
+                if (
+                    not _is_recoverable_timestamp_halt(current)
+                    or current["halt_reason"] != original_reason
+                ):
+                    raise WorkerHalt(
+                        "Clock-skew halt changed during recovery; no repair was applied."
+                    )
+                cursor = db.execute(
+                    """UPDATE worker_state SET desired_running=0, halted=0,
+                       halt_reason=NULL, last_error=NULL, transient_failures=0,
+                       last_transient_error_ms=NULL, updated_ms=?
+                       WHERE singleton=1 AND halted=1 AND halt_reason=?
+                         AND pending_client_id IS NULL""",
+                    (now, original_reason),
+                )
+                if cursor.rowcount != 1:
+                    raise WorkerHalt(
+                        "Clock-skew halt changed during recovery; no repair was applied."
+                    )
+            return True
+
+
 def _apply_filled(
     db: sqlite3.Connection,
     order: Mapping[str, object],
@@ -2944,13 +3060,19 @@ def _control_locked(
             "execution lease. Stop that worker before starting this policy."
         )
     api = client if client is not None else execution.Client()
+    recover_timestamp_halt = False
     with closing(_connect(db_path)) as db:
         _assert_account_fingerprint(db, api, allow_unbound=True)
         state = _state(db)
         if state["halted"] and not state["pending_client_id"]:
-            raise WorkerHalt(
-                "Worker is halted; inspect status and reconcile/repair state before restart."
-            )
+            if _is_recoverable_timestamp_halt(state):
+                recover_timestamp_halt = True
+            else:
+                raise WorkerHalt(
+                    "Worker is halted; inspect status and reconcile/repair state before restart."
+                )
+    if recover_timestamp_halt:
+        _recover_timestamp_halt(db_path, lock_path, api)
     _set_desired(db_path, True)
     args = [
         sys.executable,

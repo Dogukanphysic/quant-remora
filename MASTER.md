@@ -660,7 +660,7 @@ ve mümkünse challenger girişi aynı transaction içinde yazılır.
 `v3_paper_state`, `v3_paper_decisions` ve `v3_paper_executions` V3 testini V2
 muhasebesinden ayırır. Testnet reseti aktif satırları `worker_epochs` ve ilgili epoch
 tablolarına aynı transaction içinde taşır; denetim geçmişini silmez. 17 Eylül 2026'da
-tam otomatik test paketi **354/354** geçti.
+tam otomatik test paketi **367/367** geçti.
 
 ## 16. Bilinen sınırlar
 
@@ -701,6 +701,7 @@ tam otomatik test paketi **354/354** geçti.
 | 2026-09-17 | Binance Spot Testnet HMAC bağlantısı güvenli oturum betiğiyle doğrulandı | Anahtarı dosyaya veya komut geçmişine yazmadan imza ve `/order/test` yolunu sınamak |
 | 2026-09-17 | Testnet yürütmesi paper worker'dan ayrı bir defter ve sürece alındı | Testnet resetini, tekrar emir riskini ve önceden verilmiş BTC bakiyesini paper kanıtına karıştırmamak |
 | 2026-09-17 | Negatif V3 ve nakit seçen 15m modeller Testnet emrinden dışlandı; sabit günlük momentum pilotu seçildi | Daha sık işlem uğruna daha önce ölçülen zararı tekrarlamamak |
+| 2026-09-17 | İmzalı Testnet çağrıları Binance sunucu saatine bağlandı; eski `-1021` haltı uzak BUY kanıtıyla dar kapsamlı kurtarılabilir yapıldı | Yerel saat farkının worker'ı kalıcı durdurmasını önlerken POST tekrarını ve kanıtsız durum temizliğini engellemek |
 
 ## 18. Kaynaklar
 

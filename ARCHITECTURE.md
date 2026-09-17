@@ -340,7 +340,12 @@ günlere forward sonucu yazmaz.
 
 `binance_execution.py` yalnız Spot Testnet taban URL'sini kabul eden fail-closed emir
 adapterıdır. İmzalı istekler HMAC-SHA256, 5 saniye `recvWindow`, ortam değişkeninden
-kimlik bilgisi ve açıkça verilen `newClientOrderId` kullanır. Public doctor
+kimlik bilgisi ve açıkça verilen `newClientOrderId` kullanır. İmzalama saati public
+`/v3/time` örneğinden alınır ve yalnız process belleğindeki monotonic bir ankora
+bağlanır; örnek beş dakikada eskir, yavaş veya bozuk örnek imzalı çağrıdan önce
+reddedilir. Eşzamanlı yenilemeler generation ile tekilleştirilir. Yapılandırılmış
+`-1021` alan imzalı GET, yeni timestamp ve imzayla yalnız bir kez denenir; ikinci
+red transport kesintisi sayılır. POST hiçbir zaman otomatik yinelenmez. Public doctor
 `exchangeInfo` filtrelerini doğrular; özel yollar hesap, açık emir, `/order/test`,
 istemci kimliğiyle emir sorgusu, `myTrades` dolum uzlaştırması ve 5–25 USDT ile
 sınırlı market alış/satış sağlar. Gerçek Binance URL'si kod tarafından
@@ -377,6 +382,10 @@ temizlenir. Başarılı başlangıçtan sonra yalnız detached worker kendi kopy
 Yürütme defteri ilk kesin uzlaştırmada Testnet API anahtarının SHA-256 parmak izine
 bağlanır. Ham anahtar veya secret saklanmaz, parmak izi durum çıktısına verilmez.
 Sonraki start, çalışma ve reset aynı API anahtarı bağını kanıtlamadan defteri kullanamaz.
+Eski sürümün salt okunur imzalı çağrıda kaydettiği kesin `-1021` haltı yalnız kontrol
+mutex'i ve hesap lease'i altında kurtarılır. Aynı hesap, sıfır açık emir ve varsa
+yerel dolu BUY kaydı uzak Binance emriyle birebir doğrulanmadan halt temizlenmez;
+pozisyon, emir niyeti, karar ve öğrenme kanıtına dokunulmaz.
 
 Testnet'in dönemsel hesap sıfırlamasından sonra reset yalnız worker durmuşken,
 bekleyen niyet ve BTCUSDT açık emri yokken çalışır. Yerel pozisyon açıksa kaynak BUY
@@ -833,7 +842,7 @@ güncel toplam özkaynak `999,9112799645061 USD`, v2 dönem P&L'ı `0 USD`'dir. 
 damgasında challenger `collecting`, eşleşmiş event/skor sayısı `0`dır. Ayrık mikro
 hesap `100 USD`, açık/kapalı işlem `0 / 0`; ana sermaye yetkisi kapalıdır. Bu anlık görüntü kârlılık göstergesi değildir;
 sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. 17 Eylül
-2026'daki son doğrulamada tam test paketi **354/354** geçmiştir.
+2026'daki son doğrulamada tam test paketi **367/367** geçmiştir.
 
 Aynı gün V3 etkinleştirildikten sonraki doğrulamada ilk `adaptive_probe` işlemi
 77.869,99 USD referanstan 15 USD maliyetle açıldı; stop 77.667,95 ve hedef
