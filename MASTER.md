@@ -501,7 +501,7 @@ sonucu ayrı gösterir. V1 kayıpları silinmez ve v2 başarısı gibi sunulmaz.
 | Ana hesap açık pozisyon / V3 açık pozisyon | 0 / 0 |
 | Binance public Testnet | VPN ile bağlantı, saat, BTCUSDT ve minimum notional doğrulandı |
 | Binance imzalı Testnet | Güvenli betik tamamlandı; anahtarlar dosyaya yazılmadı |
-| Binance background worker | Çalışıyor; `hold_cash`, 30g momentum `%18,0901`, emir niyeti/dolum `0 / 0` |
+| Binance background worker | Eski `%20` worker güvenle durduruldu; `%10` Testnet policy ayrı, boş defterle güvenli yeniden başlatmayı bekliyor |
 
 Bu tablo yerel `paper-status`, public Binance doctor ve operatörün imzalı Testnet
 doğrulama sonucuna dayanır. Daha sonraki canlı durum için `paper-status` ve
@@ -547,6 +547,9 @@ python agent.py paper-stop
 # Binance Spot Testnet kimlik ve emir-parametre doğrulaması; emir göndermez
 & .\scripts\setup-binance-testnet.ps1
 
+# Worker durmuş, nakitte ve uzlaşmışken Testnet-only policy'yi yeniden eğitme
+python agent.py train-binance-testnet-policy
+
 # Ayrı 10 USDT Testnet yürütme pilotunu başlatma ve izleme
 & .\scripts\start-binance-testnet-agent.ps1
 python agent.py binance-testnet-agent-status
@@ -565,9 +568,11 @@ pozisyonların koruyucu çıkışları kontrol edilir. `paper-start` ve
 
 Binance Testnet worker paper worker'dan ayrıdır. Binance public Spot'tan salt okunur
 GET ile tamamlanmış UTC günlük mumları izler; hesap ve emirleri ayrı Testnet-only
-istemciye yollar. Yalnız `30d momentum > %20` long/nakit hedefi değiştiğinde 10 USDT
-sanal emir verir. Bu, 15 dakikalık eğitilmiş modelin terfi ettiği anlamına gelmez;
-15 dakikalık kontrol ve challenger sermaye için hâlâ uygun değildir.
+istemciye yollar. Aktif exploration policy yalnız `30d momentum > %10` long/nakit
+hedefi değiştiğinde 10 USDT sanal emir verir. Model sürümü ve politika kimliği ayrı
+SQLite defterine bağlanır; eski `%20` kayıtları korunur. `%10` adayının son Binance
+Spot tanı yılı `-%10,44` olduğu için bu bir kârlılık veya gerçek para terfisi değildir;
+15 dakikalık kontrol ve challenger sermaye için de hâlâ uygun değildir.
 
 ## 15. Dosya ve durum haritası
 
@@ -583,11 +588,14 @@ sanal emir verir. Bu, 15 dakikalık eğitilmiş modelin terfi ettiği anlamına 
 | `paper.py` | Worker kilidi, süreç kontrolü, ortak status ve legacy geçişler |
 | `binance_execution.py` | Public Spot GET-only mum istemcisi ile ayrı Testnet-only HMAC, market filtreleri, alış/satış ve `myTrades` uzlaştırması |
 | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT sanal pozisyon, kalıcı emir niyeti ve tekrar koruması |
+| `testnet_policy_trainer.py` | Ön-kayıtlı eşikler, iki-piyasa maliyet kapıları ve Testnet-only config üretimi |
+| `config/binance-testnet-active-policy.json` | Aktif policy, model/veri sürümü, sabit 10 USDT ve gerçek para kapıları |
+| `reports/binance-testnet-active-policy.md` | Eğitim sonucu, yakın dönem Spot tanısı ve kullanım sınırları |
 | `scripts/setup-binance-testnet.ps1` | Anahtarları kaydetmeden hesap ve `/order/test` doğrulaması |
 | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi ve çift kapıyla detached Testnet worker başlatma |
 | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş Testnet dönemini aynı SQLite içinde arşivleyip yeni epoch açma |
 | `state/paper.sqlite3` | Canlı sanal durumun tek kaynağı |
-| `state/binance-testnet-worker.sqlite3` | Testnet karar, emir niyeti, dolum, pozisyon ve sanal P&L defteri |
+| `state/binance-testnet-<policy>-<model>.sqlite3` | Politika/model sürümüne ayrılmış Testnet karar, emir niyeti, dolum, pozisyon ve sanal P&L defteri |
 | `state/bollinger-v2-model.json` | Güncel çıkarım artefaktı |
 | `reports/bollinger-v2-training.json` | Tekrarlanabilir eğitim sonucu |
 | `reports/bollinger-v2-research.md` | Araştırma kararı ve kanıt özeti |
@@ -607,7 +615,7 @@ ve mümkünse challenger girişi aynı transaction içinde yazılır.
 `v3_paper_state`, `v3_paper_decisions` ve `v3_paper_executions` V3 testini V2
 muhasebesinden ayırır. Testnet reseti aktif satırları `worker_epochs` ve ilgili epoch
 tablolarına aynı transaction içinde taşır; denetim geçmişini silmez. 17 Eylül 2026'da
-tam otomatik test paketi **242/242** geçti.
+tam otomatik test paketi **256/256** geçti.
 
 ## 16. Bilinen sınırlar
 

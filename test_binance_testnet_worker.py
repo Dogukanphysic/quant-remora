@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -221,7 +222,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(worker._pid_alive(child.pid))
 
     def test_cash_signal_records_once_without_an_order(self):
-        client = FakeClient(daily_closes(100, 119))
+        client = FakeClient(daily_closes(100, 109))
 
         result = run_once(db_path=self.db_path, client=client)
         duplicate = run_once(db_path=self.db_path, client=client)
@@ -232,9 +233,56 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertEqual(client.sell_calls, [])
         status = worker.status_snapshot(self.db_path, Path(self.temp.name) / "lock")
         self.assertEqual(status["latest_decision"]["action"], "hold_cash")
+        self.assertEqual(status["momentum_threshold"], "0.10")
+        self.assertTrue(status["policy_match"])
+
+    def test_policy_config_rejects_execution_scope_or_trained_rule_changes(self):
+        mutations = (
+            ("environment", "https://api.binance.com"),
+            ("real_money_eligible", True),
+            ("policy_id", "btc_daily_momentum_30d_t05_testnet_v1"),
+            ("threshold", "0.05"),
+            ("quote_usdt", "25"),
+        )
+        for field, replacement in mutations:
+            with self.subTest(field=field):
+                value = json.loads(json.dumps(worker.POLICY_CONFIG))
+                if field == "threshold":
+                    value["rule"][field] = replacement
+                elif field == "quote_usdt":
+                    value["order"][field] = replacement
+                else:
+                    value[field] = replacement
+                path = Path(self.temp.name) / f"invalid-{field}.json"
+                path.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    worker._load_policy_config(path)
+
+    def test_ten_percent_threshold_is_strict(self):
+        exactly_ten = FakeClient(daily_closes(100, 110))
+        above_ten = FakeClient(daily_closes(100, 110.01))
+
+        self.assertEqual(
+            run_once(db_path=self.db_path, client=exactly_ten)["action"],
+            "hold_cash",
+        )
+        second_db = Path(self.temp.name) / "above-threshold.sqlite3"
+        self.assertEqual(
+            run_once(db_path=second_db, client=above_ten)["action"],
+            "bought",
+        )
+
+    def test_ledger_refuses_policy_spec_mismatch(self):
+        with worker.closing(worker._connect(self.db_path)) as db:
+            db.execute(
+                "UPDATE worker_state SET policy_spec_hash=? WHERE singleton=1",
+                ("0" * 64,),
+            )
+        with self.assertRaisesRegex(worker.WorkerHalt, "does not match"):
+            worker._connect(self.db_path)
 
     def test_signal_candles_and_execution_use_separate_clients(self):
-        execution_client = FakeClient(daily_closes(100, 119))
+        execution_client = FakeClient(daily_closes(100, 109))
         public_market = execution_client.market_data
 
         result = run_once(
@@ -249,7 +297,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(hasattr(public_market, "place_market_buy"))
 
     def test_default_clients_are_testnet_execution_and_public_market_data(self):
-        execution_client = FakeClient(daily_closes(100, 119))
+        execution_client = FakeClient(daily_closes(100, 109))
         public_market = execution_client.market_data
         with patch.object(
             worker.execution, "Client", return_value=execution_client
@@ -310,7 +358,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         bought = run_once(db_path=self.db_path, client=client)
         self.assertEqual(bought["action"], "bought")
 
-        # A new completed candle whose 30-day momentum is no longer above 20%.
+        # A new completed candle whose 30-day momentum is no longer above 10%.
         client.daily = daily_closes(120, 100, final_day=201)
         with patch.object(worker, "_now_ms", return_value=NOW_MS + DAY_MS):
             sold = run_once(db_path=self.db_path, client=client)
@@ -477,7 +525,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         child = Mock()
         child.poll.return_value = None
         with patch.object(
-            worker, "_lock_active", side_effect=[False, True, True, True]
+            worker, "_lock_active", side_effect=[False, False, True, True, True]
         ), patch.object(worker.subprocess, "Popen", return_value=child), \
                 patch.object(worker.time, "sleep"):
             result = worker.control(
@@ -500,7 +548,9 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
     def test_child_exit_during_startup_clears_desired_running(self):
         child = Mock()
         child.poll.return_value = 2
-        with patch.object(worker, "_lock_active", side_effect=[False, False, False]), \
+        with patch.object(
+            worker, "_lock_active", side_effect=[False, False, False, False]
+        ), \
                 patch.object(worker.subprocess, "Popen", return_value=child):
             with self.assertRaisesRegex(worker.WorkerHalt, "did not remain running"):
                 worker.control("start", db_path=self.db_path, lock_path=self.lock_path)
@@ -516,6 +566,17 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
                 worker.control("start", db_path=self.db_path, lock_path=self.lock_path)
         popen.assert_not_called()
 
+    def test_start_rejects_policy_config_changed_after_import(self):
+        changed = json.loads(json.dumps(worker.POLICY_CONFIG))
+        changed["model_version"] = "f" * 64
+        with patch.object(worker, "_load_policy_config", return_value=changed), \
+                patch.object(worker.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(worker.WorkerHalt, "changed after"):
+                worker.control(
+                    "start", db_path=self.db_path, lock_path=self.lock_path
+                )
+        popen.assert_not_called()
+
     def test_control_mutex_rejects_overlapping_control_action(self):
         with worker._control_mutex(self.lock_path), patch.object(
             worker, "STARTUP_WAIT_SECONDS", 0
@@ -523,6 +584,35 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.WorkerHalt, "control action"):
                 with worker._control_mutex(self.lock_path):
                     pass
+
+    def test_default_control_mutex_path_is_stable_across_policy_ledgers(self):
+        self.assertEqual(
+            worker._control_lock_path(worker.LOCK_PATH),
+            worker.CONTROL_LOCK_PATH,
+        )
+        custom = Path(self.temp.name) / "another-policy.lock"
+        self.assertNotEqual(worker._control_lock_path(custom), worker.CONTROL_LOCK_PATH)
+
+    def test_default_account_lease_is_stable_across_policy_ledgers(self):
+        self.assertEqual(
+            worker._account_lock_path(worker.LOCK_PATH),
+            worker.ACCOUNT_LOCK_PATH,
+        )
+        old_policy = worker.STATE_DIR / "binance-testnet-old-policy.lock"
+        self.assertEqual(worker._account_lock_path(old_policy), worker.ACCOUNT_LOCK_PATH)
+        custom = Path(self.temp.name) / "another-policy.lock"
+        self.assertNotEqual(worker._account_lock_path(custom), worker.ACCOUNT_LOCK_PATH)
+
+    def test_start_refuses_account_lease_owned_by_another_policy(self):
+        account_lock = worker._account_lock_path(self.lock_path)
+        with worker._process_lock(account_lock), patch.object(
+            worker.subprocess, "Popen"
+        ) as popen:
+            with self.assertRaisesRegex(worker.WorkerHalt, "account-wide"):
+                worker.control(
+                    "start", db_path=self.db_path, lock_path=self.lock_path
+                )
+        popen.assert_not_called()
 
     def test_once_is_not_a_public_cli_action(self):
         with self.assertRaises(SystemExit) as raised:
@@ -543,7 +633,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         sleep.assert_called_once_with(0.05)
 
     def test_reset_requires_independent_gate_and_refuses_open_orders(self):
-        client = FakeClient(daily_closes(100, 119))
+        client = FakeClient(daily_closes(100, 109))
         with self.assertRaisesRegex(worker.WorkerHalt, "RESET_ENABLED"):
             worker.control(
                 "reset", db_path=self.db_path, lock_path=self.lock_path, client=client
@@ -655,7 +745,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(status["desired_running"])
 
     def test_read_outage_retries_without_permanent_halt(self):
-        client = FakeClient(daily_closes(100, 119))
+        client = FakeClient(daily_closes(100, 109))
         client.open_orders_error = worker.execution.BinanceTransportError("vpn down")
 
         retry = run_once(db_path=self.db_path, client=client)
@@ -751,7 +841,7 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertIsNone(status["pending_client_id"])
 
     def test_api_cycles_are_at_least_sixty_seconds_apart(self):
-        client = FakeClient(daily_closes(100, 119))
+        client = FakeClient(daily_closes(100, 109))
         worker._set_desired(self.db_path, True)
         clock = [0.0]
         waits = []

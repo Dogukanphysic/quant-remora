@@ -111,6 +111,11 @@ try {
     if ($currentStatus.running) {
         throw 'Binance Testnet worker zaten calisiyor. Anahtar degistirmek icin once binance-testnet-agent-stop kullanin.'
     }
+    Write-Host (
+        "Aktif politika: $($currentStatus.policy); " +
+        "30 gun momentum esigi: $($currentStatus.momentum_threshold); " +
+        "emir: $($currentStatus.entry_quote_usdt) USDT"
+    )
 
     [Environment]::SetEnvironmentVariable('BINANCE_ORDER_EXECUTION_ENABLED', $null, 'Process')
     [Environment]::SetEnvironmentVariable('BINANCE_TESTNET_WORKER_ENABLED', $null, 'Process')

@@ -63,6 +63,7 @@ simülasyondur.
 | Eğitilebilir Remora paper | `paper_v3.py` | Sınırlı mikro sanal sermaye, sonuç etiketi, model kapısı ve zarar korumaları |
 | Süreç | `paper.py` | 30 saniyelik worker, kilit, başlangıç/duruş, ortak status, legacy uyumluluk |
 | Binance veri/yürütme adapterı | `binance_execution.py` | Public Spot GET-only mumlar ile ayrı Testnet-only HMAC/emir/dolum istemcileri |
+| Testnet policy trainer | `testnet_policy_trainer.py` | Ön-kayıtlı momentum eşiklerini iki piyasada maliyet ve dönem kapılarıyla değerlendirip Testnet-only config üretme |
 | Binance Testnet worker | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT pozisyon, SQLite niyet defteri ve süreç kontrolü |
 | Güvenli Testnet başlatma | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi, ön kontrol, açık onay ve detached worker ortamı |
 | Testnet epoch reseti | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş dönemi aynı SQLite içinde arşivleyip temiz aktif epoch açma |
@@ -343,14 +344,24 @@ istemci kimliğiyle emir sorgusu, `myTrades` dolum uzlaştırması ve 5–25 USD
 sınırlı market alış/satış sağlar. Gerçek Binance URL'si kod tarafından
 reddedilir. POST sonucu belirsizse adapter otomatik tekrar göndermez.
 
-`binance_testnet_worker.py`, paper motorundan ayrı `state/binance-testnet-worker.sqlite3`
-defteri ve süreç kilidi kullanır. Bu yürütme pilotu eğitilmiş 15 dakikalık
+`binance_testnet_worker.py`, paper motorundan ayrı ve politika/model sürümünü adında
+taşıyan `state/binance-testnet-<policy>-<model>.sqlite3` defteri kullanır. Hesap
+düzeyindeki tek sabit kontrol mutex'i start/stop/reset/eğitim geçişlerini seri hale
+getirir; çalışan süreç ayrıca politika sürümlerinin paylaşmak zorunda olduğu tek
+hesap yürütme lease'ini ömrü boyunca tutar. Bu yürütme pilotu eğitilmiş 15 dakikalık
 Bollinger modeli değildir. Negatif ileri sonucu olan V3'ten emir almaz. Sabitlenmiş
-düşük frekans adayını kullanır: Binance public Spot'tan gelen tamamlanmış UTC
-günlük mumda 30 günlük getiri `>%20` ise long, aksi halde nakit. Public veri
+düşük frekans Testnet adayını kullanır: Binance public Spot'tan gelen tamamlanmış UTC
+günlük mumda 30 günlük getiri `>%10` ise long, aksi halde nakit. Public veri
 istemcisi yalnız izinli `/api/v3/klines` GET yolunu açar; kimlik bilgisi, hesap veya
 emir metodu yoktur. Yalnız hedef durum değiştiğinde 10 USDT
 Testnet pozisyonu açar veya yalnız kendi dolumlarıyla edindiği BTC'yi satar.
+
+`testnet_policy_trainer.py` `%0/%3/%5/%10` adaylarını `%0,20` tek-yön maliyet,
+iki piyasa, 4/5 pozitif dönem, PF, düşüş ve aktivite kapılarıyla değerlendirir. Bu
+veride yalnız `%10` geçti. Eğitimdeki uzun Binance serisi USD-M, yürütme ise Spot
+olduğu için son bir yıllık Binance Spot serisi ayrıca tanı olarak kaydedilir; sonucu
+`-%10,44` ve PF `0,678` olduğundan artifact yalnız Testnet exploration statüsündedir.
+Gerçek para, paper terfisi ve canlı emir bayrakları kapalıdır.
 
 Emir niyeti POST'tan önce SQLite'a yazılır. İstemci kimliği politika, kapanmış
 mum zamanı ve yönden deterministik üretilir. Kesinti sonrası aynı POST tekrarlanmaz;
@@ -379,7 +390,7 @@ sequenceDiagram
     O->>W: Secure start + two execution gates
     W->>B: Reconcile account and open orders
     W->>M: GET completed daily candles
-    W->>W: 30d momentum target cash or long
+    W->>W: 30d momentum > 10% target cash or long
     alt Target changes
         W->>D: Persist deterministic order intent
         W->>B: Submit one MARKET order
@@ -728,7 +739,7 @@ güncel toplam özkaynak `999,9112799645061 USD`, v2 dönem P&L'ı `0 USD`'dir. 
 damgasında challenger `collecting`, eşleşmiş event/skor sayısı `0`dır. Ayrık mikro
 hesap `100 USD`, açık/kapalı işlem `0 / 0`; ana sermaye yetkisi kapalıdır. Bu anlık görüntü kârlılık göstergesi değildir;
 sonraki canlı durum `paper-status` ve `challenger-status` ile okunur. 17 Eylül
-2026'daki son doğrulamada tam test paketi **242/242** geçmiştir.
+2026'daki son doğrulamada tam test paketi **256/256** geçmiştir.
 
 Aynı gün V3 etkinleştirildikten sonraki doğrulamada ilk `adaptive_probe` işlemi
 77.869,99 USD referanstan 15 USD maliyetle açıldı; stop 77.667,95 ve hedef

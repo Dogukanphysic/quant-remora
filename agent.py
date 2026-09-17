@@ -386,6 +386,24 @@ def main():
     low_frequency.add_argument('--bitstamp-data', type=Path, required=True)
     low_frequency.add_argument('--report', type=Path)
     low_frequency.add_argument('--model', type=Path)
+    testnet_policy = sub.add_parser(
+        'train-binance-testnet-policy',
+        help='Daha aktif günlük Testnet challenger politikasını maliyet stresiyle eğit')
+    testnet_policy.add_argument(
+        '--binance-data', type=Path,
+        default=ROOT / 'data/binance-um-btcusdt-15m-5y.csv')
+    testnet_policy.add_argument(
+        '--bitstamp-data', type=Path,
+        default=ROOT / 'data/bitstamp-btc-usd-15m-200000.csv')
+    testnet_policy.add_argument(
+        '--spot-data', type=Path,
+        default=ROOT / 'data/binance-spot-btcusdt-15m-1y.csv')
+    testnet_policy.add_argument(
+        '--report', type=Path,
+        default=ROOT / 'reports/binance-testnet-active-policy.json')
+    testnet_policy.add_argument(
+        '--config', type=Path,
+        default=ROOT / 'config/binance-testnet-active-policy.json')
     sub.add_parser('binance-execution-doctor',
                    help='Binance Spot Testnet public bağlantı ve BTCUSDT filtrelerini doğrula')
     sub.add_parser('binance-testnet-agent-start',
@@ -685,6 +703,68 @@ def main():
             'report': str(report_path.resolve()),
             'model': str(model_path.resolve()),
         }, indent=2, ensure_ascii=False))
+        return
+    if args.command == 'train-binance-testnet-policy':
+        import binance_testnet_worker
+        import testnet_policy_trainer
+        # Share the same stable control mutex as start/stop/reset.  The worker must
+        # remain stopped for the entire train-and-publish transition.
+        with binance_testnet_worker._control_mutex():
+            if binance_testnet_worker._lock_active(
+                binance_testnet_worker.ACCOUNT_LOCK_PATH
+            ):
+                raise ValueError(
+                    'Başka bir Testnet policy worker hesap yürütme kilidini tutuyor; '
+                    'eğitimden önce o worker durdurulmalıdır.')
+            # Hold the same lifetime lease as a worker while checking, training,
+            # and replacing the config.  A direct `worker.py run` therefore cannot
+            # enter between the stopped-state check and config publication.
+            with binance_testnet_worker._process_lock(
+                binance_testnet_worker.ACCOUNT_LOCK_PATH
+            ):
+                status = binance_testnet_worker.status_snapshot()
+                if status['running'] or status['desired_running']:
+                    raise ValueError(
+                        'Testnet policy eğitimi için önce '
+                        'binance-testnet-agent-stop kullanın.')
+                if (
+                    status['position'] != 'cash'
+                    or status['pending_client_id'] is not None
+                    or status['halted']
+                    or not status['pnl_complete']
+                    or not status['policy_match']
+                ):
+                    raise ValueError(
+                        'Yeni Testnet policy ayrı deftere geçirilmeden önce eski '
+                        'defter nakit, bekleyen emirsiz, uzlaşmış ve sağlıklı '
+                        'olmalıdır.')
+                report, artifact = testnet_policy_trainer.train(
+                    args.binance_data, args.bitstamp_data, args.spot_data)
+                if not artifact['testnet_execution_eligible']:
+                    args.report.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = args.report.with_suffix(args.report.suffix + '.tmp')
+                    temporary.write_text(
+                        json.dumps(report, indent=2, sort_keys=True) + '\n',
+                        encoding='utf-8')
+                    temporary.replace(args.report)
+                    raise ValueError(
+                        'Hiçbir ön-kayıtlı aday Testnet exploration kapısını '
+                        'geçmedi; mevcut config değiştirilmedi.')
+                testnet_policy_trainer.write_outputs(
+                    report, artifact,
+                    report_path=args.report, artifact_path=args.config)
+        print(json.dumps({
+            'policy_id': artifact['policy_id'],
+            'model_version': artifact['model_version'],
+            'status': artifact['status'],
+            'rule': artifact['rule'],
+            'order': artifact['order'],
+            'eligible_candidate_count': report['eligible_candidate_count'],
+            'report': str(args.report.resolve()),
+            'config': str(args.config.resolve()),
+            'paper_eligible': artifact['paper_eligible'],
+            'real_money_eligible': artifact['real_money_eligible'],
+        }, indent=2, ensure_ascii=True))
         return
     if args.command == 'binance-execution-doctor':
         import binance_execution

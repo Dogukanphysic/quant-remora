@@ -290,6 +290,22 @@ pozitif kaldı. Binance toplam PF `1,496`, Bitstamp PF `1,428` oldu. Bütün tar
 görüldüğü için sonuç yalnız `forward_shadow_candidate=true`; sermaye ve gerçek emir
 kapalıdır.
 
+Testnet yürütmesi için bunun yanında ayrı ve ön-kayıtlı bir eğitim hattı vardır.
+Hat yalnız `%0`, `%3`, `%5` ve `%10` eşiklerini, iki tarihsel piyasada `%0,20` tek
+yön maliyetle karşılaştırır. Her iki piyasada pozitif toplam sonuç, PF `>=1,20`,
+en az 4/5 pozitif dönem, azami `%35` düşüş ve en az 50 pozisyon değişimi şarttır.
+Bu sözleşmede yalnız `30 günlük momentum > %10` adayı geçti. Tekrarlanabilir komut:
+
+```powershell
+python agent.py train-binance-testnet-policy
+```
+
+Üretilen `config/binance-testnet-active-policy.json` yalnız Spot Testnet yürütmesine
+uygundur; `paper_eligible`, `real_money_eligible` ve gerçek emir bayrakları kapalıdır.
+Son bir yıllık Binance Spot tanı dönemi `-%10,44` olduğu için bu sonuç kârlılık veya
+gerçek para terfisi değildir. Ayrıntı `reports/binance-testnet-active-policy.md`
+dosyasındadır.
+
 Worker düşük frekanslı artifact mevcutsa son tamamlanmış UTC gününü aktivasyon sınırı
 olarak dondurur. Bundan sonraki her yeni günlük kapanışta 30 günlük momentumu
 önceden kaydeder ve long/nakit geçişlerini maliyetli forward shadow execution olarak
@@ -334,12 +350,13 @@ ve gelecekte sanal emir oluşturabilecek background süreci başlatmadan hemen �
 yalnız başlatılan worker sürecinin ortamında kalır.
 
 Testnet worker, Binance public Spot'tan alınan tamamlanmış UTC günlük mumlarda
-30 günlük getiri `%20` üzerindeyse long, aksi halde nakit hedefler. Public istemci
+30 günlük getiri `%10` üzerindeyse long, aksi halde nakit hedefler. Public istemci
 yalnız izinli `/api/v3/klines` GET çağrısına sahiptir; hesap ve emir yüzeyi yoktur.
 Hesap ve emirler ayrı Testnet-only istemcide kalır. Yalnız nakit/long geçişinde sabit 10 USDT
 sanal emir verir; her gün zorla işlem açmaz. 10 USDT, 5 USDT minimum notional
 sınırında komisyon veya fiyat düşüşü nedeniyle satışın dust olarak takılma
-riskini azaltır. Durum ve durdurma komutları:
+riskini azaltır. Politika ve eğitim-verisi sürümü ayrı SQLite defter adına bağlanır;
+eski `%20` defteri silinmez veya yeni kararlarla karıştırılmaz. Durum ve durdurma komutları:
 
 ```powershell
 python agent.py binance-testnet-agent-status
@@ -482,7 +499,7 @@ fazla doğrulanmamış risk açar.
 Bu tablo, 200.000 mumluk model yerleştirilip worker yeniden başlatıldıktan sonraki
 doğrulanmış anlık görüntüdür. Daha sonraki canlı durum için `paper-status` esas alınır.
 Henüz v2 adayı oluşmadığı için sıfır P&L kâr kanıtı değildir. 17 Eylül 2026 tarihli
-son kod doğrulamasında tam test paketi **242/242** geçti.
+son kod doğrulamasında tam test paketi **256/256** geçti.
 
 ## Durumu okuma
 

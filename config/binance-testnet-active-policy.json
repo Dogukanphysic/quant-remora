@@ -1,0 +1,266 @@
+{
+  "binance_spot_recent_diagnostic": {
+    "result": {
+      "aggregate": {
+        "annualized_sharpe": -1.0659632534667511,
+        "bars": 364,
+        "max_drawdown": 0.13582608285504483,
+        "profit_factor": 0.6782038630030622,
+        "return": -0.10439201901208761,
+        "turnover_units": 17
+      },
+      "folds": [
+        {
+          "annualized_sharpe": -2.024512485492592,
+          "bars": 72,
+          "max_drawdown": 0.04542785669030047,
+          "profit_factor": 0.3573818851223799,
+          "return": -0.029669813266054557,
+          "turnover_units": 4
+        },
+        {
+          "annualized_sharpe": -4.097047169813969,
+          "bars": 73,
+          "max_drawdown": 0.04101847637660705,
+          "profit_factor": 0.0,
+          "return": -0.04101847637660705,
+          "turnover_units": 4
+        },
+        {
+          "annualized_sharpe": -2.370712213484846,
+          "bars": 73,
+          "max_drawdown": 0.03919798641565553,
+          "profit_factor": 0.0,
+          "return": -0.03919798641565553,
+          "turnover_units": 2
+        },
+        {
+          "annualized_sharpe": 1.3295008067819118,
+          "bars": 73,
+          "max_drawdown": 0.03783648427829167,
+          "profit_factor": 1.3408320366377742,
+          "return": 0.03497702588685114,
+          "turnover_units": 4
+        },
+        {
+          "annualized_sharpe": -1.2600744846577252,
+          "bars": 73,
+          "max_drawdown": 0.05066926039035402,
+          "profit_factor": 0.6693156632792701,
+          "return": -0.03211544719949688,
+          "turnover_units": 3
+        }
+      ],
+      "gate_checks": {
+        "max_drawdown_at_most_35_percent": true,
+        "net_return_positive": false,
+        "positive_folds_at_least_4_of_5": false,
+        "profit_factor_at_least_1_20": false,
+        "turnover_units_at_least_50": false
+      },
+      "gate_pass": false,
+      "positive_folds": 1
+    },
+    "role": "runtime_market_diagnostic_not_selection_gate",
+    "rule_threshold": "0.10"
+  },
+  "data_versions": {
+    "binance_spot_recent": {
+      "complete_daily_bars": 365,
+      "first_daily_close_ms": 1756684800000,
+      "last_daily_close_ms": 1788134400000,
+      "sha256": "6f8420eaad1f66bd05d98ebc8592e019e74b3cae8bded1d1abc6000cc8c315f6",
+      "source_file": "binance-spot-btcusdt-15m-1y.csv"
+    },
+    "binance_um": {
+      "complete_daily_bars": 1826,
+      "first_daily_close_ms": 1630454400000,
+      "last_daily_close_ms": 1788134400000,
+      "sha256": "3fd5933260a78ded7f74d9079fd6cddb37c757176af4102be9b8a8d37e7a76cd",
+      "source_file": "binance-um-btcusdt-15m-5y.csv"
+    },
+    "bitstamp": {
+      "complete_daily_bars": 2082,
+      "first_daily_close_ms": 1609459200000,
+      "last_daily_close_ms": 1789257600000,
+      "sha256": "6cb4bc16d779cbf27a5f369e67d620faec33b38ae902d97621fa4a4b87a4456f",
+      "source_file": "bitstamp-btc-usd-15m-200000.csv"
+    }
+  },
+  "environment": "binance_spot_testnet",
+  "kind": "testnet_execution_policy_config",
+  "live_trading_enabled": false,
+  "market_data_source": "binance_public_spot",
+  "model_version": "30c58895d601172fdfab1213292f33bf924a70b26fada3e9f0a1da4cf32c0eb4",
+  "order": {
+    "mode": "long_cash",
+    "quote_usdt": "10",
+    "symbol": "BTCUSDT"
+  },
+  "paper_eligible": false,
+  "policy_id": "btc_daily_momentum_30d_t10_testnet_v1",
+  "real_money_eligible": false,
+  "real_orders_enabled": false,
+  "rule": {
+    "family": "momentum",
+    "lookback_days": 30,
+    "threshold": "0.10"
+  },
+  "schema": 1,
+  "selected_metrics": {
+    "binance_um": {
+      "aggregate": {
+        "annualized_sharpe": 0.7525369520089994,
+        "bars": 1825,
+        "max_drawdown": 0.28862632947393074,
+        "profit_factor": 1.249055908211841,
+        "return": 1.1504779512185603,
+        "turnover_units": 91
+      },
+      "folds": [
+        {
+          "annualized_sharpe": 0.761227689111793,
+          "bars": 364,
+          "max_drawdown": 0.13510017652920303,
+          "profit_factor": 1.2535769857356551,
+          "return": 0.15643424223466162,
+          "turnover_units": 14
+        },
+        {
+          "annualized_sharpe": 0.9077594115533575,
+          "bars": 365,
+          "max_drawdown": 0.11692805705438636,
+          "profit_factor": 1.3144613935160496,
+          "return": 0.18997458625437202,
+          "turnover_units": 16
+        },
+        {
+          "annualized_sharpe": 1.0975927252237738,
+          "bars": 366,
+          "max_drawdown": 0.20383344495038425,
+          "profit_factor": 1.315046261086616,
+          "return": 0.3824488864604436,
+          "turnover_units": 22
+        },
+        {
+          "annualized_sharpe": 1.0516571450591956,
+          "bars": 365,
+          "max_drawdown": 0.12291673341923404,
+          "profit_factor": 1.3255977081727606,
+          "return": 0.2618991442140204,
+          "turnover_units": 22
+        },
+        {
+          "annualized_sharpe": -1.063745849684186,
+          "bars": 365,
+          "max_drawdown": 0.1353307704121044,
+          "profit_factor": 0.6783222133787157,
+          "return": -0.10421737160906763,
+          "turnover_units": 17
+        }
+      ],
+      "gate_checks": {
+        "max_drawdown_at_most_35_percent": true,
+        "net_return_positive": true,
+        "positive_folds_at_least_4_of_5": true,
+        "profit_factor_at_least_1_20": true,
+        "turnover_units_at_least_50": true
+      },
+      "gate_pass": true,
+      "positive_folds": 4
+    },
+    "bitstamp": {
+      "aggregate": {
+        "annualized_sharpe": 0.8806426810501675,
+        "bars": 2081,
+        "max_drawdown": 0.27428263937474917,
+        "profit_factor": 1.281855034673828,
+        "return": 2.2032574818826243,
+        "turnover_units": 103
+      },
+      "folds": [
+        {
+          "annualized_sharpe": 1.5901536828987513,
+          "bars": 415,
+          "max_drawdown": 0.21310366791313928,
+          "profit_factor": 1.4650624757094817,
+          "return": 0.8231774201164466,
+          "turnover_units": 16
+        },
+        {
+          "annualized_sharpe": 0.9406006330877045,
+          "bars": 417,
+          "max_drawdown": 0.1340814963007707,
+          "profit_factor": 1.308935015052361,
+          "return": 0.24239604565044215,
+          "turnover_units": 19
+        },
+        {
+          "annualized_sharpe": 1.039604568266338,
+          "bars": 416,
+          "max_drawdown": 0.1583996165717465,
+          "profit_factor": 1.3054706742923499,
+          "return": 0.3931478650813034,
+          "turnover_units": 23
+        },
+        {
+          "annualized_sharpe": 0.7024914385421386,
+          "bars": 417,
+          "max_drawdown": 0.18230042856496043,
+          "profit_factor": 1.216419720227155,
+          "return": 0.17353302886210975,
+          "turnover_units": 25
+        },
+        {
+          "annualized_sharpe": -1.0911430404902194,
+          "bars": 416,
+          "max_drawdown": 0.14281221806933175,
+          "profit_factor": 0.683694256818531,
+          "return": -0.13674670842687708,
+          "turnover_units": 21
+        }
+      ],
+      "gate_checks": {
+        "max_drawdown_at_most_35_percent": true,
+        "net_return_positive": true,
+        "positive_folds_at_least_4_of_5": true,
+        "profit_factor_at_least_1_20": true,
+        "turnover_units_at_least_50": true
+      },
+      "gate_pass": true,
+      "positive_folds": 4
+    }
+  },
+  "selection_contract": {
+    "candidate_thresholds": [
+      "0.00",
+      "0.03",
+      "0.05",
+      "0.10"
+    ],
+    "fold_count": 5,
+    "gates": {
+      "fold_count": 5,
+      "max_drawdown_at_most": 0.35,
+      "net_return_above": 0.0,
+      "positive_folds_at_least": 4,
+      "profit_factor_at_least": 1.2,
+      "required_markets": [
+        "binance_um",
+        "bitstamp"
+      ],
+      "turnover_units_at_least": 50
+    },
+    "lookback_days": 30,
+    "one_way_stressed_cost": "0.002",
+    "required_markets": [
+      "binance_um",
+      "bitstamp"
+    ],
+    "selection_method": "highest_min_market_turnover_then_total_turnover"
+  },
+  "status": "testnet_exploration_candidate",
+  "testnet_execution_eligible": true,
+  "testnet_only": true,
+  "trainer_version": "43faaa6925cb436e3e5c5f873f41c1714b4d124fcf3871d9a49b0b8e55a1e2cd"
+}

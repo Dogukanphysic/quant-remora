@@ -83,8 +83,10 @@ BTCUSDT açık emir koşulunda yapılır. Eski dönem aynı SQLite içindeki epo
 atomik olarak arşivlenir; böylece yeni dönem önceki yürütme kanıtını silmez.
 
 Bu worker bir yürütme pilotudur. Negatif ileri sonuç nedeniyle emekli V3'ten ve
-nakit seçen 15 dakikalık modelden emir almaz. Şimdilik sabit `30d momentum > %20`
-günlük long/nakit kuralını 10 USDT sanal pozisyonla uygular. 30 gün/100 kapanmış
+nakit seçen 15 dakikalık modelden emir almaz. Testnet exploration için ön-kayıtlı
+kapılardan geçen `30d momentum > %10` günlük long/nakit kuralını 10 USDT sanal
+pozisyonla uygular. Son bir yıllık Binance Spot tanısı `-%10,44` olduğu için bu
+aday kârlılık veya gerçek para uygunluğu kanıtı değildir. 30 gün/100 kapanmış
 emir Aşama 3 kapısı henüz tamamlanmamıştır; düşük frekans nedeniyle süreden
 bağımsız bir yürütme-drill hattı gerekirse model kanıtından ayrı tutulmalıdır.
 

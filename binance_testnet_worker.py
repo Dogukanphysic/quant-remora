@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -32,18 +33,96 @@ import binance_execution as execution
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / "state"
-DB_PATH = STATE_DIR / "binance-testnet-worker.sqlite3"
-LOCK_PATH = STATE_DIR / "binance-testnet-worker.lock"
+
+POLICY_CONFIG_PATH = ROOT / "config" / "binance-testnet-active-policy.json"
+
+
+def _load_policy_config(path: Path = POLICY_CONFIG_PATH) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError(f"Binance Testnet policy config cannot be loaded: {path}") from exc
+    if not isinstance(value, dict) or value.get("schema") != 1:
+        raise ValueError("Binance Testnet policy config has an invalid schema.")
+    if value.get("kind") != "testnet_execution_policy_config":
+        raise ValueError("Binance Testnet policy config has an invalid kind.")
+    if value.get("environment") != "binance_spot_testnet":
+        raise ValueError("Binance Testnet policy config targets another environment.")
+    if value.get("market_data_source") != "binance_public_spot":
+        raise ValueError("Binance Testnet policy config has an invalid data source.")
+    if value.get("status") != "testnet_exploration_candidate":
+        raise ValueError("Binance Testnet policy is not an exploration candidate.")
+    if value.get("testnet_only") is not True or value.get(
+        "testnet_execution_eligible"
+    ) is not True:
+        raise ValueError("Binance Testnet policy is not execution-eligible for Testnet.")
+    for flag in (
+        "paper_eligible", "real_money_eligible", "real_orders_enabled",
+        "live_trading_enabled",
+    ):
+        if value.get(flag) is not False:
+            raise ValueError(f"Binance Testnet policy must keep {flag}=false.")
+
+    policy_id = value.get("policy_id")
+    model_version = value.get("model_version")
+    if not isinstance(policy_id, str) or not re.fullmatch(r"[a-z0-9_]{8,80}", policy_id):
+        raise ValueError("Binance Testnet policy id is invalid.")
+    if policy_id != "btc_daily_momentum_30d_t10_testnet_v1":
+        raise ValueError("Binance Testnet policy id is not approved by this worker build.")
+    if not isinstance(model_version, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", model_version
+    ):
+        raise ValueError("Binance Testnet policy model version is invalid.")
+
+    rule = value.get("rule")
+    order = value.get("order")
+    if not isinstance(rule, dict) or rule.get("family") != "momentum":
+        raise ValueError("Binance Testnet policy rule is invalid.")
+    if int(rule.get("lookback_days", 0)) != 30:
+        raise ValueError("Binance Testnet policy must use the registered 30-day lookback.")
+    try:
+        threshold = Decimal(str(rule.get("threshold")))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Binance Testnet policy threshold is invalid.") from exc
+    if not threshold.is_finite() or threshold != Decimal("0.10"):
+        raise ValueError("Binance Testnet policy threshold must match trained t10.")
+    if not isinstance(order, dict) or order.get("symbol") != "BTCUSDT" or order.get(
+        "mode"
+    ) != "long_cash":
+        raise ValueError("Binance Testnet order policy is invalid.")
+    try:
+        quote = Decimal(str(order.get("quote_usdt")))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Binance Testnet quote size is invalid.") from exc
+    if not quote.is_finite() or quote != Decimal("10"):
+        raise ValueError("Binance Testnet quote size must match trained 10 USDT pilot.")
+    return value
+
+
+POLICY_CONFIG = _load_policy_config()
+POLICY_ID = str(POLICY_CONFIG["policy_id"])
+POLICY_MODEL_VERSION = str(POLICY_CONFIG["model_version"])
+POLICY = POLICY_ID
+POLICY_SPEC_HASH = POLICY_MODEL_VERSION
+_LEDGER_STEM = f"binance-testnet-{POLICY_ID}-{POLICY_MODEL_VERSION[:12]}"
+DB_PATH = STATE_DIR / f"{_LEDGER_STEM}.sqlite3"
+LOCK_PATH = STATE_DIR / f"{_LEDGER_STEM}.lock"
+# This lock deliberately stays stable across policy/model versions.  Otherwise an
+# operator could start the old ledger while a retrain swaps the active config and
+# the new ledger starts under a different policy-specific lock.
 CONTROL_LOCK_PATH = STATE_DIR / "binance-testnet-worker-control.lock"
+# A running worker holds this second, account-wide lease for its entire lifetime.
+# Policy-specific locks remain useful for status, while this lease prevents two
+# different policy ledgers from trading the same Testnet account concurrently.
+ACCOUNT_LOCK_PATH = STATE_DIR / "binance-testnet-worker-account.lock"
 
 SYMBOL = "BTCUSDT"
 BASE_ASSET = "BTC"
 QUOTE_ASSET = "USDT"
-POLICY = "btc_daily_momentum_30d_v1"
 INTERVAL = "1d"
-LOOKBACK_DAYS = 30
-MOMENTUM_THRESHOLD = Decimal("0.20")
-ENTRY_QUOTE_USDT = Decimal("10")
+LOOKBACK_DAYS = int(POLICY_CONFIG["rule"]["lookback_days"])
+MOMENTUM_THRESHOLD = Decimal(str(POLICY_CONFIG["rule"]["threshold"]))
+ENTRY_QUOTE_USDT = Decimal(str(POLICY_CONFIG["order"]["quote_usdt"]))
 POLL_SECONDS = 5.0
 API_POLL_SECONDS = 60.0
 DAY_MS = 86_400_000
@@ -86,7 +165,11 @@ def _connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=FULL")
     db.execute("PRAGMA foreign_keys=ON")
-    _ensure_schema(db)
+    try:
+        _ensure_schema(db)
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -95,6 +178,9 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS worker_state (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            active_policy TEXT NOT NULL DEFAULT '',
+            policy_spec_hash TEXT NOT NULL DEFAULT '',
+            policy_started_ms INTEGER,
             desired_running INTEGER NOT NULL DEFAULT 0 CHECK (desired_running IN (0,1)),
             halted INTEGER NOT NULL DEFAULT 0 CHECK (halted IN (0,1)),
             halt_reason TEXT,
@@ -213,6 +299,19 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE worker_state ADD COLUMN last_transient_error_ms INTEGER"
         )
+    if "active_policy" not in state_columns:
+        db.execute(
+            "ALTER TABLE worker_state ADD COLUMN active_policy TEXT NOT NULL DEFAULT ''"
+        )
+    if "policy_spec_hash" not in state_columns:
+        db.execute(
+            "ALTER TABLE worker_state ADD COLUMN "
+            "policy_spec_hash TEXT NOT NULL DEFAULT ''"
+        )
+    if "policy_started_ms" not in state_columns:
+        db.execute(
+            "ALTER TABLE worker_state ADD COLUMN policy_started_ms INTEGER"
+        )
     intent_columns = {
         str(row[1]) for row in db.execute("PRAGMA table_info(worker_order_intents)")
     }
@@ -227,9 +326,49 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     now = _now_ms()
     db.execute(
         """INSERT OR IGNORE INTO worker_state
-           (singleton, created_ms, updated_ms) VALUES (1, ?, ?)""",
-        (now, now),
+           (singleton, active_policy, policy_spec_hash, policy_started_ms,
+            created_ms, updated_ms) VALUES (1, ?, ?, ?, ?, ?)""",
+        (POLICY, POLICY_SPEC_HASH, now, now, now),
     )
+    _bind_or_validate_policy(db, now)
+
+
+def _bind_or_validate_policy(db: sqlite3.Connection, now_ms: int) -> None:
+    """Bind a pristine ledger once and reject silent policy mixing thereafter."""
+
+    state = db.execute(
+        "SELECT * FROM worker_state WHERE singleton=1"
+    ).fetchone()
+    if state is None:  # pragma: no cover - schema insertion immediately precedes this
+        raise WorkerHalt("Worker state is missing during policy binding.")
+    active_policy = str(state["active_policy"] or "")
+    spec_hash = str(state["policy_spec_hash"] or "")
+    if active_policy == "" and spec_hash == "":
+        decisions = int(db.execute("SELECT COUNT(*) FROM worker_decisions").fetchone()[0])
+        intents = int(db.execute("SELECT COUNT(*) FROM worker_order_intents").fetchone()[0])
+        dirty = bool(
+            decisions or intents or state["desired_running"] or state["halted"]
+            or state["last_candle_close_ms"] is not None
+            or state["pending_client_id"] is not None
+            or _decimal(state["position_qty"], "tracked position") != 0
+            or _decimal(state["realized_pnl_usdt"], "realized P&L") != 0
+        )
+        if dirty:
+            raise WorkerHalt(
+                "An existing Binance Testnet ledger has no policy binding; "
+                "explicit archival or migration is required."
+            )
+        db.execute(
+            """UPDATE worker_state SET active_policy=?, policy_spec_hash=?,
+               policy_started_ms=?, updated_ms=? WHERE singleton=1""",
+            (POLICY, POLICY_SPEC_HASH, now_ms, now_ms),
+        )
+        return
+    if active_policy != POLICY or spec_hash != POLICY_SPEC_HASH:
+        raise WorkerHalt(
+            "Binance Testnet ledger policy does not match the configured policy; "
+            "refusing to mix policy epochs."
+        )
 
 
 @contextmanager
@@ -272,7 +411,9 @@ def _reset_gate() -> None:
 
 
 def _client_order_id(decision_ms: int, side: str) -> str:
-    material = f"{POLICY}|{decision_ms}|{side.upper()}".encode("ascii")
+    material = (
+        f"{POLICY}|{POLICY_SPEC_HASH}|{decision_ms}|{side.upper()}"
+    ).encode("ascii")
     digest = hashlib.sha256(material).hexdigest()[:12]
     # Binance permits at most 36 characters for newClientOrderId.
     return f"qr-{side[0].lower()}-{decision_ms}-{digest}"[:36]
@@ -1178,7 +1319,16 @@ def _process_lock(path: Path | str = LOCK_PATH) -> Iterator[None]:
 
 def _control_lock_path(worker_lock_path: Path | str) -> Path:
     path = Path(worker_lock_path)
+    if path.resolve().parent == STATE_DIR.resolve():
+        return CONTROL_LOCK_PATH
     return path.with_name(f"{path.stem}-control{path.suffix or '.lock'}")
+
+
+def _account_lock_path(worker_lock_path: Path | str) -> Path:
+    path = Path(worker_lock_path)
+    if path.resolve().parent == STATE_DIR.resolve():
+        return ACCOUNT_LOCK_PATH
+    return path.with_name(f"{path.stem}-account{path.suffix or '.lock'}")
 
 
 @contextmanager
@@ -1299,7 +1449,15 @@ def status_snapshot(
         )
     qty = _decimal(state["position_qty"], "tracked position")
     return {
-        "policy": POLICY,
+        "policy": state["active_policy"],
+        "policy_model_version": state["policy_spec_hash"],
+        "configured_policy": POLICY,
+        "policy_match": (
+            state["active_policy"] == POLICY
+            and state["policy_spec_hash"] == POLICY_SPEC_HASH
+        ),
+        "momentum_threshold": format(MOMENTUM_THRESHOLD, "f"),
+        "entry_quote_usdt": format(ENTRY_QUOTE_USDT, "f"),
         "symbol": SYMBOL,
         "market_data_source": "binance_public_spot",
         "execution_environment": "binance_spot_testnet",
@@ -1365,7 +1523,7 @@ def run_forever(
     control_poll = max(0.1, min(float(poll_seconds), 5.0))
     api_poll = max(API_POLL_SECONDS, float(api_poll_seconds))
     next_api_poll = 0.0
-    with _process_lock(lock_path):
+    with _process_lock(_account_lock_path(lock_path)), _process_lock(lock_path):
         try:
             while True:
                 with closing(_connect(db_path)) as db:
@@ -1459,11 +1617,24 @@ def _control_locked(
     if command != "start":
         raise ValueError("Worker control action must be start, stop, status, or reset.")
 
+    # The process may have imported this module before a trainer waiting on the
+    # same stable control mutex published a new config.  Never start with stale
+    # in-memory policy constants after that handoff.
+    if _load_policy_config(POLICY_CONFIG_PATH) != POLICY_CONFIG:
+        raise WorkerHalt(
+            "Active Binance Testnet policy changed after this process loaded it; "
+            "run the start command again so it loads the new policy."
+        )
     _execution_gate()
     if _lock_active(lock_path):
         raise WorkerHalt(
             "Binance Testnet worker is already running; a new caller environment "
             "cannot replace the detached worker's inherited credentials."
+        )
+    if _lock_active(_account_lock_path(lock_path)):
+        raise WorkerHalt(
+            "Another Binance Testnet policy worker already owns the account-wide "
+            "execution lease. Stop that worker before starting this policy."
         )
     with closing(_connect(db_path)) as db:
         state = _state(db)
@@ -1574,9 +1745,14 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "ACCOUNT_LOCK_PATH",
+    "CONTROL_LOCK_PATH",
     "DB_PATH",
     "LOCK_PATH",
     "POLICY",
+    "POLICY_CONFIG_PATH",
+    "POLICY_ID",
+    "POLICY_MODEL_VERSION",
     "SYMBOL",
     "WorkerHalt",
     "control",
