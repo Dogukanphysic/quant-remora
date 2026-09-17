@@ -29,6 +29,16 @@ DEFAULT_V2_MODEL = ROOT / 'state/bollinger-v2-model.json'
 DEFAULT_V2_REPORT = ROOT / 'reports/bollinger-v2-training.json'
 
 
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('Pozitif bir tam sayı gerekli.') from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('Pozitif bir tam sayı gerekli.')
+    return parsed
+
+
 def inspect_tls_reply(host):
     """Diagnose plaintext network interception; never fetch prices over HTTP."""
     incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
@@ -414,10 +424,29 @@ def main():
                    help='Binance Spot Testnet workerını güvenli biçimde durdur')
     sub.add_parser('binance-testnet-agent-reset',
                    help='Aylık Testnet sıfırlamasından sonra durmuş worker defterini arşivle')
+    sub.add_parser('binance-testnet-agent-recover',
+                   help='Başarısız bakım stopundan sonra worker çalışma niyetini güvenle geri yükle')
     sub.add_parser('binance-testnet-learning-status',
                    help='Testnet günlük öğrenme ve dondurulmuş challenger kanıtını göster')
+    seed_learning = sub.add_parser(
+        'binance-testnet-seed-learning',
+        help='Spot geçmişinden yalnız geliştirme amaçlı Testnet öğrenme seed’i ekle')
+    seed_learning.add_argument('--data', type=Path, required=True)
+    seed_learning.add_argument('--manifest', type=Path)
+    seed_learning.add_argument('--interval', choices=('15m', '1d'))
+    seed_learning.add_argument('--samples', type=_positive_int)
+    seed_learning.add_argument('--validate-only', action='store_true')
+    upgrade_learning = sub.add_parser(
+        'binance-testnet-upgrade-learning',
+        help='Worker durumunu koruyarak tarihsel geliştirme seed’ini atomik bakımda kur')
+    upgrade_learning.add_argument('--data', type=Path, required=True)
+    upgrade_learning.add_argument('--manifest', type=Path)
+    upgrade_learning.add_argument('--interval', choices=('15m', '1d'))
+    upgrade_learning.add_argument('--samples', type=_positive_int)
     sub.add_parser('binance-testnet-account',
                    help='Ortam değişkenlerindeki Testnet anahtarıyla bakiye ve açık emirleri uzlaştır')
+    sub.add_parser('binance-testnet-bound-account-check',
+                   help='Testnet anahtarının mevcut yürütme defterine bağlı anahtar olduğunu doğrula')
     order_check = sub.add_parser('binance-testnet-order-check',
                                  help='Emir oluşturmadan Binance /order/test doğrulaması yap')
     order_check.add_argument('--quote-usdt', type=float, default=5.0)
@@ -780,6 +809,81 @@ def main():
             ensure_ascii=True,
         ))
         return
+    if args.command in {
+        'binance-testnet-seed-learning',
+        'binance-testnet-upgrade-learning',
+    }:
+        import binance_testnet_learning_seed
+        import binance_testnet_worker
+        import testnet_learning_store
+
+        source_manifest = args.manifest
+        if source_manifest is None:
+            companion = args.data.with_suffix(args.data.suffix + '.manifest.json')
+            source_manifest = companion if companion.is_file() else None
+        if (
+            args.command == 'binance-testnet-seed-learning'
+            and args.validate_only
+        ):
+            manifest = binance_testnet_learning_seed.build_seed_manifest(
+                args.data,
+                source_manifest_path=source_manifest,
+                interval=args.interval,
+                sample_limit=args.samples,
+            )
+            print(json.dumps({
+                'valid': True,
+                'mutation_performed': False,
+                'sample_count': manifest['sample_count'],
+                'first_decision_ts': manifest['first_decision_ts'],
+                'last_label_available_ts': manifest['last_label_available_ts'],
+                'last_close': manifest['last_close'],
+                'raw_dataset_sha256': manifest['raw_dataset_sha256'],
+                'manifest_sha256': manifest['immutable_sha256'],
+                'evidence_role': manifest['evidence_role'],
+            }, indent=2, ensure_ascii=True))
+            return
+        if args.command == 'binance-testnet-seed-learning':
+            worker_status = binance_testnet_worker.status_snapshot()
+            if worker_status.get('running') or worker_status.get('desired_running'):
+                raise ValueError(
+                    'Tarihsel öğrenme seed’i yalnız background worker tamamen '
+                    'durmuşken kurulabilir. Önce binance-testnet-agent-stop kullanın; '
+                    'seed’den sonra worker’ı yeni kodla yeniden başlatın.')
+        manifest = binance_testnet_learning_seed.build_seed_manifest(
+            args.data,
+            source_manifest_path=source_manifest,
+            interval=args.interval,
+            sample_limit=args.samples,
+        )
+        if args.command == 'binance-testnet-seed-learning':
+            maintenance = binance_testnet_worker.learning_maintenance_lease()
+        else:
+            maintenance = binance_testnet_worker.learning_upgrade_lease()
+        with maintenance as maintenance_status:
+            seed_result = testnet_learning_store.seed_historical_development(
+                source_db_path=binance_testnet_worker.DB_PATH,
+                seed_manifest=manifest,
+                learning_db_path=binance_testnet_worker.LEARNING_DB_PATH,
+            )
+            learning = binance_testnet_worker.learning_snapshot(refresh=True)
+        refresh_health = learning.get('refresh_health')
+        if (
+            learning.get('provenance_valid') is not True
+            or not isinstance(refresh_health, dict)
+            or refresh_health.get('healthy') is not True
+            or refresh_health.get('last_attempt_failed') is True
+        ):
+            detail = learning.get('last_error') or learning.get('status')
+            raise ValueError(
+                f'Tarihsel seed yazıldı ancak öğrenme yenilemesi doğrulanamadı: '
+                f'{detail}')
+        result = {'seed': seed_result, 'learning': learning}
+        if args.command == 'binance-testnet-upgrade-learning':
+            result['maintenance'] = maintenance_status
+            result['worker'] = binance_testnet_worker.status_snapshot()
+        print(json.dumps(result, indent=2, ensure_ascii=True))
+        return
     if args.command.startswith('binance-testnet-agent-'):
         import binance_testnet_worker
         try:
@@ -793,6 +897,14 @@ def main():
         client = binance_execution.Client()
         print(json.dumps({"account": client.account(), "open_orders": client.open_orders(),
                           "real_money_supported": False}, indent=2, ensure_ascii=True))
+        return
+    if args.command == 'binance-testnet-bound-account-check':
+        import binance_testnet_worker
+        print(json.dumps(
+            binance_testnet_worker.validate_bound_account(),
+            indent=2,
+            ensure_ascii=True,
+        ))
         return
     if args.command == 'binance-testnet-order-check':
         import binance_execution

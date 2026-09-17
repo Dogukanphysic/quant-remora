@@ -28,6 +28,11 @@ import time
 from typing import Callable, Iterator, Mapping, Sequence
 import uuid
 
+if os.name == "nt":
+    import msvcrt
+else:  # pragma: no cover - exercised on non-Windows CI/hosts
+    import fcntl
+
 import binance_execution as execution
 import testnet_learning_store as learning_store
 
@@ -1099,6 +1104,34 @@ def _assert_account_fingerprint(
             "Binance Testnet API key does not match this execution ledger."
         )
     return candidate, True
+
+
+def validate_bound_account(
+    *,
+    db_path: Path | str = DB_PATH,
+    client: object | None = None,
+) -> dict[str, object]:
+    """Prove that the caller's key matches the ledger before any stop window.
+
+    This check is deliberately read-only and refuses legacy unbound ledgers.
+    The separate signed account command proves that the same credential is
+    currently accepted by Binance Spot Testnet.
+    """
+
+    api = client if client is not None else execution.Client()
+    with closing(_connect_read_only(db_path)) as db:
+        _candidate, bound = _assert_account_fingerprint(
+            db, api, allow_unbound=False
+        )
+        state = _state(db)
+        return {
+            "validated": True,
+            "account_bound": bool(bound),
+            "api_key_matches_ledger": True,
+            "policy": str(state["active_policy"]),
+            "symbol": SYMBOL,
+            "execution_environment": "binance_spot_testnet",
+        }
 
 
 def _latest_filled_buy_origin(db: sqlite3.Connection) -> sqlite3.Row | None:
@@ -2281,39 +2314,151 @@ def _read_lock(path: Path | str = LOCK_PATH) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def _open_advisory_lock_file(path: Path) -> int:
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(path, flags, 0o600)
+    if os.fstat(fd).st_size == 0:
+        os.write(fd, b"\0")
+        os.fsync(fd)
+    return fd
+
+
+def _try_advisory_lock(fd: int) -> bool:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.name == "nt":
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:  # pragma: no cover - exercised on non-Windows CI/hosts
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _release_advisory_lock(fd: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    if os.name == "nt":
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:  # pragma: no cover - exercised on non-Windows CI/hosts
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _read_lock_metadata_fd(fd: int) -> dict[str, object] | None:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 8192).decode("utf-8")
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _metadata_has_live_owner(info: Mapping[str, object] | None) -> bool:
+    if not info:
+        return False
+    try:
+        pid = int(info.get("pid", 0))
+        protocol = int(info.get("lock_protocol", 1))
+    except (TypeError, ValueError):
+        return False
+    if protocol >= 2 and info.get("released") is True:
+        return False
+    return _pid_alive(pid)
+
+
+def _write_lock_metadata(fd: int, token: str, *, released: bool = False) -> None:
+    now = _now_ms()
+    payload = _json(
+        {
+            "lock_protocol": 2,
+            "pid": 0 if released else os.getpid(),
+            "token": token,
+            "started_ms": now,
+            "released": released,
+            "released_ms": now if released else None,
+        }
+    )
+    encoded = payload.encode("utf-8")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, encoded)
+    os.fsync(fd)
+
+
 def _lock_active(path: Path | str = LOCK_PATH) -> bool:
-    info = _read_lock(path)
-    return bool(info and _pid_alive(int(info.get("pid", 0))))
+    lock_path = Path(path)
+    if not lock_path.exists():
+        return False
+    try:
+        fd = _open_advisory_lock_file(lock_path)
+    except OSError:
+        return True
+    acquired = False
+    try:
+        acquired = _try_advisory_lock(fd)
+        if not acquired:
+            return True
+        # A worker from the previous lock protocol owns only live-PID metadata,
+        # not an advisory byte lock. Honour it during this rolling upgrade.
+        return _metadata_has_live_owner(_read_lock_metadata_fd(fd))
+    finally:
+        if acquired:
+            try:
+                _release_advisory_lock(fd)
+            finally:
+                os.close(fd)
+        else:
+            os.close(fd)
 
 
 @contextmanager
 def _process_lock(path: Path | str = LOCK_PATH) -> Iterator[None]:
     lock_path = Path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if lock_path.exists() and not _lock_active(lock_path):
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
     token = uuid.uuid4().hex
-    payload = _json({"pid": os.getpid(), "token": token, "started_ms": _now_ms()})
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
+        fd = _open_advisory_lock_file(lock_path)
+    except OSError as exc:
         raise WorkerHalt("Binance Testnet worker is already running.") from exc
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        acquired = _try_advisory_lock(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not acquired:
+        os.close(fd)
+        raise WorkerHalt("Binance Testnet worker is already running.")
+    try:
+        legacy_owner = _metadata_has_live_owner(_read_lock_metadata_fd(fd))
+    except BaseException:
+        try:
+            _release_advisory_lock(fd)
+        finally:
+            os.close(fd)
+        raise
+    if legacy_owner:
+        try:
+            _release_advisory_lock(fd)
+        finally:
+            os.close(fd)
+        raise WorkerHalt("Binance Testnet worker is already running.")
+    try:
+        _write_lock_metadata(fd, token)
         yield
     finally:
-        info = _read_lock(lock_path)
-        if info and info.get("token") == token:
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
+        metadata_error: BaseException | None = None
+        try:
+            _write_lock_metadata(fd, token, released=True)
+        except BaseException as exc:
+            metadata_error = exc
+        try:
+            _release_advisory_lock(fd)
+        finally:
+            os.close(fd)
+        if metadata_error is not None:
+            raise metadata_error
 
 
 def _control_lock_path(worker_lock_path: Path | str) -> Path:
@@ -2337,33 +2482,231 @@ def _control_mutex(worker_lock_path: Path | str = LOCK_PATH) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + STARTUP_WAIT_SECONDS
     token = uuid.uuid4().hex
-    payload = _json({"pid": os.getpid(), "token": token, "started_ms": _now_ms()})
+    fd: int | None = None
+    acquired = False
     while True:
-        if path.exists() and not _lock_active(path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = _open_advisory_lock_file(path)
+        except OSError as exc:
+            raise WorkerHalt(
+                "Another Binance Testnet control action is in progress."
+            ) from exc
+        try:
+            acquired = _try_advisory_lock(fd)
+            legacy_owner = bool(
+                acquired
+                and _metadata_has_live_owner(_read_lock_metadata_fd(fd))
+            )
+        except BaseException:
+            if acquired:
+                try:
+                    _release_advisory_lock(fd)
+                finally:
+                    os.close(fd)
+            else:
+                os.close(fd)
+            raise
+        if acquired and not legacy_owner:
             break
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise WorkerHalt("Another Binance Testnet control action is in progress.")
-            time.sleep(0.05)
+        if acquired:
+            try:
+                _release_advisory_lock(fd)
+            finally:
+                os.close(fd)
+            acquired = False
+        else:
+            os.close(fd)
+        fd = None
+        if time.monotonic() >= deadline:
+            raise WorkerHalt("Another Binance Testnet control action is in progress.")
+        time.sleep(0.05)
+    if fd is None:  # pragma: no cover - loop exits only with an open descriptor
+        raise WorkerHalt("Unable to acquire Binance Testnet control lock.")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+        _write_lock_metadata(fd, token)
         yield
     finally:
-        info = _read_lock(path)
-        if info and info.get("token") == token:
+        metadata_error: BaseException | None = None
+        if acquired:
             try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+                _write_lock_metadata(fd, token, released=True)
+            except BaseException as exc:
+                metadata_error = exc
+            try:
+                _release_advisory_lock(fd)
+            finally:
+                os.close(fd)
+        else:
+            os.close(fd)
+        if metadata_error is not None:
+            raise metadata_error
+
+
+@contextmanager
+def learning_maintenance_lease(
+    *,
+    db_path: Path | str = DB_PATH,
+    lock_path: Path | str = LOCK_PATH,
+) -> Iterator[dict[str, object]]:
+    """Exclude worker start/run while a stopped-ledger migration is applied."""
+
+    with _control_mutex(lock_path):
+        initial = status_snapshot(db_path, lock_path)
+        if (
+            initial.get("status_available") is not True
+            or initial.get("execution_state_known") is not True
+        ):
+            raise WorkerHalt(
+                "Binance Testnet worker state is unavailable for learning maintenance."
+            )
+        if initial.get("running") or initial.get("desired_running"):
+            raise WorkerHalt(
+                "Historical learning maintenance requires a fully stopped worker."
+            )
+        if initial.get("pending_client_id"):
+            raise WorkerHalt(
+                "Historical learning maintenance refuses a pending order intent."
+            )
+        # A directly launched run process bypasses the control command but must
+        # still own this account-wide lock. Holding it closes that race too.
+        with _process_lock(_account_lock_path(lock_path)):
+            stable = status_snapshot(db_path, lock_path)
+            if (
+                stable.get("status_available") is not True
+                or stable.get("execution_state_known") is not True
+                or stable.get("running")
+                or stable.get("desired_running")
+                or stable.get("pending_client_id")
+            ):
+                raise WorkerHalt(
+                    "Binance Testnet worker state changed during learning maintenance."
+                )
+            yield stable
+
+
+@contextmanager
+def learning_upgrade_lease(
+    *,
+    db_path: Path | str = DB_PATH,
+    lock_path: Path | str = LOCK_PATH,
+    client: object | None = None,
+) -> Iterator[dict[str, object]]:
+    """Stop, exclusively maintain, and restore the worker as one control action.
+
+    The control mutex stays owned across the complete transition.  Therefore a
+    later operator stop can neither be overwritten by a stale restart decision
+    nor race the failure-recovery path.  A directly launched run process is
+    excluded by the account-wide execution lease during the maintenance body.
+    """
+
+    api = client if client is not None else execution.Client()
+    with _control_mutex(lock_path):
+        initial = status_snapshot(db_path, lock_path)
+        if (
+            initial.get("status_available") is not True
+            or initial.get("execution_state_known") is not True
+        ):
+            raise WorkerHalt(
+                "Binance Testnet worker state is unavailable for learning upgrade."
+            )
+        if bool(initial.get("running")) != bool(initial.get("desired_running")):
+            raise WorkerHalt(
+                "Binance Testnet worker is already in a start/stop transition."
+            )
+        if initial.get("pending_client_id"):
+            raise WorkerHalt(
+                "Historical learning upgrade refuses a pending order intent."
+            )
+        # Prove every prerequisite needed by the recovery path before changing
+        # durable run intent.  A matching public API key alone does not prove
+        # that its secret is valid for signed Testnet requests.
+        _execution_gate()
+        try:
+            signed_account = api.account()
+        except Exception as exc:
+            raise WorkerHalt(
+                f"Binance Testnet signed account proof failed: {exc}"
+            ) from exc
+        if not isinstance(signed_account, Mapping):
+            raise WorkerHalt(
+                "Binance Testnet signed account proof returned an invalid response."
+            )
+        with closing(_connect_read_only(db_path)) as db:
+            _assert_account_fingerprint(db, api, allow_unbound=False)
+
+        restart_required = bool(initial.get("desired_running"))
+        intent_changed = False
+        operation_error: BaseException | None = None
+        try:
+            if restart_required:
+                intent_changed = True
+                _set_desired(db_path, False)
+                deadline = time.monotonic() + STOP_WAIT_SECONDS
+                while _lock_active(lock_path) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if _lock_active(lock_path):
+                    raise WorkerHalt(
+                        "Learning upgrade requested a stop, but the worker did "
+                        "not release its lock before the deadline."
+                    )
+
+            account_lock_path = _account_lock_path(lock_path)
+            account_deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+            while (
+                _lock_active(account_lock_path)
+                and time.monotonic() < account_deadline
+            ):
+                time.sleep(0.05)
+            if _lock_active(account_lock_path):
+                raise WorkerHalt(
+                    "Stopped worker did not release its account-wide execution lease."
+                )
+
+            with _process_lock(account_lock_path):
+                try:
+                    stable = status_snapshot(db_path, lock_path)
+                    if (
+                        stable.get("status_available") is not True
+                        or stable.get("execution_state_known") is not True
+                        or stable.get("running")
+                        or stable.get("desired_running")
+                        or stable.get("pending_client_id")
+                    ):
+                        raise WorkerHalt(
+                            "Binance Testnet worker state changed during learning upgrade."
+                        )
+                    yield {
+                        "initial": initial,
+                        "stopped": stable,
+                        "restart_required": restart_required,
+                    }
+                finally:
+                    if restart_required and intent_changed:
+                        # Arm durable intent before releasing the account lease.
+                        # A directly launched run process that wins the handoff
+                        # will then remain alive and safely becomes the worker.
+                        _set_desired(db_path, True)
+        except BaseException as exc:
+            operation_error = exc
+        finally:
+            if restart_required and intent_changed:
+                try:
+                    _control_locked(
+                        "recover",
+                        db_path=db_path,
+                        lock_path=lock_path,
+                        client=api,
+                    )
+                except BaseException as recovery_error:
+                    if operation_error is None:
+                        raise
+                    raise WorkerHalt(
+                        "Learning upgrade failed and the original running state "
+                        f"could not be restored. Upgrade error: {operation_error}; "
+                        f"recovery error: {recovery_error}"
+                    ) from recovery_error
+        if operation_error is not None:
+            raise operation_error
 
 
 def _set_desired(db_path: Path | str, desired: bool) -> None:
@@ -2922,6 +3265,9 @@ def run_forever(
     control_poll = max(0.1, min(float(poll_seconds), 5.0))
     api_poll = max(API_POLL_SECONDS, float(api_poll_seconds))
     next_api_poll = 0.0
+    # The account-wide lease is always acquired first. Therefore an active
+    # policy worker lock implies that the same correctly launched process has
+    # already passed the account exclusion gate.
     with _process_lock(_account_lock_path(lock_path)), _process_lock(lock_path):
         with closing(_connect(db_path)) as db:
             _ensure_account_binding(db, api)
@@ -3037,8 +3383,119 @@ def _control_locked(
                 )
             archive = _archive_epoch_and_reset(db_path, api)
         return {**status_snapshot(db_path, lock_path), **archive}
+    if command == "recover":
+        _execution_gate()
+        api = client if client is not None else execution.Client()
+        with closing(_connect(db_path)) as db:
+            _assert_account_fingerprint(db, api, allow_unbound=False)
+            state = _state(db)
+            if state["halted"] and not state["pending_client_id"]:
+                raise WorkerHalt(
+                    "A halted worker without a pending intent cannot be auto-recovered."
+                )
+        # Publish durable run intent before inspecting the two process locks.
+        # This makes the account-lock → worker-lock handoff safe even when a
+        # directly launched run process races this recovery command.
+        _set_desired(db_path, True)
+        account_lock_path = _account_lock_path(lock_path)
+        deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+        stable_running = False
+        while time.monotonic() < deadline:
+            worker_active = _lock_active(lock_path)
+            account_active = _lock_active(account_lock_path)
+            if worker_active and account_active:
+                if stable_running:
+                    snapshot = status_snapshot(db_path, lock_path)
+                    if snapshot.get("running") and snapshot.get("desired_running"):
+                        return snapshot
+                stable_running = True
+                time.sleep(0.05)
+                continue
+            stable_running = False
+            if worker_active or account_active:
+                # A correct run process acquires the account lease first and
+                # releases it last. Account-only is therefore a valid startup
+                # or shutdown handoff. A worker-only observation can be a
+                # non-atomic sample, but it must not remain that way.
+                time.sleep(0.05)
+                continue
+            break
+        worker_active = _lock_active(lock_path)
+        account_active = _lock_active(account_lock_path)
+        if worker_active or account_active:
+            _set_desired(db_path, False)
+            if worker_active and not account_active:
+                raise WorkerHalt(
+                    "Running worker is missing its account-wide execution lease."
+                )
+            raise WorkerHalt(
+                "Binance Testnet execution lease did not complete its startup "
+                "or shutdown handoff in time."
+            )
+        try:
+            return _control_locked(
+                "start", db_path=db_path, lock_path=lock_path, client=api
+            )
+        except WorkerHalt as initial_start_error:
+            # A direct run may acquire the account lease immediately after the
+            # check above and then acquire the worker lock. Since desired=true
+            # was published first, join that safe handoff instead of treating
+            # the competing process as a failed recovery.
+            # A nested start can clear the intent after its own child exits;
+            # recovery owns the control mutex and must re-arm it while joining
+            # a correct account-first raw-run handoff.
+            _set_desired(db_path, True)
+            account_lock_path = _account_lock_path(lock_path)
+            if (
+                not _lock_active(account_lock_path)
+                and not _lock_active(lock_path)
+            ):
+                _set_desired(db_path, False)
+                raise
+            join_deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+            stable_running = False
+            last_start_error = initial_start_error
+            while time.monotonic() < join_deadline:
+                worker_active = _lock_active(lock_path)
+                account_active = _lock_active(account_lock_path)
+                if worker_active and account_active:
+                    snapshot = status_snapshot(db_path, lock_path)
+                    if (
+                        snapshot.get("running")
+                        and snapshot.get("desired_running")
+                    ):
+                        if stable_running:
+                            return snapshot
+                        stable_running = True
+                        time.sleep(0.05)
+                        continue
+                else:
+                    stable_running = False
+                if worker_active or account_active:
+                    time.sleep(0.05)
+                    continue
+                try:
+                    return _control_locked(
+                        "start",
+                        db_path=db_path,
+                        lock_path=lock_path,
+                        client=api,
+                    )
+                except WorkerHalt as retry_error:
+                    last_start_error = retry_error
+                    if (
+                        not _lock_active(account_lock_path)
+                        and not _lock_active(lock_path)
+                    ):
+                        _set_desired(db_path, False)
+                        raise
+                time.sleep(0.05)
+            _set_desired(db_path, False)
+            raise last_start_error
     if command != "start":
-        raise ValueError("Worker control action must be start, stop, status, or reset.")
+        raise ValueError(
+            "Worker control action must be start, stop, status, reset, or recover."
+        )
 
     # The process may have imported this module before a trainer waiting on the
     # same stable control mutex published a new config.  Never start with stale
@@ -3103,28 +3560,43 @@ def _control_locked(
         raise WorkerHalt(f"Unable to start Binance Testnet worker: {exc}") from exc
 
     deadline = time.monotonic() + STARTUP_WAIT_SECONDS
-    lock_observed = False
+    account_lock_path = _account_lock_path(lock_path)
+    stable_running = False
+    child_exit_without_locks_observed = False
     while time.monotonic() < deadline:
-        if _lock_active(lock_path):
-            if child.poll() is not None:
-                _set_desired(db_path, False)
+        worker_active = _lock_active(lock_path)
+        account_active = _lock_active(account_lock_path)
+        if worker_active and account_active:
+            child_exit_without_locks_observed = False
+            if stable_running:
                 snapshot = status_snapshot(db_path, lock_path)
-                detail = snapshot.get("halt_reason") or "child exited during startup"
-                raise WorkerHalt(
-                    f"Binance Testnet worker did not remain running: {detail}"
-                )
-            if lock_observed:
-                return status_snapshot(db_path, lock_path)
-            lock_observed = True
+                if snapshot.get("running") and snapshot.get("desired_running"):
+                    return snapshot
+            stable_running = True
             time.sleep(0.05)
             continue
-        lock_observed = False
+        stable_running = False
+        if worker_active or account_active:
+            # Account-only is the expected account -> worker acquisition
+            # handoff. Worker-only can only be a transient non-atomic sample
+            # for this protocol, so wait for the pair to settle.
+            child_exit_without_locks_observed = False
+            time.sleep(0.05)
+            continue
         return_code = child.poll()
         if return_code is not None:
+            if not child_exit_without_locks_observed:
+                # Give a raw runner that won the race one additional sample to
+                # publish its account-first lock handoff before clearing the
+                # shared desired-running intent.
+                child_exit_without_locks_observed = True
+                time.sleep(0.05)
+                continue
             _set_desired(db_path, False)
             snapshot = status_snapshot(db_path, lock_path)
             detail = snapshot.get("halt_reason") or f"child exit code {return_code}"
             raise WorkerHalt(f"Binance Testnet worker did not remain running: {detail}")
+        child_exit_without_locks_observed = False
         time.sleep(0.05)
 
     _set_desired(db_path, False)
@@ -3145,8 +3617,10 @@ def control(
     command = action.lower().strip()
     if command == "status":
         return status_snapshot(db_path, lock_path)
-    if command not in {"start", "stop", "reset"}:
-        raise ValueError("Worker control action must be start, stop, status, or reset.")
+    if command not in {"start", "stop", "reset", "recover"}:
+        raise ValueError(
+            "Worker control action must be start, stop, status, reset, or recover."
+        )
     with _control_mutex(lock_path):
         return _control_locked(
             command, db_path=db_path, lock_path=lock_path, client=client
@@ -3155,7 +3629,9 @@ def control(
 
 def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "stop", "status", "run", "reset"))
+    parser.add_argument(
+        "action", choices=("start", "stop", "status", "run", "reset", "recover")
+    )
     parser.add_argument("--db", default=str(DB_PATH))
     parser.add_argument("--lock", default=str(LOCK_PATH))
     args = parser.parse_args(argv)
@@ -3189,8 +3665,11 @@ __all__ = [
     "SYMBOL",
     "WorkerHalt",
     "control",
+    "learning_maintenance_lease",
+    "learning_upgrade_lease",
     "learning_snapshot",
     "run_forever",
     "run_once",
     "status_snapshot",
+    "validate_bound_account",
 ]

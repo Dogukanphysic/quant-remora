@@ -386,21 +386,67 @@ Etiketler ile kapanmış turlar, kaynak yürütme defterine bire bir bağlı
 Kaynak defter tam olarak bir policy/model kaydına, aggregate depo da kaynak kimliğiyle
 birlikte aynı policy/model çiftine mühürlenir. Farklı policy/model kanıtı görülürse
 yenileme kapalı kalır ve kayıtlar aynı öğrenme havuzunda karıştırılmaz.
-İlk eğitim 60 geçerli günlük etikette yapılır. Uygun challenger çıkmazsa seçim en az
-30 yeni etiket geldikten sonra yeniden denenebilir. Bir challenger üretildiğinde
+
+İlk model seçimine kadar geçen süreyi kısaltmak için tamamlanmış Binance Spot
+geçmişi development-only seed olarak eklenebilir:
+
+```powershell
+& .\scripts\upgrade-binance-testnet-learning.ps1 `
+  -DataPath .\data\BTCUSDT-15m.csv `
+  -ManifestPath .\data\BTCUSDT-15m.csv.manifest.json
+```
+
+Companion manifest yoksa interval açıkça belirtilmelidir:
+
+```powershell
+& .\scripts\upgrade-binance-testnet-learning.ps1 `
+  -DataPath .\data\BTCUSDT-15m.csv -Interval 15m
+```
+
+Betik önce `--validate-only` ile veriyi hiçbir kayıt değiştirmeden doğrular. Ardından
+worker kimliğini, Testnet anahtarını, ağı, hesabı ve emir parametrelerini kontrol eder;
+girilen API anahtarının yürütme defterine bağlı tek yönlü parmak iziyle eşleşmesini
+worker durdurulmadan önce ayrıca kanıtlar. Operatör onayından sonra tek bir Python
+bakım işlemi kontrol kilidini stop, seed, doğrulama ve çalışma durumunu geri yükleme
+boyunca bırakmaz. Açık pozisyon satılmaz; başlangıçta çalışan worker yeni kodla tekrar
+çalışır, durmuş worker durmuş kalır. Bakım gövdesi hata verse bile başlangıçtaki çalışma
+niyeti aynı kilit bırakılmadan önce geri yüklenir. Ham
+`python agent.py binance-testnet-seed-learning --data ...` yazma komutu
+`running=true` veya `desired_running=true` iken fail-closed reddedilir; bu nedenle
+çalışan agent üzerinde elle kullanılmamalıdır. Companion manifest bulunmayan ham CLI
+çağrısı `--interval 15m` veya `--interval 1d` ister. `--samples N` en yeni `N`
+kesintisiz etiketi sınırlar; verilmezse bütün uygun etiketler kullanılır.
+
+Seed yazım adımı yalnız kaynak deftere bağlı öğrenme aggregate'ine mühürlü geliştirme
+örnekleri ekler; Testnet emri göndermez ve bakiye, pozisyon, yürütme config'i veya API
+kimlik bilgilerini değiştirmez. Son restart mevcut execution policy'sinin normal
+izlemeye devam etmesini sağlar. Ham CSV, varsa kaynak manifesti, zaman sınırları ve sıralı
+örnekler SHA-256 özetleriyle mühürlenir. Seed örnekleri tarihsel geliştirme verisidir;
+canlı OOS, dondurma-sonrası true-forward veya kesin Testnet işlem kanıtı değildir.
+Öğrenici sözleşmesi değiştiğinde yalnız etiketsiz/adaysız ilk yaşam döngüsü, eski
+değişmez run korunarak ve manifest hash'ine bağlı migration kaydıyla taşınabilir.
+
+İlk eğitim `cadence.development_labels` 60'a ulaştığında yapılır. Bu sayı tarihsel
+geliştirme seed'i ile canlı geliştirme etiketlerinin toplamıdır. Uygun challenger
+çıkmazsa seçim en az 30 yeni geliştirme etiketi geldikten sonra yeniden denenebilir.
+Bir challenger üretildiğinde
 artefakt dondurulur ve yeni fit yapılmadan kesin ileri kohortu tamamlanır. Eğitimde
 görülen sonuçlar challenger performansının veya incumbent üstünlüğünün kanıtı sayılmaz;
 bu metrikler yalnız dondurma zamanından sonra oluşan dokunulmamış etiketlerde hesaplanır.
 Fit sınırındaki tek günlük sonuç, aday kimliği henüz karara bağlanmadığı için embargo
 olarak saklanır ve aday performansına katılmaz. Dondurma sonrasında bir günlük veri
 boşluğu oluşursa aday emekli edilir; kesintisiz yeni bölüm kendi yaşam döngüsünü başlatır.
-Eğitim etiketleri yalnız 200 etiketlik toplam veri-yeterliliği sayımına dahildir.
+Tarihsel veya başka bir development etiketi canlı doğrulama sayaçlarını doldurmaz.
+Seed kuyruğuna bağlanan worker kararı öğrenme kaydından önce oluşturulmuşsa yalnız o
+tek ve tam günlük sınır sonucu development-only embargo olarak kabul edilir; OOS veya
+true-forward sayılmaz. İkinci ya da zaman çizgisine uymayan non-OOS sonuç fail-closed
+reddedilir.
 
 Bir challenger ancak aşağıdaki koşulların tamamını sağlarsa
 `proposal_ready_for_review` olabilir:
 
-- toplam veri-yeterliliği için en az 200 ileri toplanmış günlük etiket;
-- dondurulduktan sonra en az 60 kesin ileri etiket;
+- etkin kesintisiz yaşam döngüsünde en az 200 canlı OOS günlük etiket;
+- dondurulduktan sonra en az 60 canlı true-forward etiket;
 - challenger geçişiyle eşleşen en az 8 kesin P&L'lı kapanmış Testnet turu;
 - hem ileri günlük kohortta hem eşleşen gerçek turlarda pozitif net sonuç,
   PF `>=1,15` ve azami düşüş `<=%15`;
@@ -427,6 +473,16 @@ sayılmaz; açık bir arşiv/migrasyon yapılana kadar sürüm uyuşmazlığı f
 ```powershell
 python agent.py binance-testnet-learning-status
 ```
+
+Durum çıktısında `evidence.historical_development_labels` yalnız tarihsel seed
+örneklerini, `evidence.development_labels` ile aynı değeri gösteren
+`cadence.development_labels` ise fit için kullanılabilen tarihsel ve canlı geliştirme
+etiketlerinin toplamını gösterir. `evidence.finalized_daily_labels` canlı
+kaynakta mühürlenmiş etiket envanteridir;
+`evidence.eligible_oos_daily_labels` bunun etkin ve kesintisiz yaşam döngüsünde canlı
+OOS doğrulamasına uygun kısmıdır. `evidence.true_forward_after_freeze_labels` ise
+etkin challenger için dondurma sonrasında gerçekten oluşan canlı holdout sayısıdır.
+Bu sayaçların ayrı olması tarihsel verinin canlı kapıları doldurmasını engeller.
 
 Ayrıntılı veri ve terfi sözleşmesi
 `reports/binance-testnet-online-learning.md` dosyasındadır.
@@ -465,6 +521,7 @@ Komutları elle çalıştırmak gerekirse:
 ```powershell
 python agent.py binance-execution-doctor
 python agent.py binance-testnet-account
+python agent.py binance-testnet-bound-account-check
 python agent.py binance-testnet-order-check --quote-usdt 5
 ```
 

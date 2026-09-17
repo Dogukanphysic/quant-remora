@@ -108,24 +108,47 @@ sonucu oluşmadan örnek saymaz.
 Politika defterlerindeki gerçekler her kaynak yürütme defterine özel
 `state/<kaynak-defter-adı>-online-learning.sqlite3` dosyasına idempotent aktarılır;
 kaynak ve aggregate tek bir policy/model kimliğine mühürlenir ve farklı kimlikler
-birleştirilmez. İlk
-fit 60 geçerli günlük etikette yapılır; aday çıkmazsa seçim en az 30 yeni etiketten
-sonra yeniden denenebilir. Arama alanı önceden sabit `%3/%5/%10/%15/%20` momentum
+birleştirilmez. Tamamlanmış Binance Spot geçmişi aşağıdaki komutla yalnız geliştirme
+amaçlı, hash mühürlü seed olarak eklenebilir:
+
+```powershell
+& .\scripts\upgrade-binance-testnet-learning.ps1 `
+  -DataPath .\data\BTCUSDT-15m.csv `
+  -ManifestPath .\data\BTCUSDT-15m.csv.manifest.json
+```
+
+Companion manifest yoksa `-Interval 15m` veya `-Interval 1d` verilmelidir. Betik
+veriyi önce `--validate-only` ile salt okunur doğrular; worker kimliği ile Testnet
+anahtar/ağ/hesap kontrollerini ve anahtarın yürütme defteri parmak iziyle eşleşmesini
+stop öncesinde tamamlar. Açık pozisyonu satmadan stop, seed, doğrulama ve başlangıç
+çalışma niyetini geri yükleme adımlarını tek kontrol kilidinde yürütür. Başlangıçta
+durmuş worker durmuş kalır; hata kurtarması da kilit bırakılmadan tamamlanır.
+Ham `binance-testnet-seed-learning` yazma komutu `running` veya `desired_running`
+worker üzerinde fail-closed reddedilir; companion manifest yoksa ham komut ayrıca
+`--interval 15m` veya `--interval 1d` ister.
+
+Seed model fitini hızlandırır; emir, bakiye, pozisyon, config veya credential
+değiştirmez ve canlı doğrulama kanıtı sayılmaz. İlk fit tarihsel ve canlı geliştirme
+girdilerinin toplamı olan `cadence.development_labels` 60'a ulaştığında yapılır;
+aday çıkmazsa seçim en az 30 yeni geliştirme etiketinden sonra yeniden denenebilir.
+Arama alanı önceden sabit `%3/%5/%10/%15/%20` momentum
 eşikleridir. Challenger artefaktı dondurulduğunda yeni fit yapılmaz; seçimde kullanılan
 etiketler challenger performansı veya incumbent üstünlüğü sayılmaz; bu kanıt yalnız
 dondurma sonrasında toplanır. Dondurma sınırındaki tek örnek embargo edilir. Sonraki
 bir süreklilik boşluğu adayı emekli eder ve yeni kesintisiz bölüm yeniden 60 örneklik
-yaşam döngüsü başlatır. Eğitim etiketleri yalnız toplam veri-yeterliliği sayımına dahildir.
+yaşam döngüsü başlatır.
 
 İncelemeye hazır öneri için şu kapıların tamamı gerekir:
 
-- toplam veri-yeterliliği için en az 200 ileri toplanmış günlük etiket;
-- en az 60 kesin dondurma-sonrası ileri etiket;
+- etkin yaşam döngüsünde en az 200 canlı OOS günlük etiket;
+- en az 60 canlı dondurma-sonrası true-forward etiket;
 - challenger geçişiyle eşleşen en az 8 kesin P&L'lı kapanmış Testnet turu;
 - günlük ileri kohortta ve eşleşen gerçek turlarda pozitif maliyet-sonrası net,
   PF `>=1,15`, azami düşüş `<=%15`;
 - eşlenmiş örneklerde incumbent'tan daha iyi sonuç;
 - güvenlik ihlali olmaması.
+
+Tarihsel seed bu üç adet canlı kanıt kapısının hiçbirini doldurmaz.
 
 `proposal_ready_for_review` yalnız insan incelemesi ister. Aktif config otomatik
 değişmez, worker'a hot-swap yapılmaz ve paper, gerçek para veya live emir yetkisi

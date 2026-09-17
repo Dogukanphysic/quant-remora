@@ -551,6 +551,15 @@ python agent.py paper-stop
 # Worker durmuş, nakitte ve uzlaşmışken Testnet-only policy'yi yeniden eğitme
 python agent.py train-binance-testnet-policy
 
+# İlk challenger fitini güvenli bakım geçişiyle hızlandıran tarihsel Spot seed'i
+& .\scripts\upgrade-binance-testnet-learning.ps1 `
+  -DataPath .\data\BTCUSDT-15m.csv `
+  -ManifestPath .\data\BTCUSDT-15m.csv.manifest.json
+
+# Companion manifest yoksa kaynak intervalini açıkça belirtin
+& .\scripts\upgrade-binance-testnet-learning.ps1 `
+  -DataPath .\data\BTCUSDT-15m.csv -Interval 15m
+
 # Ayrı 10 USDT Testnet yürütme pilotunu başlatma ve izleme
 & .\scripts\start-binance-testnet-agent.ps1
 python agent.py binance-testnet-agent-status
@@ -591,16 +600,38 @@ policy tarafından yönetilir; challenger'a sonuç uydurulmaz.
 Politika defterlerindeki değişmez kayıtlar her kaynak deftere özel
 `state/<kaynak-defter-adı>-online-learning.sqlite3` içinde tutulur; farklı policy/model
 kaynakları aynı aggregate içinde birleştirilmez. Kaynak defter ve aggregate kimliği
-tam olarak bir policy/model çiftine mühürlenir. İlk fit 60 günlük etikette yapılır; aday çıkmazsa en az 30
-yeni etiketten sonra `%3/%5/%10/%15/%20` sabit eşik ızgarası yeniden taranabilir.
+tam olarak bir policy/model çiftine mühürlenir. İlk fit beklemesini kısaltmak için
+tamamlanmış ve kesintisiz Binance Spot CSV'si development-only seed olarak eklenebilir.
+Seed ham veri, varsa kaynak manifesti, zaman sınırları ve sıralı örnek özetleriyle
+SHA-256 mühürlüdür. Yalnız öğrenme aggregate'ine yazılır; emir, bakiye, pozisyon,
+yürütme config'i veya kimlik bilgilerini değiştirmez.
+
+Seed kurulumu canlı worker döngüsünün dışında bir bakım geçişidir. Ham
+`binance-testnet-seed-learning` yazma komutu worker `running` veya
+`desired_running` iken reddedilir. Önerilen `upgrade-binance-testnet-learning.ps1`
+önce seed'i `--validate-only` ile salt okunur doğrular; sonra mevcut worker kimliğini,
+Testnet anahtarını, ağı, hesabı ve emir parametrelerini sınar; anahtarın mevcut
+yürütme defteri parmak iziyle eşleştiğini stop öncesinde ayrıca kanıtlar. Operatör onayından
+sonra tek kontrol kilidi altında açık pozisyonu kapatmadan stop yapar, seed'i kurup
+öğrenme durumunu doğrular ve başlangıç çalışma niyetini geri yükler; durmuşsa durmuş
+bırakır. Hata kurtarması da aynı kilidin içinde gerçekleşir, dolayısıyla daha yeni bir
+operatör stop isteği eski bir restart kararıyla ezilemez. Companion manifest yoksa `-Interval 15m`
+veya `-Interval 1d` zorunludur; bunun ham CLI karşılığı `--interval` seçeneğidir.
+
+İlk fit, tarihsel seed ile canlı geliştirme etiketlerinin toplamı olan
+`cadence.development_labels` 60'a ulaştığında yapılır; aday çıkmazsa en az 30 yeni
+geliştirme etiketinden sonra `%3/%5/%10/%15/%20` sabit eşik ızgarası yeniden
+taranabilir.
 Bir aday dondurulduğunda yeni fit yapılmaz; performans ve incumbent üstünlüğü yalnız
 dondurma sonrasındaki dokunulmamış sonuçlarla değerlendirilir. Dondurma sınırındaki
 tek sonuç embargo olarak dışarıda kalır. Sonraki bir veri boşluğu adayı append-only
 emeklilik kaydıyla kapatır ve kesintisiz yeni bölüm ayrı yaşam döngüsü başlatır.
-Eğitim etiketleri yalnız
-toplam veri-yeterliliği sayımına girer. İnceleme önerisi için toplam en az 200 ileri
-toplanmış etiket, 60 dondurma
-sonrası etiket, challenger geçişiyle eşleşen 8 kesin kapanmış Testnet turu, hem günlük
+Kayıttan önce oluşturulmuş seed-tail worker kararının yalnız tek, tam günlük sınır etiketi
+development-only embargo olabilir; ikinci veya zaman çizgisine uymayan non-OOS etiket
+öğrenmeyi fail-closed kapatır.
+Tarihsel geliştirme örnekleri canlı validation kanıtı değildir. İnceleme önerisi için
+etkin yaşam döngüsünde 200 canlı OOS etiket, 60 canlı dondurma-sonrası true-forward
+etiket, challenger geçişiyle eşleşen 8 kesin kapanmış Testnet turu, hem günlük
 kohortta hem gerçek turlarda pozitif net sonuç, PF `>=1,15`, azami düşüş `<=%15`,
 incumbent üstünlüğü ve sıfır güvenlik ihlali birlikte gerekir.
 `proposal_ready_for_review` otomatik terfi değildir:
@@ -614,6 +645,13 @@ SELL-close ve epoch-karantina olayları kalıcı eklenme sırasıyla oynatılır
 Aday kaynak bağı iki aşamalı kalıcı geçişle uygulanır. Pending geçiş doğrudan öğrenme
 yazımını ve yeni alışları kapatır; restart aynı geçişi idempotent tamamlar. Öğrenici
 sürümü değişirse eski aggregate açık arşiv/migrasyon olmadan yeni sürüme taşınmaz.
+Durumda `evidence.historical_development_labels` yalnız seed sayısını,
+`evidence.development_labels` ve aynı değerdeki `cadence.development_labels` fit
+girdilerinin toplamını,
+`evidence.finalized_daily_labels` bütün mühürlü canlı etiketleri ve
+`evidence.eligible_oos_daily_labels` etkin kesintisiz yaşam döngüsündeki canlı OOS
+kısmını gösterir. `evidence.true_forward_after_freeze_labels` yalnız etkin adayın
+dondurma sonrasında oluşan canlı holdout etiketlerini sayar.
 
 ## 15. Dosya ve durum haritası
 
@@ -629,6 +667,7 @@ sürümü değişirse eski aggregate açık arşiv/migrasyon olmadan yeni sürü
 | `paper.py` | Worker kilidi, süreç kontrolü, ortak status ve legacy geçişler |
 | `binance_execution.py` | Public Spot GET-only mum istemcisi ile ayrı Testnet-only HMAC, market filtreleri, alış/satış ve `myTrades` uzlaştırması |
 | `binance_testnet_worker.py` | Ayrı günlük sinyal, 10 USDT sanal pozisyon, kalıcı emir niyeti ve tekrar koruması |
+| `binance_testnet_learning_seed.py` | Kesintisiz Binance Spot CSV'sini hash mühürlü, yalnız geliştirme amaçlı günlük momentum seed'ine dönüştürme |
 | `testnet_policy_trainer.py` | Ön-kayıtlı eşikler, iki-piyasa maliyet kapıları ve Testnet-only config üretimi |
 | `testnet_online_learner.py` | Sabit eşik ızgarasını maliyetli nedensel örneklerde değerlendiren, yalnız inceleme önerisi üreten saf challenger motoru |
 | `testnet_learning_store.py` | Politika defterlerinden değişmez etiket/tur aktarımı, karantina, fit takvimi ve kalıcı öğrenme durumu |
@@ -637,6 +676,7 @@ sürümü değişirse eski aggregate açık arşiv/migrasyon olmadan yeni sürü
 | `reports/binance-testnet-online-learning.md` | Testnet online öğrenme verisi, dondurma ve inceleme kapıları |
 | `scripts/setup-binance-testnet.ps1` | Anahtarları kaydetmeden hesap ve `/order/test` doğrulaması |
 | `scripts/start-binance-testnet-agent.ps1` | Gizli anahtar girişi ve çift kapıyla detached Testnet worker başlatma |
+| `scripts/upgrade-binance-testnet-learning.ps1` | Seed'i salt okunur doğrulayıp kimlik/ağ kontrolü ve tek kilit altında pozisyonu koruyan stop/import/restore yapan bakım geçişi |
 | `scripts/reset-binance-testnet-agent.ps1` | Durdurulmuş Testnet dönemini aynı SQLite içinde arşivleyip yeni epoch açma |
 | `state/paper.sqlite3` | Canlı sanal durumun tek kaynağı |
 | `state/binance-testnet-<policy>-<model>.sqlite3` | Politika/model sürümüne ayrılmış Testnet karar, emir niyeti, dolum, pozisyon ve sanal P&L defteri |

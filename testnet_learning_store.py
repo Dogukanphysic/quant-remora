@@ -47,6 +47,9 @@ _SAFE_FLAGS = {
     "automatic_activation_enabled": False,
     "writes_active_config": False,
 }
+_SEED_MIGRATABLE_LEARNER_VERSIONS = frozenset({
+    "8b77b5de5887c30f062536f9651ffd4be4943442612438a5c927deca9b8f32e0",
+})
 
 
 class LearningStoreError(RuntimeError):
@@ -2075,6 +2078,45 @@ def _ensure_learning_schema(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS online_samples_time_idx
             ON online_samples(decision_ts, label_available_ts);
 
+        CREATE TABLE IF NOT EXISTS historical_development_seeds (
+            singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+            seed_id TEXT NOT NULL UNIQUE,
+            source_ledger_id TEXT NOT NULL,
+            policy TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL UNIQUE,
+            seed_record_json TEXT NOT NULL,
+            seed_record_sha256 TEXT NOT NULL UNIQUE,
+            sample_count INTEGER NOT NULL CHECK (sample_count>0),
+            first_decision_ts INTEGER NOT NULL,
+            last_decision_ts INTEGER NOT NULL,
+            last_label_available_ts INTEGER NOT NULL,
+            last_close TEXT NOT NULL,
+            created_ms INTEGER NOT NULL,
+            FOREIGN KEY (source_ledger_id) REFERENCES online_sources(source_ledger_id),
+            CHECK (last_label_available_ts-last_decision_ts=86400000)
+        );
+
+        CREATE TABLE IF NOT EXISTS historical_development_samples (
+            seed_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal>=0),
+            decision_ts INTEGER NOT NULL,
+            label_available_ts INTEGER NOT NULL,
+            sample_id TEXT NOT NULL UNIQUE,
+            sample_json TEXT NOT NULL,
+            sample_sha256 TEXT NOT NULL UNIQUE,
+            record_json TEXT NOT NULL,
+            record_sha256 TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (seed_id, ordinal),
+            UNIQUE (decision_ts, label_available_ts),
+            FOREIGN KEY (seed_id) REFERENCES historical_development_seeds(seed_id),
+            CHECK (label_available_ts-decision_ts=86400000)
+        );
+
+        CREATE INDEX IF NOT EXISTS historical_development_samples_time_idx
+            ON historical_development_samples(decision_ts, label_available_ts);
+
         CREATE TABLE IF NOT EXISTS online_daily_gaps (
             source_ledger_id TEXT NOT NULL,
             source_gap_id TEXT NOT NULL,
@@ -2200,6 +2242,7 @@ def _ensure_learning_schema(db: sqlite3.Connection) -> None:
             proposal_ready_for_review INTEGER NOT NULL
                 CHECK (proposal_ready_for_review IN (0,1)),
             exact_round_trip_evidence_sha256 TEXT NOT NULL,
+            learner_migration_sha256 TEXT,
             last_error TEXT,
             updated_ms INTEGER NOT NULL
         );
@@ -2208,6 +2251,19 @@ def _ensure_learning_schema(db: sqlite3.Connection) -> None:
             state_version TEXT PRIMARY KEY,
             state_json TEXT NOT NULL,
             state_sha256 TEXT NOT NULL UNIQUE,
+            created_ms INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS online_learner_migrations (
+            migration_id TEXT PRIMARY KEY,
+            from_learner_version TEXT NOT NULL,
+            to_learner_version TEXT NOT NULL,
+            source_ledger_id TEXT NOT NULL,
+            source_learning_revision INTEGER NOT NULL,
+            prior_state_version TEXT NOT NULL,
+            prior_latest_run_id TEXT,
+            record_json TEXT NOT NULL,
+            record_sha256 TEXT NOT NULL UNIQUE,
             created_ms INTEGER NOT NULL
         );
         """
@@ -2232,6 +2288,7 @@ def _ensure_learning_schema(db: sqlite3.Connection) -> None:
         ("aggregate_identity_sha256", "TEXT"),
         ("safety_violation_count", "INTEGER NOT NULL DEFAULT 0"),
         ("safety_violation_digest", "TEXT NOT NULL DEFAULT ''"),
+        ("learner_migration_sha256", "TEXT"),
     ):
         if name not in state_columns:
             db.execute(f"ALTER TABLE online_state ADD COLUMN {name} {declaration}")
@@ -2342,6 +2399,22 @@ def _source_read_connection(path: Path | str) -> sqlite3.Connection:
     try:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA query_only=ON")
+        return db
+    except BaseException:
+        db.close()
+        raise
+
+
+def _source_maintenance_connection(path: Path | str) -> sqlite3.Connection:
+    """Open an existing source ledger so a no-write reservation can be held."""
+
+    source_path = Path(path).resolve()
+    uri = source_path.as_uri() + "?mode=rw"
+    db = sqlite3.connect(uri, timeout=15, isolation_level=None, uri=True)
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=15000")
+        db.execute("PRAGMA foreign_keys=ON")
         return db
     except BaseException:
         db.close()
@@ -2741,6 +2814,268 @@ def _aggregate_source_id(db: sqlite3.Connection) -> str:
     return _aggregate_source_identity(db)[0]
 
 
+def _validated_seed_manifest(
+    manifest: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate a builder-owned manifest without trusting caller fields."""
+
+    if not isinstance(manifest, Mapping):
+        raise LearningIntegrityError("Historical development seed is not an object.")
+    try:
+        import binance_testnet_learning_seed as historical_bootstrap
+
+        verified = historical_bootstrap.verify_seed_manifest(manifest)
+    except (ImportError, AttributeError) as exc:
+        raise LearningStoreError(
+            "Historical development seed verifier is unavailable."
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise LearningIntegrityError(
+            f"Historical development seed does not verify: {exc}"
+        ) from exc
+    if not isinstance(verified, Mapping):
+        raise LearningIntegrityError(
+            "Historical development seed verifier returned malformed data."
+        )
+    try:
+        supplied_json = _canonical_json(dict(manifest))
+        verified_json = _canonical_json(dict(verified))
+    except (TypeError, ValueError) as exc:
+        raise LearningIntegrityError(
+            "Historical development seed is not canonical JSON data."
+        ) from exc
+    if supplied_json != verified_json:
+        raise LearningIntegrityError(
+            "Historical development seed is not in canonical verified form."
+        )
+    return dict(verified)
+
+
+def _historical_seed_record(
+    *,
+    seed_id: str | None,
+    source_ledger_id: str,
+    policy: str,
+    model_version: str,
+    manifest: Mapping[str, object],
+) -> tuple[str, dict[str, object], str]:
+    manifest_sha256 = str(manifest["immutable_sha256"])
+    record = {
+        "schema": SCHEMA_VERSION,
+        "kind": "testnet_historical_development_seed",
+        "source_ledger_id": source_ledger_id,
+        "policy": policy,
+        "model_version": model_version,
+        "manifest_sha256": manifest_sha256,
+        "sample_count": int(manifest["sample_count"]),
+        "first_decision_ts": int(manifest["first_decision_ts"]),
+        "last_decision_ts": int(manifest["last_decision_ts"]),
+        "last_label_available_ts": int(manifest["last_label_available_ts"]),
+        "last_close": str(manifest["last_close"]),
+        "evidence_role": "development_only_not_forward_or_execution_evidence",
+    }
+    digest = _sha256(record)
+    expected_id = f"history:{_model_prefix(policy, model_version)}:{digest[:32]}"
+    if seed_id is not None and not hmac.compare_digest(seed_id, expected_id):
+        raise LearningIntegrityError("Historical development seed id does not verify.")
+    return expected_id, record, digest
+
+
+def _historical_sample_record(
+    seed_id: str,
+    ordinal: int,
+    sample: Mapping[str, object],
+) -> tuple[dict[str, object], str]:
+    record = {
+        "schema": SCHEMA_VERSION,
+        "kind": "testnet_historical_development_sample",
+        "seed_id": seed_id,
+        "ordinal": ordinal,
+        "sample": dict(sample),
+    }
+    return record, _sha256(record)
+
+
+def _verified_historical_seed(
+    db: sqlite3.Connection,
+) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    """Return the single immutable development seed after full verification."""
+
+    historical_tables = {
+        str(row[0])
+        for row in db.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type='table' AND name IN
+                     ('historical_development_seeds',
+                      'historical_development_samples')"""
+        )
+    }
+    if not historical_tables:
+        # Read-only status must remain available for a schema-2 aggregate that
+        # predates this additive feature.  The next mutating refresh installs
+        # both tables before a seed can be accepted.
+        return None, []
+    if historical_tables != {
+        "historical_development_seeds",
+        "historical_development_samples",
+    }:
+        raise LearningIntegrityError(
+            "Historical development schema is only partially installed."
+        )
+    row = db.execute(
+        "SELECT * FROM historical_development_seeds WHERE singleton=1"
+    ).fetchone()
+    sample_row_count = int(
+        db.execute(
+            "SELECT COUNT(*) FROM historical_development_samples"
+        ).fetchone()[0]
+    )
+    if row is None:
+        if sample_row_count:
+            raise LearningIntegrityError(
+                "Historical development samples exist without their seed."
+            )
+        return None, []
+
+    source_id, source_policy, source_model_version = _aggregate_source_identity(db)
+    manifest_value = _parse_canonical_json(
+        row["manifest_json"], "historical development seed manifest"
+    )
+    if not isinstance(manifest_value, Mapping):
+        raise LearningIntegrityError(
+            "Historical development seed manifest is not an object."
+        )
+    manifest = _validated_seed_manifest(manifest_value)
+    manifest_sha256 = str(manifest["immutable_sha256"])
+    seed_id, expected_record, expected_record_digest = _historical_seed_record(
+        seed_id=str(row["seed_id"]),
+        source_ledger_id=source_id,
+        policy=source_policy,
+        model_version=source_model_version,
+        manifest=manifest,
+    )
+    record_value = _parse_canonical_json(
+        row["seed_record_json"], "historical development seed record"
+    )
+    if (
+        not isinstance(record_value, Mapping)
+        or dict(record_value) != expected_record
+        or str(row["source_ledger_id"]) != source_id
+        or str(row["policy"]) != source_policy
+        or str(row["model_version"]) != source_model_version
+        or not hmac.compare_digest(str(row["manifest_sha256"]), manifest_sha256)
+        or not hmac.compare_digest(
+            str(row["seed_record_sha256"]), expected_record_digest
+        )
+        or int(row["sample_count"]) != int(manifest["sample_count"])
+        or int(row["first_decision_ts"]) != int(manifest["first_decision_ts"])
+        or int(row["last_decision_ts"]) != int(manifest["last_decision_ts"])
+        or int(row["last_label_available_ts"])
+        != int(manifest["last_label_available_ts"])
+        or str(row["last_close"]) != str(manifest["last_close"])
+    ):
+        raise LearningIntegrityError(
+            "Historical development seed provenance does not verify."
+        )
+
+    manifest_samples = manifest.get("samples")
+    if not isinstance(manifest_samples, list):
+        raise LearningIntegrityError(
+            "Historical development seed samples are malformed."
+        )
+    rows = db.execute(
+        """SELECT * FROM historical_development_samples
+           WHERE seed_id=? ORDER BY ordinal""",
+        (seed_id,),
+    ).fetchall()
+    if len(rows) != len(manifest_samples) or len(rows) != sample_row_count:
+        raise LearningIntegrityError(
+            "Historical development sample count does not verify."
+        )
+    verified_samples: list[dict[str, object]] = []
+    for ordinal, (sample_row, manifest_sample) in enumerate(
+        zip(rows, manifest_samples)
+    ):
+        if not isinstance(manifest_sample, Mapping):
+            raise LearningIntegrityError(
+                "Historical development sample is not an object."
+            )
+        sample_value = _parse_canonical_json(
+            sample_row["sample_json"], "historical development sample"
+        )
+        if not isinstance(sample_value, Mapping):
+            raise LearningIntegrityError(
+                "Historical development sample is not an object."
+            )
+        try:
+            normalized = learner.seal_sample(
+                {
+                    key: value
+                    for key, value in sample_value.items()
+                    if key != "immutable_sha256"
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            raise LearningIntegrityError(
+                f"Historical development sample does not verify: {exc}"
+            ) from exc
+        record, record_digest = _historical_sample_record(
+            seed_id, ordinal, normalized
+        )
+        stored_record = _parse_canonical_json(
+            sample_row["record_json"], "historical development sample record"
+        )
+        if (
+            int(sample_row["ordinal"]) != ordinal
+            or dict(sample_value) != dict(manifest_sample)
+            or dict(sample_value) != normalized
+            or not isinstance(stored_record, Mapping)
+            or dict(stored_record) != record
+            or int(sample_row["decision_ts"]) != int(normalized["decision_ts"])
+            or int(sample_row["label_available_ts"])
+            != int(normalized["label_available_ts"])
+            or str(sample_row["sample_id"]) != str(normalized["sample_id"])
+            or not hmac.compare_digest(
+                str(sample_row["sample_sha256"]),
+                str(normalized["immutable_sha256"]),
+            )
+            or not hmac.compare_digest(
+                str(sample_row["record_sha256"]), record_digest
+            )
+        ):
+            raise LearningIntegrityError(
+                "Historical development sample provenance does not verify."
+            )
+        if (
+            bool(normalized["out_of_sample"])
+            or bool(normalized["true_forward_after_freeze"])
+            or normalized.get("freeze_id") is not None
+        ):
+            raise LearningIntegrityError(
+                "Historical seed attempted to claim forward evidence."
+            )
+        verified_samples.append(normalized)
+
+    try:
+        # Reuse the learner's public validation path.  A progress report cannot
+        # promote or activate anything and proves ordering/contiguity here.
+        learner.learn(verified_samples, incumbent_threshold="0.10")
+    except ValueError as exc:
+        raise LearningIntegrityError(
+            f"Historical development sample sequence is invalid: {exc}"
+        ) from exc
+    return {
+        "seed_id": seed_id,
+        "manifest_sha256": manifest_sha256,
+        "sample_count": len(verified_samples),
+        "first_decision_ts": int(manifest["first_decision_ts"]),
+        "last_decision_ts": int(manifest["last_decision_ts"]),
+        "last_label_available_ts": int(manifest["last_label_available_ts"]),
+        "last_close": str(manifest["last_close"]),
+        "evidence_role": str(manifest["evidence_role"]),
+    }, verified_samples
+
+
 def _verified_online_samples(
     db: sqlite3.Connection,
 ) -> list[dict[str, object]]:
@@ -2796,24 +3131,76 @@ def _verified_online_samples(
 def _verified_learning_segments(
     db: sqlite3.Connection,
 ) -> list[list[dict[str, object]]]:
-    all_samples = [
-        sample
-        for sample in _verified_online_samples(db)
-        if bool(sample["out_of_sample"])
-    ]
-    if not all_samples:
-        return []
-    segments: list[list[dict[str, object]]] = [[]]
+    verified_live_samples = _verified_online_samples(db)
+    seed, historical_samples = _verified_historical_seed(db)
+    if historical_samples:
+        non_oos_samples = [
+            sample
+            for sample in verified_live_samples
+            if not bool(sample["out_of_sample"])
+        ]
+        if non_oos_samples and (
+            len(non_oos_samples) != 1
+            or non_oos_samples[0] is not verified_live_samples[0]
+            or not _is_historical_pre_oos_bridge(seed, non_oos_samples[0])
+        ):
+            raise LearningIntegrityError(
+                "Historical learning suffix contains an unexpected non-OOS sample."
+            )
+        live_samples = verified_live_samples
+    else:
+        # Pre-registration labels are not development evidence unless a sealed
+        # historical prefix gives the single boundary label exact provenance.
+        live_samples = [
+            sample
+            for sample in verified_live_samples
+            if bool(sample["out_of_sample"])
+        ]
+    if not live_samples:
+        return [historical_samples] if historical_samples else []
+    live_segments: list[list[dict[str, object]]] = [[]]
     previous_label: int | None = None
-    for sample in all_samples:
+    for sample in live_samples:
         if (
             previous_label is not None
             and int(sample["decision_ts"]) != previous_label
         ):
-            segments.append([])
-        segments[-1].append(sample)
+            live_segments.append([])
+        live_segments[-1].append(sample)
         previous_label = int(sample["label_available_ts"])
-    return segments
+    if not historical_samples:
+        return live_segments
+
+    historical_last = int(historical_samples[-1]["label_available_ts"])
+    first_live = int(live_segments[0][0]["decision_ts"])
+    if first_live < historical_last:
+        raise LearningIntegrityError(
+            "Live daily evidence overlaps the historical development seed."
+        )
+    if first_live == historical_last:
+        live_segments[0] = historical_samples + live_segments[0]
+        return live_segments
+    # A non-contiguous live suffix remains a separate lifecycle.  Gap handling
+    # below chooses the latest segment and never reuses this historical prefix.
+    return [historical_samples, *live_segments]
+
+
+def _is_historical_pre_oos_bridge(
+    seed: Mapping[str, object] | None,
+    sample: Mapping[str, object],
+) -> bool:
+    """Accept only the one causal label spanning a pre-registration anchor."""
+
+    if seed is None:
+        return False
+    boundary = int(seed["last_label_available_ts"])
+    return bool(
+        int(sample["decision_ts"]) == boundary
+        and int(sample["label_available_ts"]) == boundary + DAY_MS
+        and not bool(sample["out_of_sample"])
+        and not bool(sample["true_forward_after_freeze"])
+        and "freeze_id" not in sample
+    )
 
 
 def _candidate_segment_index(
@@ -2847,6 +3234,33 @@ def _verified_learning_samples(
         # latest strict daily segment, while all older facts remain immutable.
         return segments[-1]
     return list(segments[_candidate_segment_index(segments, frozen_candidate)])
+
+
+def _active_state_learning_samples(
+    db: sqlite3.Connection,
+    state: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Reconstruct the active sealed segment named by persisted state."""
+
+    active_segment_id = state.get("active_segment_id")
+    segments = _verified_learning_segments(db)
+    if active_segment_id is None:
+        return []
+    for segment in segments:
+        for start in range(len(segment)):
+            suffix = segment[start:]
+            if _segment_id(suffix) == str(active_segment_id):
+                return [dict(sample) for sample in suffix]
+    if str(active_segment_id) == _segment_id([]):
+        return []
+    # A gap can name an empty future segment.  It carries no development
+    # labels until the first exact daily sample arrives.
+    for gap in _verified_daily_gaps(db):
+        if _segment_id([], gap) == str(active_segment_id):
+            return []
+    raise LearningIntegrityError(
+        "Active learning segment does not match sealed aggregate evidence."
+    )
 
 
 def _verified_daily_gaps(db: sqlite3.Connection) -> list[dict[str, object]]:
@@ -3714,13 +4128,28 @@ def refresh(
                         frozen_candidate["development_sample_count"]
                     )
                     forward_samples = candidate_samples[development_count:]
+                    historical_seed, _historical_samples = (
+                        _verified_historical_seed(aggregate)
+                    )
+                    historical_pre_oos_bridge = bool(
+                        historical_seed is not None
+                        and forward_samples
+                        and freeze_cutoff
+                        == int(historical_seed["last_label_available_ts"])
+                        and _is_historical_pre_oos_bridge(
+                            historical_seed, forward_samples[0]
+                        )
+                    )
                     bridge_is_exact = bool(
                         forward_samples
                         and int(forward_samples[0]["decision_ts"])
                         == freeze_cutoff
                         and int(forward_samples[0]["label_available_ts"])
                         == freeze_cutoff + DAY_MS
-                        and bool(forward_samples[0]["out_of_sample"])
+                        and (
+                            bool(forward_samples[0]["out_of_sample"])
+                            or historical_pre_oos_bridge
+                        )
                         and not bool(
                             forward_samples[0]["true_forward_after_freeze"]
                         )
@@ -3834,6 +4263,9 @@ def refresh(
                 ]
                 verified_samples = _verified_online_samples(aggregate)
                 finalized_count = len(verified_samples)
+                active_oos_count = sum(
+                    bool(sample["out_of_sample"]) for sample in samples
+                )
                 total_true_forward_count = sum(
                     bool(sample["out_of_sample"])
                     and bool(sample["true_forward_after_freeze"])
@@ -3943,7 +4375,7 @@ def refresh(
                         or (
                             len(samples) < MIN_TRAINING_SAMPLES
                             and int(prior["eligible_oos_daily_label_count"])
-                            != len(samples)
+                            != active_oos_count
                         )
                     )
                 )
@@ -3955,7 +4387,7 @@ def refresh(
                     or source_revision_changed
                     or prior["latest_run_id"] is None
                     or int(prior["eligible_oos_daily_label_count"])
-                    != len(samples)
+                    != active_oos_count
                     or int(prior["candidate_matched_round_trip_count"])
                     != len(matched_trips)
                     or str(prior["exact_round_trip_evidence_sha256"])
@@ -3992,6 +4424,9 @@ def refresh(
                             frozen_candidate=frozen_candidate,
                             actual_round_trips=matched_trips,
                             safety_violations=evaluation_safety_violations,
+                            verified_pre_registration_embargo=(
+                                historical_pre_oos_bridge
+                            ),
                         )
                         run_kind = "evaluation"
                     latest_run_id = _store_run(
@@ -4052,7 +4487,7 @@ def refresh(
                        updated_ms=? WHERE singleton=1""",
                     (
                         finalized_count,
-                        len(samples),
+                        active_oos_count,
                         active_true_forward_count,
                         total_true_forward_count,
                         len(exact_records),
@@ -4256,6 +4691,820 @@ def refresh(
         aggregate.close()
     return status_snapshot(source_db_path, learning_db_path)
 
+
+def _verified_learner_migration(
+    db: sqlite3.Connection,
+) -> dict[str, object] | None:
+    """Verify the optional v4→v5 seed migration and its state binding."""
+
+    state = db.execute(
+        "SELECT * FROM online_state WHERE singleton=1"
+    ).fetchone()
+    if state is None:
+        raise LearningStoreError("Online learning state is missing.")
+    state_keys = set(state.keys())
+    state_digest = (
+        state["learner_migration_sha256"]
+        if "learner_migration_sha256" in state_keys
+        else None
+    )
+    table_exists = db.execute(
+        """SELECT 1 FROM sqlite_master WHERE type='table'
+           AND name='online_learner_migrations'"""
+    ).fetchone() is not None
+    rows = (
+        list(db.execute("SELECT * FROM online_learner_migrations"))
+        if table_exists
+        else []
+    )
+    if state_digest is None:
+        if rows:
+            raise LearningIntegrityError(
+                "Learner migration records are not bound to online state."
+            )
+        return None
+    if not isinstance(state_digest, str) or len(rows) != 1:
+        raise LearningIntegrityError(
+            "Online state learner migration provenance is incomplete."
+        )
+    row = rows[0]
+    record = _parse_canonical_json(
+        row["record_json"], "learner migration record"
+    )
+    if not isinstance(record, Mapping):
+        raise LearningIntegrityError("Learner migration record is not an object.")
+    expected_keys = {
+        "schema",
+        "kind",
+        "from_learner_version",
+        "to_learner_version",
+        "source_ledger_id",
+        "source_learning_revision",
+        "prior_state_version",
+        "prior_latest_run_id",
+        "historical_manifest_sha256",
+        "open_pre_candidate_round_trips_preserved",
+        "created_ms",
+    }
+    record_digest = _sha256(record)
+    expected_id = f"learner-migration:{record_digest[:48]}"
+    source_id, _policy, _model_version = _aggregate_source_identity(db)
+    if (
+        set(record) != expected_keys
+        or record.get("schema") != SCHEMA_VERSION
+        or record.get("kind")
+        != "historical_seed_learner_version_migration"
+        or record.get("from_learner_version")
+        not in _SEED_MIGRATABLE_LEARNER_VERSIONS
+        or record.get("to_learner_version") != learner.LEARNER_VERSION
+        or record.get("source_ledger_id") != source_id
+        or int(record.get("source_learning_revision", -1)) < 0
+        or int(record.get("open_pre_candidate_round_trips_preserved", -1)) < 0
+        or int(record.get("created_ms", -1)) < 0
+        or row["migration_id"] != expected_id
+        or row["from_learner_version"] != record["from_learner_version"]
+        or row["to_learner_version"] != record["to_learner_version"]
+        or row["source_ledger_id"] != source_id
+        or int(row["source_learning_revision"])
+        != int(record["source_learning_revision"])
+        or row["prior_state_version"] != record["prior_state_version"]
+        or row["prior_latest_run_id"] != record["prior_latest_run_id"]
+        or int(row["created_ms"]) != int(record["created_ms"])
+        or not hmac.compare_digest(str(row["record_sha256"]), record_digest)
+        or not hmac.compare_digest(state_digest, record_digest)
+    ):
+        raise LearningIntegrityError(
+            "Learner migration record seal does not verify."
+        )
+
+    prior_event = db.execute(
+        """SELECT state_json, state_sha256 FROM online_state_events
+           WHERE state_version=?""",
+        (record["prior_state_version"],),
+    ).fetchone()
+    if prior_event is None:
+        raise LearningIntegrityError(
+            "Learner migration prior state event is missing."
+        )
+    prior_state = _parse_canonical_json(
+        prior_event["state_json"], "learner migration prior state"
+    )
+    if (
+        not isinstance(prior_state, Mapping)
+        or _sha256(prior_state) != record["prior_state_version"]
+        or not hmac.compare_digest(
+            str(prior_event["state_sha256"]), str(record["prior_state_version"])
+        )
+        or prior_state.get("learner_version")
+        != record["from_learner_version"]
+        or prior_state.get("latest_run_id") != record["prior_latest_run_id"]
+    ):
+        raise LearningIntegrityError(
+            "Learner migration prior state event does not verify."
+        )
+    prior_run_id = record["prior_latest_run_id"]
+    if prior_run_id is not None:
+        prior_run = db.execute(
+            "SELECT learner_version FROM online_learning_runs WHERE run_id=?",
+            (prior_run_id,),
+        ).fetchone()
+        if (
+            prior_run is None
+            or prior_run["learner_version"] != record["from_learner_version"]
+        ):
+            raise LearningIntegrityError(
+                "Learner migration prior run provenance does not verify."
+            )
+
+    seed_table = db.execute(
+        """SELECT 1 FROM sqlite_master WHERE type='table'
+           AND name='historical_development_seeds'"""
+    ).fetchone()
+    if seed_table is not None:
+        seed_rows = list(db.execute(
+            "SELECT manifest_sha256 FROM historical_development_seeds"
+        ))
+        if len(seed_rows) > 1 or (
+            seed_rows
+            and seed_rows[0]["manifest_sha256"]
+            != record["historical_manifest_sha256"]
+        ):
+            raise LearningIntegrityError(
+                "Historical seed does not match its learner migration."
+            )
+    return dict(record)
+
+
+def _migrate_learner_version_for_historical_seed(
+    source_db_path: Path | str,
+    learning_db_path: Path | str,
+    manifest: Mapping[str, object],
+    now_ms: int,
+) -> bool:
+    """Version one empty pre-seed lifecycle without rewriting old artifacts.
+
+    Revision 5 only widens the already documented embargo contract for one
+    store-verified historical boundary.  Migration is consequently restricted
+    to the prior revision's first lifecycle before any label, gap, candidate,
+    closed trip, error, retirement, or training evidence exists.  An open,
+    pre-candidate execution trip may remain: it is immutable operational state
+    and cannot satisfy a candidate review gate.
+    """
+
+    learning_path = Path(learning_db_path)
+    if not learning_path.is_file():
+        return False
+    aggregate = sqlite3.connect(learning_path, timeout=15, isolation_level=None)
+    source: sqlite3.Connection | None = None
+    try:
+        aggregate.row_factory = sqlite3.Row
+        aggregate.execute("PRAGMA busy_timeout=15000")
+        aggregate.execute("PRAGMA foreign_keys=ON")
+        source = _source_maintenance_connection(source_db_path)
+        aggregate.execute("BEGIN IMMEDIATE")
+        source.execute("BEGIN IMMEDIATE")
+        try:
+            state_row = aggregate.execute(
+                "SELECT * FROM online_state WHERE singleton=1"
+            ).fetchone()
+            if state_row is None:
+                raise LearningStoreError("Online learning state is missing.")
+            state = {key: state_row[key] for key in state_row.keys()}
+            persisted_version = str(state["learner_version"])
+            if persisted_version == learner.LEARNER_VERSION:
+                migration = _verified_learner_migration(aggregate)
+                if (
+                    migration is not None
+                    and migration["historical_manifest_sha256"]
+                    != manifest["immutable_sha256"]
+                ):
+                    raise LearningIntegrityError(
+                        "Historical seed manifest does not match the completed "
+                        "learner migration."
+                    )
+                aggregate.execute("ROLLBACK")
+                source.execute("ROLLBACK")
+                return False
+            if persisted_version not in _SEED_MIGRATABLE_LEARNER_VERSIONS:
+                raise LearningStoreError(
+                    "Online learning database version cannot be migrated by "
+                    "the historical seed workflow."
+                )
+            if int(state["schema_version"]) != SCHEMA_VERSION:
+                raise LearningIntegrityError(
+                    "Historical seed learner migration found a schema mismatch."
+                )
+
+            meta = source.execute(
+                """SELECT source_ledger_id, schema_version, learning_revision
+                   FROM worker_learning_meta WHERE singleton=1"""
+            ).fetchone()
+            worker_state = source.execute(
+                """SELECT desired_running, pending_client_id
+                   FROM worker_state WHERE singleton=1"""
+            ).fetchone()
+            if (
+                meta is None
+                or int(meta["schema_version"]) != SCHEMA_VERSION
+                or worker_state is None
+                or bool(worker_state["desired_running"])
+                or worker_state["pending_client_id"] is not None
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration requires a fully stopped, "
+                    "coherent source ledger."
+                )
+            source_id = str(meta["source_ledger_id"])
+            source_revision = int(meta["learning_revision"])
+            policy, model_version = _source_registration_identity(source)
+            aggregate_id, aggregate_policy, aggregate_model = (
+                _aggregate_source_identity(aggregate)
+            )
+            if (
+                not hmac.compare_digest(source_id, aggregate_id)
+                or policy != aggregate_policy
+                or model_version != aggregate_model
+                or int(state["ingested_source_revision"]) != source_revision
+            ):
+                raise LearningIntegrityError(
+                    "Historical seed learner migration source identity/revision "
+                    "does not match the aggregate."
+                )
+
+            registration = _registration(source, policy, model_version)
+            if (
+                registration["frozen_candidate_sha256"] is not None
+                or registration["frozen_candidate_json"] is not None
+                or registration["freeze_cutoff_candle_ms"] is not None
+                or _verified_pending_candidate_transition(source) is not None
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration refuses a candidate lifecycle."
+                )
+
+            source_zero_tables = (
+                "worker_learning_daily_labels",
+                "worker_learning_daily_gaps",
+                "worker_learning_source_errors",
+                "worker_learning_outbox",
+                "worker_learning_candidate_retirements",
+            )
+            if any(
+                int(source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in source_zero_tables
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration requires an unused label lifecycle."
+                )
+
+            aggregate_zero_tables = (
+                "online_samples",
+                "online_daily_gaps",
+                "online_source_errors",
+                "online_ingest_conflicts",
+                "online_candidate_retirements",
+            )
+            for table in aggregate_zero_tables:
+                if int(
+                    aggregate.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                ):
+                    raise LearningStoreError(
+                        "Historical seed learner migration found aggregate evidence."
+                    )
+            historical_table = aggregate.execute(
+                """SELECT 1 FROM sqlite_master WHERE type='table'
+                   AND name='historical_development_seeds'"""
+            ).fetchone()
+            if historical_table is not None and int(
+                aggregate.execute(
+                    "SELECT COUNT(*) FROM historical_development_seeds"
+                ).fetchone()[0]
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration cannot replace an existing seed."
+                )
+
+            forbidden_state_values = (
+                int(state["finalized_daily_label_count"]),
+                int(state["eligible_oos_daily_label_count"]),
+                int(state["true_forward_daily_label_count"]),
+                int(state["total_true_forward_daily_label_count"]),
+                int(state["exact_closed_round_trip_count"]),
+                int(state["candidate_matched_round_trip_count"]),
+                int(state["quarantined_round_trip_count"]),
+                int(state["ingest_conflict_count"]),
+                int(state["daily_gap_count"]),
+                int(state["source_error_count"]),
+                int(state["unresolved_learning_outbox_count"]),
+                int(state["safety_violation_count"]),
+                int(state["retired_candidate_count"]),
+                int(state["last_trained_sample_count"]),
+                int(state["proposal_ready_for_review"]),
+            )
+            if (
+                any(forbidden_state_values)
+                or state["frozen_candidate_json"] is not None
+                or state["frozen_candidate_sha256"] is not None
+                or state["freeze_cutoff_ts"] is not None
+                or state["pending_candidate_transition_json"] is not None
+                or state["pending_candidate_transition_sha256"] is not None
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration found trained or review evidence."
+                )
+
+            source_trip_rows = list(source.execute(
+                "SELECT * FROM worker_learning_round_trips"
+            ))
+            source_trip_records = [
+                _verify_source_round_trip(row) for row in source_trip_rows
+            ]
+            aggregate_trip_records = _verified_online_round_trip_records(aggregate)
+            if (
+                len(source_trip_records) != len(aggregate_trip_records)
+                or len(aggregate_trip_records) != int(state["open_round_trip_count"])
+                or {
+                    _sha256(record) for record in source_trip_records
+                } != {digest for _record, digest in aggregate_trip_records}
+                or any(
+                    record.get("status") != "open"
+                    or bool(record.get("exact_pnl"))
+                    or bool(record.get("entry_candidate_bound"))
+                    or record.get("entry_freeze_id") is not None
+                    for record in source_trip_records
+                )
+            ):
+                raise LearningStoreError(
+                    "Historical seed learner migration found non-neutral trip evidence."
+                )
+
+            latest_decision = source.execute(
+                """SELECT candle_close_ms, policy, close_latest
+                   FROM worker_decisions ORDER BY candle_close_ms DESC LIMIT 1"""
+            ).fetchone()
+            if latest_decision is None:
+                raise LearningStoreError(
+                    "Historical seed learner migration requires a current decision."
+                )
+            if (
+                str(latest_decision["policy"]) != policy
+                or int(latest_decision["candle_close_ms"])
+                != int(manifest["last_label_available_ts"])
+                or _decimal_text(
+                    latest_decision["close_latest"],
+                    "latest worker decision close",
+                    positive=True,
+                )
+                != _decimal_text(
+                    manifest["last_close"], "historical seed last close", positive=True
+                )
+            ):
+                raise LearningIntegrityError(
+                    "Historical seed learner migration tail does not match the worker."
+                )
+
+            state_payload = {
+                key: value
+                for key, value in state.items()
+                if key not in {"singleton", "updated_ms"}
+            }
+            # A v5 status probe may have added this nullable column before
+            # failing closed on the v4 learner version.  It was not part of the
+            # immutable v4 state payload, so exclude only its neutral NULL form
+            # when verifying that prior event.
+            if state_payload.get("learner_migration_sha256") is None:
+                state_payload.pop("learner_migration_sha256", None)
+            prior_state_version = _sha256(state_payload)
+            prior_event = aggregate.execute(
+                """SELECT state_json, state_sha256 FROM online_state_events
+                   WHERE state_version=?""",
+                (prior_state_version,),
+            ).fetchone()
+            if (
+                prior_event is None
+                or str(prior_event["state_json"]) != _canonical_json(state_payload)
+                or not hmac.compare_digest(
+                    str(prior_event["state_sha256"]), prior_state_version
+                )
+            ):
+                raise LearningIntegrityError(
+                    "Historical seed learner migration prior state does not verify."
+                )
+
+            prior_run_id = state["latest_run_id"]
+            if (prior_run_id is None) != (state["latest_report_version"] is None):
+                raise LearningIntegrityError(
+                    "Historical seed learner migration run pointer is incomplete."
+                )
+            if prior_run_id is not None:
+                run = aggregate.execute(
+                    "SELECT * FROM online_learning_runs WHERE run_id=?",
+                    (prior_run_id,),
+                ).fetchone()
+                if run is None:
+                    raise LearningIntegrityError(
+                        "Historical seed learner migration prior run is missing."
+                    )
+                artifact = _parse_canonical_json(
+                    run["artifact_json"], "prior learning artifact"
+                )
+                if not isinstance(artifact, Mapping):
+                    raise LearningIntegrityError(
+                        "Historical seed learner migration prior artifact is invalid."
+                    )
+                artifact_digest = _sha256(artifact)
+                report = artifact.get("report")
+                report_content = dict(report) if isinstance(report, Mapping) else {}
+                report_version = report_content.pop("report_version", None)
+                if (
+                    str(run["learner_version"]) != persisted_version
+                    or artifact.get("learner_version") != persisted_version
+                    or not hmac.compare_digest(
+                        str(run["artifact_sha256"]), artifact_digest
+                    )
+                    or not hmac.compare_digest(
+                        str(run["run_id"]),
+                        _sha256({
+                            "artifact_sha256": artifact_digest,
+                            "run_kind": run["run_kind"],
+                            "learner_version": run["learner_version"],
+                        }),
+                    )
+                    or int(run["eligible_sample_count"]) != 0
+                    or int(run["exact_round_trip_count"]) != 0
+                    or artifact.get("eligible_sample_hashes") != []
+                    or artifact.get("exact_closed_round_trip_hashes") != []
+                    or report_version != _sha256(report_content)
+                    or report_version != state["latest_report_version"]
+                ):
+                    raise LearningIntegrityError(
+                        "Historical seed learner migration prior run does not verify."
+                    )
+
+            aggregate.execute(
+                """CREATE TABLE IF NOT EXISTS online_learner_migrations (
+                       migration_id TEXT PRIMARY KEY,
+                       from_learner_version TEXT NOT NULL,
+                       to_learner_version TEXT NOT NULL,
+                       source_ledger_id TEXT NOT NULL,
+                       source_learning_revision INTEGER NOT NULL,
+                       prior_state_version TEXT NOT NULL,
+                       prior_latest_run_id TEXT,
+                       record_json TEXT NOT NULL,
+                       record_sha256 TEXT NOT NULL UNIQUE,
+                       created_ms INTEGER NOT NULL
+                   )"""
+            )
+            record = {
+                "schema": SCHEMA_VERSION,
+                "kind": "historical_seed_learner_version_migration",
+                "from_learner_version": persisted_version,
+                "to_learner_version": learner.LEARNER_VERSION,
+                "source_ledger_id": source_id,
+                "source_learning_revision": source_revision,
+                "prior_state_version": prior_state_version,
+                "prior_latest_run_id": prior_run_id,
+                "historical_manifest_sha256": str(manifest["immutable_sha256"]),
+                "open_pre_candidate_round_trips_preserved": len(
+                    source_trip_records
+                ),
+                "created_ms": now_ms,
+            }
+            record_digest = _sha256(record)
+            migration_id = f"learner-migration:{record_digest[:48]}"
+            aggregate.execute(
+                """INSERT INTO online_learner_migrations
+                   (migration_id, from_learner_version, to_learner_version,
+                    source_ledger_id, source_learning_revision,
+                    prior_state_version, prior_latest_run_id, record_json,
+                    record_sha256, created_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    migration_id,
+                    persisted_version,
+                    learner.LEARNER_VERSION,
+                    source_id,
+                    source_revision,
+                    prior_state_version,
+                    prior_run_id,
+                    _canonical_json(record),
+                    record_digest,
+                    now_ms,
+                ),
+            )
+            if "learner_migration_sha256" not in {
+                str(column[1])
+                for column in aggregate.execute("PRAGMA table_info(online_state)")
+            }:
+                aggregate.execute(
+                    "ALTER TABLE online_state ADD COLUMN "
+                    "learner_migration_sha256 TEXT"
+                )
+            aggregate.execute(
+                """UPDATE online_state SET learner_version=?, latest_run_id=NULL,
+                   latest_report_version=NULL,
+                   latest_status='learner_version_migrated_awaiting_refresh',
+                   proposal_ready_for_review=0, learner_migration_sha256=?,
+                   last_error=NULL, updated_ms=?
+                   WHERE singleton=1""",
+                (learner.LEARNER_VERSION, record_digest, now_ms),
+            )
+            _freeze_state(aggregate, now_ms)
+            aggregate.execute("COMMIT")
+            source.execute("ROLLBACK")
+            return True
+        except BaseException:
+            if aggregate.in_transaction:
+                aggregate.execute("ROLLBACK")
+            raise
+    finally:
+        if source is not None:
+            if source.in_transaction:
+                source.execute("ROLLBACK")
+            source.close()
+        aggregate.close()
+
+
+def seed_historical_development(
+    source_db_path: Path | str,
+    seed_manifest: Mapping[str, object],
+    learning_db_path: Path | str = LEARNING_DB_PATH,
+    now_ms: int | None = None,
+) -> dict[str, object]:
+    """Append one source-bound historical development seed.
+
+    The seed can influence threshold selection only.  Its samples are sealed
+    with ``out_of_sample=false`` and can never satisfy forward-validation or
+    Testnet execution gates.  A source/aggregate pair accepts at most one seed;
+    replaying the exact manifest is idempotent while replacement fails closed.
+    """
+
+    observed_ms = _now_ms() if now_ms is None else _integer(now_ms, "now_ms")
+    manifest = _validated_seed_manifest(seed_manifest)
+
+    _migrate_learner_version_for_historical_seed(
+        source_db_path,
+        learning_db_path,
+        manifest,
+        observed_ms,
+    )
+
+    # First ingest and seal every source fact using the ordinary lifecycle.
+    # Seeding is then permitted only against that coherent source revision.
+    synchronized = refresh(source_db_path, learning_db_path, now_ms=observed_ms)
+    if synchronized.get("provenance_valid") is not True:
+        raise LearningIntegrityError(
+            "Historical development seed requires a verified synchronized aggregate."
+        )
+
+    aggregate = _connect_learning(learning_db_path)
+    source: sqlite3.Connection | None = None
+    try:
+        source = _source_maintenance_connection(source_db_path)
+        # Match refresh's cross-database lock order: aggregate first, source
+        # second. The source reservation then closes the desired_running
+        # check/use race without deadlocking a concurrent refresh transition.
+        aggregate.execute("BEGIN IMMEDIATE")
+        source.execute("BEGIN IMMEDIATE")
+        try:
+            meta = source.execute(
+                """SELECT source_ledger_id, schema_version, learning_revision
+                   FROM worker_learning_meta WHERE singleton=1"""
+            ).fetchone()
+            if meta is None or int(meta["schema_version"]) != SCHEMA_VERSION:
+                raise LearningStoreError(
+                    "Worker learning source schema is missing or unsupported."
+                )
+            source_id = str(meta["source_ledger_id"])
+            policy, model_version = _source_registration_identity(source)
+            aggregate_source_id, aggregate_policy, aggregate_model = (
+                _aggregate_source_identity(aggregate)
+            )
+            if (
+                not hmac.compare_digest(source_id, aggregate_source_id)
+                or policy != aggregate_policy
+                or model_version != aggregate_model
+            ):
+                raise LearningIntegrityError(
+                    "Historical development seed source identity does not match the aggregate."
+                )
+
+            existing_seed, _existing_samples = _verified_historical_seed(aggregate)
+            if existing_seed is not None:
+                if not hmac.compare_digest(
+                    str(existing_seed["manifest_sha256"]),
+                    str(manifest["immutable_sha256"]),
+                ):
+                    raise LearningIntegrityError(
+                        "Historical development seed is immutable and cannot be replaced."
+                    )
+                aggregate.execute("COMMIT")
+                if source.in_transaction:
+                    source.execute("ROLLBACK")
+                return {**existing_seed, "idempotent": True}
+
+            state_row = aggregate.execute(
+                "SELECT * FROM online_state WHERE singleton=1"
+            ).fetchone()
+            if state_row is None:
+                raise LearningStoreError("Online learning state is missing.")
+            state = {key: state_row[key] for key in state_row.keys()}
+            if int(state["ingested_source_revision"]) != int(
+                meta["learning_revision"]
+            ):
+                raise LearningIntegrityError(
+                    "Historical development seed requires the latest source revision."
+                )
+            if (
+                state["frozen_candidate_sha256"] is not None
+                or _aggregate_pending_candidate_transition(state) is not None
+                or _verified_pending_candidate_transition(source) is not None
+            ):
+                raise LearningStoreError(
+                    "Historical development seed is unavailable during a candidate lifecycle transition."
+                )
+            live_label_count = int(
+                aggregate.execute("SELECT COUNT(*) FROM online_samples").fetchone()[0]
+            )
+            source_live_label_count = int(
+                source.execute(
+                    "SELECT COUNT(*) FROM worker_learning_daily_labels"
+                ).fetchone()[0]
+            )
+            gap_count = int(
+                aggregate.execute(
+                    "SELECT COUNT(*) FROM online_daily_gaps"
+                ).fetchone()[0]
+            )
+            source_gap_count = int(
+                source.execute(
+                    "SELECT COUNT(*) FROM worker_learning_daily_gaps"
+                ).fetchone()[0]
+            )
+            retirement_count = int(
+                aggregate.execute(
+                    "SELECT COUNT(*) FROM online_candidate_retirements"
+                ).fetchone()[0]
+            )
+            if live_label_count or source_live_label_count:
+                raise LearningStoreError(
+                    "Historical development seed must be installed before live daily labels."
+                )
+            if gap_count or source_gap_count or retirement_count:
+                raise LearningStoreError(
+                    "Historical development seed is allowed only in the first gap-free lifecycle."
+                )
+            if int(state["last_trained_sample_count"]) != 0:
+                raise LearningStoreError(
+                    "Historical development seed cannot replace prior training evidence."
+                )
+            if _unresolved_learning_outbox_count(source):
+                raise LearningStoreError(
+                    "Historical development seed requires an empty learning outbox."
+                )
+            worker_state = source.execute(
+                """SELECT desired_running, pending_client_id
+                   FROM worker_state WHERE singleton=1"""
+            ).fetchone()
+            if worker_state is None:
+                raise LearningStoreError("Worker state is missing.")
+            if bool(worker_state["desired_running"]) or worker_state[
+                "pending_client_id"
+            ] is not None:
+                raise LearningStoreError(
+                    "Historical development seed requires a fully stopped worker "
+                    "with no pending order intent."
+                )
+
+            latest_decision = source.execute(
+                """SELECT candle_close_ms, policy, close_latest
+                   FROM worker_decisions
+                   ORDER BY candle_close_ms DESC LIMIT 1"""
+            ).fetchone()
+            if latest_decision is None:
+                raise LearningStoreError(
+                    "Historical development seed requires a current worker decision."
+                )
+            latest_close = _decimal_text(
+                latest_decision["close_latest"],
+                "latest worker decision close",
+                positive=True,
+            )
+            manifest_close = _decimal_text(
+                manifest["last_close"], "historical seed last close", positive=True
+            )
+            if (
+                str(latest_decision["policy"]) != policy
+                or int(latest_decision["candle_close_ms"])
+                != int(manifest["last_label_available_ts"])
+                or latest_close != manifest_close
+                or int(manifest["last_candle_close_ms"])
+                != int(manifest["last_label_available_ts"])
+            ):
+                raise LearningIntegrityError(
+                    "Historical seed tail does not exactly bridge to the latest worker decision."
+                )
+
+            samples_value = manifest.get("samples")
+            if not isinstance(samples_value, list) or not samples_value:
+                raise LearningIntegrityError(
+                    "Historical development seed has no samples."
+                )
+            samples = [dict(sample) for sample in samples_value]
+            if any(
+                bool(sample["out_of_sample"])
+                or bool(sample["true_forward_after_freeze"])
+                or sample.get("freeze_id") is not None
+                for sample in samples
+            ):
+                raise LearningIntegrityError(
+                    "Historical development seed attempted to claim forward evidence."
+                )
+
+            seed_id, seed_record, seed_record_digest = _historical_seed_record(
+                seed_id=None,
+                source_ledger_id=source_id,
+                policy=policy,
+                model_version=model_version,
+                manifest=manifest,
+            )
+            aggregate.execute(
+                """INSERT INTO historical_development_seeds
+                   (singleton, seed_id, source_ledger_id, policy, model_version,
+                    manifest_json, manifest_sha256, seed_record_json,
+                    seed_record_sha256, sample_count, first_decision_ts,
+                    last_decision_ts, last_label_available_ts, last_close,
+                    created_ms)
+                   VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    seed_id,
+                    source_id,
+                    policy,
+                    model_version,
+                    _canonical_json(manifest),
+                    manifest["immutable_sha256"],
+                    _canonical_json(seed_record),
+                    seed_record_digest,
+                    len(samples),
+                    manifest["first_decision_ts"],
+                    manifest["last_decision_ts"],
+                    manifest["last_label_available_ts"],
+                    manifest_close,
+                    observed_ms,
+                ),
+            )
+            for ordinal, sample in enumerate(samples):
+                record, record_digest = _historical_sample_record(
+                    seed_id, ordinal, sample
+                )
+                aggregate.execute(
+                    """INSERT INTO historical_development_samples
+                       (seed_id, ordinal, decision_ts, label_available_ts,
+                        sample_id, sample_json, sample_sha256, record_json,
+                        record_sha256)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        seed_id,
+                        ordinal,
+                        sample["decision_ts"],
+                        sample["label_available_ts"],
+                        sample["sample_id"],
+                        _canonical_json(sample),
+                        sample["immutable_sha256"],
+                        _canonical_json(record),
+                        record_digest,
+                    ),
+                )
+            stored_seed, _stored_samples = _verified_historical_seed(aggregate)
+            if stored_seed is None:
+                raise LearningIntegrityError(
+                    "Historical development seed was not persisted."
+                )
+            aggregate.execute(
+                """UPDATE online_state SET active_segment_id=?,
+                   active_segment_start_ts=?, updated_ms=? WHERE singleton=1""",
+                (
+                    _segment_id(samples),
+                    int(samples[0]["decision_ts"]),
+                    observed_ms,
+                ),
+            )
+            _freeze_state(aggregate, observed_ms)
+            aggregate.execute("COMMIT")
+            if source.in_transaction:
+                source.execute("ROLLBACK")
+            return {**stored_seed, "idempotent": False}
+        except BaseException:
+            if aggregate.in_transaction:
+                aggregate.execute("ROLLBACK")
+            raise
+    finally:
+        if source is not None:
+            if source.in_transaction:
+                source.execute("ROLLBACK")
+            source.close()
+        aggregate.close()
+
 def _source_counts(path: Path | str) -> dict[str, object]:
     source = _source_read_connection(path)
     try:
@@ -4385,8 +5634,11 @@ def _status_unavailable(
         ),
         "expected_learner_version": learner.LEARNER_VERSION,
         "source": source_snapshot,
+        "historical_seed": None,
         "refresh_health": refresh_health,
         "evidence": {
+            "historical_development_labels": 0,
+            "development_labels": 0,
             "finalized_daily_labels": 0,
             "eligible_oos_daily_labels": 0,
             "true_forward_after_freeze_labels": 0,
@@ -4409,6 +5661,7 @@ def _status_unavailable(
         },
         "cadence": {
             "phase": "unavailable",
+            "development_labels": 0,
             "first_training_at_daily_labels": MIN_TRAINING_SAMPLES,
             "retrain_every_new_daily_labels": RETRAIN_STRIDE,
             "last_trained_sample_count": 0,
@@ -4460,6 +5713,7 @@ def _validate_status_provenance(
         raise LearningIntegrityError(
             "Online learning state learner version does not match this code."
         )
+    _verified_learner_migration(db)
     _aggregate_pending_candidate_transition(state)
 
     state_payload = {
@@ -4498,6 +5752,7 @@ def _validate_status_provenance(
         )
 
     verified_samples = _verified_online_samples(db)
+    _historical_seed, _historical_samples = _verified_historical_seed(db)
     verified_gaps = _verified_daily_gaps(db)
     verified_round_trips = _verified_online_round_trip_records(db)
     verified_conflicts = _verified_ingest_conflicts(db)
@@ -4595,6 +5850,20 @@ def _validate_status_provenance(
                 "Online learning frozen candidate provenance does not verify."
             )
         frozen_candidate = dict(parsed)
+
+    active_samples = _active_state_learning_samples(db, state)
+    if (
+        int(state["eligible_oos_daily_label_count"])
+        != sum(bool(sample["out_of_sample"]) for sample in active_samples)
+        or int(state["true_forward_daily_label_count"])
+        != sum(
+            bool(sample["true_forward_after_freeze"])
+            for sample in active_samples
+        )
+    ):
+        raise LearningIntegrityError(
+            "Online learning active evidence counts do not verify."
+        )
 
     latest_run_id = state["latest_run_id"]
     latest_report_version = state["latest_report_version"]
@@ -4774,6 +6043,12 @@ def status_snapshot(
                 state = {key: row[key] for key in row.keys()}
                 persisted_learner_version = state.get("learner_version")
                 _validate_status_provenance(aggregate, state)
+                historical_seed, historical_samples = (
+                    _verified_historical_seed(aggregate)
+                )
+                active_development_samples = _active_state_learning_samples(
+                    aggregate, state
+                )
                 run_count = int(
                     aggregate.execute(
                         "SELECT COUNT(*) FROM online_learning_runs"
@@ -4824,6 +6099,9 @@ def status_snapshot(
             "last_error": None,
         }
         run_count = 0
+        historical_seed = None
+        historical_samples = []
+        active_development_samples = []
     try:
         # Re-read the source after the aggregate so a source commit that raced
         # the first read cannot inherit an older ready aggregate snapshot.
@@ -4904,8 +6182,11 @@ def status_snapshot(
         "learner_version": learner.LEARNER_VERSION,
         "expected_learner_version": learner.LEARNER_VERSION,
         "source": source,
+        "historical_seed": historical_seed,
         "refresh_health": dict(refresh_health),
         "evidence": {
+            "historical_development_labels": len(historical_samples),
+            "development_labels": len(active_development_samples),
             "finalized_daily_labels": int(state["finalized_daily_label_count"]),
             "eligible_oos_daily_labels": eligible,
             "true_forward_after_freeze_labels": int(
@@ -4939,6 +6220,7 @@ def status_snapshot(
                 "frozen_candidate_evaluation"
                 if candidate_frozen else "development_collection"
             ),
+            "development_labels": len(active_development_samples),
             "first_training_at_daily_labels": MIN_TRAINING_SAMPLES,
             "retrain_every_new_daily_labels": RETRAIN_STRIDE,
             "last_trained_sample_count": int(state["last_trained_sample_count"]),
@@ -4946,7 +6228,9 @@ def status_snapshot(
                 None if candidate_frozen else next_training
             ),
             "labels_until_next_training": (
-                None if candidate_frozen else max(0, next_training - eligible)
+                None
+                if candidate_frozen
+                else max(0, next_training - len(active_development_samples))
             ),
             "true_forward_labels_until_review_minimum": max(
                 0,
@@ -5014,5 +6298,6 @@ __all__ = [
     "mark_refresh_failure",
     "mark_refresh_success",
     "refresh",
+    "seed_historical_development",
     "status_snapshot",
 ]

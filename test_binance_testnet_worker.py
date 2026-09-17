@@ -1,10 +1,13 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from decimal import ROUND_DOWN, getcontext, setcontext
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -1090,7 +1093,9 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         child = Mock()
         child.poll.return_value = None
         with patch.object(
-            worker, "_lock_active", side_effect=[False, False, True, True, True]
+            worker,
+            "_lock_active",
+            side_effect=[False, False, True, True, True, True, True],
         ), patch.object(worker.subprocess, "Popen", return_value=child), \
                 patch.object(worker.time, "sleep"):
             result = worker.control(
@@ -1170,7 +1175,9 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         child = Mock()
         child.poll.return_value = 2
         with patch.object(
-            worker, "_lock_active", side_effect=[False, False, False, False]
+            worker,
+            "_lock_active",
+            side_effect=[False, False, False, False, False, False, False],
         ), \
                 patch.object(worker.subprocess, "Popen", return_value=child):
             with self.assertRaisesRegex(worker.WorkerHalt, "did not remain running"):
@@ -1208,6 +1215,281 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         self.assertFalse(
             worker.status_snapshot(self.db_path, self.lock_path)["desired_running"]
         )
+
+    def test_bound_account_check_matches_without_mutating_ledger(self):
+        account_a = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_A)
+        run_once(db_path=self.db_path, client=account_a)
+
+        result = worker.validate_bound_account(
+            db_path=self.db_path, client=account_a
+        )
+
+        self.assertTrue(result["validated"])
+        self.assertTrue(result["account_bound"])
+        self.assertTrue(result["api_key_matches_ledger"])
+        account_b = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_B)
+        with self.assertRaisesRegex(worker.AccountBindingError, "does not match"):
+            worker.validate_bound_account(
+                db_path=self.db_path, client=account_b
+            )
+
+    def test_learning_maintenance_lease_requires_stopped_worker_and_holds_locks(self):
+        with worker.closing(worker._connect(self.db_path)):
+            pass
+        control_path = worker._control_lock_path(self.lock_path)
+        account_path = worker._account_lock_path(self.lock_path)
+
+        with worker.learning_maintenance_lease(
+            db_path=self.db_path, lock_path=self.lock_path
+        ) as status:
+            self.assertFalse(status["running"])
+            self.assertTrue(control_path.exists())
+            self.assertTrue(account_path.exists())
+
+        self.assertTrue(control_path.exists())
+        self.assertTrue(account_path.exists())
+        self.assertFalse(worker._lock_active(control_path))
+        self.assertFalse(worker._lock_active(account_path))
+        worker._set_desired(self.db_path, True)
+        with self.assertRaisesRegex(worker.WorkerHalt, "fully stopped"):
+            with worker.learning_maintenance_lease(
+                db_path=self.db_path, lock_path=self.lock_path
+            ):
+                pass
+
+    def test_learning_upgrade_lease_restores_running_intent_after_success(self):
+        account = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=account)
+        worker._set_desired(self.db_path, True)
+
+        def desired_worker_lock(path):
+            if Path(path).resolve() != self.lock_path.resolve():
+                return False
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                return bool(worker._state(db)["desired_running"])
+
+        recoveries = []
+
+        def recover(action, **kwargs):
+            self.assertEqual(action, "recover")
+            recoveries.append(action)
+            worker._set_desired(self.db_path, True)
+            return worker.status_snapshot(self.db_path, self.lock_path)
+
+        with patch.object(
+            worker, "_lock_active", side_effect=desired_worker_lock
+        ), patch.object(worker, "_control_locked", side_effect=recover):
+            with worker.learning_upgrade_lease(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            ) as lease:
+                self.assertTrue(lease["restart_required"])
+                with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                    self.assertFalse(worker._state(db)["desired_running"])
+
+        self.assertEqual(recoveries, ["recover"])
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertTrue(worker._state(db)["desired_running"])
+
+    def test_learning_upgrade_lease_preserves_initial_stopped_state(self):
+        account = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=account)
+        with patch.object(worker, "_control_locked") as control_locked:
+            with worker.learning_upgrade_lease(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            ) as lease:
+                self.assertFalse(lease["restart_required"])
+        control_locked.assert_not_called()
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertFalse(worker._state(db)["desired_running"])
+
+    def test_learning_upgrade_lease_restores_intent_after_body_error(self):
+        account = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=account)
+        worker._set_desired(self.db_path, True)
+
+        def desired_worker_lock(path):
+            if Path(path).resolve() != self.lock_path.resolve():
+                return False
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                return bool(worker._state(db)["desired_running"])
+
+        def recover(action, **kwargs):
+            worker._set_desired(self.db_path, True)
+            return worker.status_snapshot(self.db_path, self.lock_path)
+
+        with patch.object(
+            worker, "_lock_active", side_effect=desired_worker_lock
+        ), patch.object(worker, "_control_locked", side_effect=recover), \
+                self.assertRaisesRegex(RuntimeError, "seed failed"):
+            with worker.learning_upgrade_lease(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            ):
+                raise RuntimeError("seed failed")
+
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertTrue(worker._state(db)["desired_running"])
+
+    def test_learning_upgrade_lease_checks_gate_and_signed_auth_before_stop(self):
+        account = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=account)
+        worker._set_desired(self.db_path, True)
+
+        def desired_worker_lock(path):
+            if Path(path).resolve() != self.lock_path.resolve():
+                return False
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                return bool(worker._state(db)["desired_running"])
+
+        with patch.object(
+            worker, "_lock_active", side_effect=desired_worker_lock
+        ), patch.dict(
+            os.environ, {"BINANCE_TESTNET_WORKER_ENABLED": "false"}, clear=False
+        ), self.assertRaisesRegex(worker.WorkerHalt, "fail-closed"):
+            with worker.learning_upgrade_lease(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            ):
+                pass
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertTrue(worker._state(db)["desired_running"])
+
+        with patch.object(
+            worker, "_lock_active", side_effect=desired_worker_lock
+        ), patch.object(account, "account", side_effect=RuntimeError("bad secret")), \
+                self.assertRaisesRegex(worker.WorkerHalt, "signed account proof"):
+            with worker.learning_upgrade_lease(
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            ):
+                pass
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertTrue(worker._state(db)["desired_running"])
+
+    def test_concurrent_stop_wins_after_atomic_learning_upgrade(self):
+        account = FakeClient(daily_closes(100, 109))
+        run_once(db_path=self.db_path, client=account)
+        worker._set_desired(self.db_path, True)
+
+        def desired_worker_lock(path):
+            if Path(path).resolve() != self.lock_path.resolve():
+                return False
+            with worker.closing(worker._connect_read_only(self.db_path)) as db:
+                return bool(worker._state(db)["desired_running"])
+
+        original_control_locked = worker._control_locked
+
+        def recover(action, **kwargs):
+            if action == "recover":
+                worker._set_desired(self.db_path, True)
+                return worker.status_snapshot(self.db_path, self.lock_path)
+            return original_control_locked(action, **kwargs)
+
+        with patch.object(
+            worker, "_lock_active", side_effect=desired_worker_lock
+        ), patch.object(worker, "_control_locked", side_effect=recover):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with worker.learning_upgrade_lease(
+                    db_path=self.db_path,
+                    lock_path=self.lock_path,
+                    client=account,
+                ):
+                    later_stop = pool.submit(
+                        worker.control,
+                        "stop",
+                        db_path=self.db_path,
+                        lock_path=self.lock_path,
+                    )
+                    time.sleep(0.1)
+                    self.assertFalse(later_stop.done())
+                later_stop.result(timeout=5)
+
+        with worker.closing(worker._connect_read_only(self.db_path)) as db:
+            self.assertFalse(worker._state(db)["desired_running"])
+
+    def test_process_lock_has_exactly_one_concurrent_owner(self):
+        lock_path = Path(self.temp.name) / "contended.lock"
+        barrier = threading.Barrier(2)
+
+        def contend():
+            barrier.wait()
+            try:
+                with worker._process_lock(lock_path):
+                    time.sleep(0.2)
+                    return "acquired"
+            except worker.WorkerHalt:
+                return "blocked"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(lambda _index: contend(), range(2)))
+
+        self.assertEqual(sorted(outcomes), ["acquired", "blocked"])
+        self.assertTrue(lock_path.exists())
+        self.assertFalse(worker._lock_active(lock_path))
+
+    def test_advisory_lock_honors_live_legacy_pid_metadata(self):
+        lock_path = Path(self.temp.name) / "legacy.lock"
+        child_code = (
+            "import json,os,sys,time; "
+            "path=sys.argv[1]; "
+            "fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY); "
+            "os.write(fd,json.dumps({'pid':os.getpid(),'token':'legacy',"
+            "'started_ms':1}).encode('utf-8')); "
+            "os.close(fd); print('ready',flush=True); time.sleep(30)"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_code, str(lock_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "ready")
+            self.assertTrue(worker._lock_active(lock_path))
+            with self.assertRaisesRegex(worker.WorkerHalt, "already running"):
+                with worker._process_lock(lock_path):
+                    pass
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+            if child.stdout is not None:
+                child.stdout.close()
+            if child.stderr is not None:
+                child.stderr.close()
+
+        self.assertFalse(worker._lock_active(lock_path))
+        with worker._process_lock(lock_path):
+            self.assertTrue(worker._lock_active(lock_path))
+
+    def test_recover_rearms_running_worker_without_spawning_duplicate(self):
+        account = FakeClient(daily_closes(100, 109), api_key=TEST_API_KEY_A)
+        run_once(db_path=self.db_path, client=account)
+        worker._set_desired(self.db_path, False)
+        account_lock = worker._account_lock_path(self.lock_path)
+
+        with worker._process_lock(account_lock), worker._process_lock(
+            self.lock_path
+        ), patch.object(worker.subprocess, "Popen") as popen:
+            recovered = worker.control(
+                "recover",
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                client=account,
+            )
+
+        self.assertTrue(recovered["running"])
+        self.assertTrue(
+            worker.status_snapshot(self.db_path, self.lock_path)["desired_running"]
+        )
+        popen.assert_not_called()
+        worker._set_desired(self.db_path, False)
 
     def test_start_rejects_policy_config_changed_after_import(self):
         changed = json.loads(json.dumps(worker.POLICY_CONFIG))
@@ -1834,7 +2116,9 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
         child = Mock()
         child.poll.return_value = None
         with patch.object(
-            worker, "_lock_active", side_effect=[False, False, True, True, True]
+            worker,
+            "_lock_active",
+            side_effect=[False, False, True, True, True, True, True],
         ), patch.object(worker.subprocess, "Popen", return_value=child), \
                 patch.object(worker.time, "sleep"):
             result = worker.control(
@@ -2203,6 +2487,316 @@ class BinanceTestnetWorkerTests(unittest.TestCase):
             agent.main()
 
         snapshot.assert_called_once_with(refresh=False)
+
+    def test_bound_account_cli_uses_read_only_ledger_assertion(self):
+        import agent
+
+        expected = {
+            "validated": True,
+            "account_bound": True,
+            "api_key_matches_ledger": True,
+        }
+        with patch.object(
+            sys, "argv", ["agent.py", "binance-testnet-bound-account-check"]
+        ), patch.object(
+            worker, "validate_bound_account", return_value=expected
+        ) as validate, patch("builtins.print") as printer:
+            agent.main()
+
+        validate.assert_called_once_with()
+        self.assertEqual(json.loads(printer.call_args.args[0]), expected)
+
+    def test_learning_seed_cli_uses_companion_manifest_then_refreshes(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+        import testnet_learning_store as learning_store
+
+        data_path = Path(self.temp.name) / "spot.csv"
+        data_path.write_text("test fixture", encoding="utf-8")
+        manifest_path = data_path.with_suffix(data_path.suffix + ".manifest.json")
+        manifest_path.write_text("{}", encoding="utf-8")
+        manifest = {"immutable_sha256": "a" * 64, "samples": []}
+        seed_result = {"seed_id": "history:test", "sample_count": 60}
+        learning_result = {
+            "status": "candidate_frozen_awaiting_true_forward",
+            "provenance_valid": True,
+            "refresh_health": {
+                "healthy": True,
+                "last_attempt_failed": False,
+            },
+            "historical_development_labels": 60,
+        }
+        calls = []
+
+        def build(*args, **kwargs):
+            calls.append("build")
+            return manifest
+
+        def persist(*args, **kwargs):
+            calls.append("seed")
+            return seed_result
+
+        def snapshot(*args, **kwargs):
+            calls.append("snapshot")
+            return learning_result
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "agent.py",
+                "binance-testnet-seed-learning",
+                "--data",
+                str(data_path),
+            ],
+        ), patch.object(
+            seed_builder, "build_seed_manifest", side_effect=build
+        ) as builder, patch.object(
+            learning_store, "seed_historical_development", side_effect=persist
+        ) as store, patch.object(
+            worker, "learning_snapshot", side_effect=snapshot
+        ) as learning_snapshot, patch.object(
+            worker,
+            "status_snapshot",
+            return_value={"running": False, "desired_running": False},
+        ) as worker_status, patch.object(
+            worker, "learning_maintenance_lease"
+        ) as maintenance_lease, patch.object(
+            worker, "control"
+        ) as control, patch("builtins.print") as printer:
+            agent.main()
+
+        self.assertEqual(calls, ["build", "seed", "snapshot"])
+        builder.assert_called_once_with(
+            data_path,
+            source_manifest_path=manifest_path,
+            interval=None,
+            sample_limit=None,
+        )
+        store.assert_called_once_with(
+            source_db_path=worker.DB_PATH,
+            seed_manifest=manifest,
+            learning_db_path=worker.LEARNING_DB_PATH,
+        )
+        learning_snapshot.assert_called_once_with(refresh=True)
+        worker_status.assert_called_once_with()
+        maintenance_lease.assert_called_once_with()
+        control.assert_not_called()
+        self.assertEqual(
+            json.loads(printer.call_args.args[0]),
+            {"seed": seed_result, "learning": learning_result},
+        )
+
+    def test_learning_upgrade_cli_uses_atomic_upgrade_lease(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+        import testnet_learning_store as learning_store
+
+        data_path = Path(self.temp.name) / "spot.csv"
+        data_path.write_text("test fixture", encoding="utf-8")
+        manifest = {"immutable_sha256": "a" * 64, "samples": []}
+        seed_result = {"seed_id": "history:test", "sample_count": 60}
+        learning_result = {
+            "status": "no_viable_challenger",
+            "provenance_valid": True,
+            "refresh_health": {"healthy": True, "last_attempt_failed": False},
+        }
+        maintenance_result = {
+            "initial": {"running": True, "desired_running": True},
+            "stopped": {"running": False, "desired_running": False},
+            "restart_required": True,
+        }
+        final_worker = {"running": True, "desired_running": True}
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "agent.py",
+                "binance-testnet-upgrade-learning",
+                "--data",
+                str(data_path),
+            ],
+        ), patch.object(
+            seed_builder, "build_seed_manifest", return_value=manifest
+        ) as builder, patch.object(
+            learning_store,
+            "seed_historical_development",
+            return_value=seed_result,
+        ) as persist, patch.object(
+            worker, "learning_snapshot", return_value=learning_result
+        ) as snapshot, patch.object(
+            worker, "learning_upgrade_lease"
+        ) as upgrade_lease, patch.object(
+            worker, "learning_maintenance_lease"
+        ) as maintenance_lease, patch.object(
+            worker, "status_snapshot", return_value=final_worker
+        ) as worker_status, patch("builtins.print") as printer:
+            upgrade_lease.return_value.__enter__.return_value = maintenance_result
+            agent.main()
+
+        builder.assert_called_once_with(
+            data_path,
+            source_manifest_path=None,
+            interval=None,
+            sample_limit=None,
+        )
+        persist.assert_called_once_with(
+            source_db_path=worker.DB_PATH,
+            seed_manifest=manifest,
+            learning_db_path=worker.LEARNING_DB_PATH,
+        )
+        snapshot.assert_called_once_with(refresh=True)
+        upgrade_lease.assert_called_once_with()
+        maintenance_lease.assert_not_called()
+        worker_status.assert_called_once_with()
+        self.assertEqual(
+            json.loads(printer.call_args.args[0]),
+            {
+                "seed": seed_result,
+                "learning": learning_result,
+                "maintenance": maintenance_result,
+                "worker": final_worker,
+            },
+        )
+
+    def test_learning_seed_cli_rejects_nonpositive_sample_count(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "agent.py",
+                "binance-testnet-seed-learning",
+                "--data",
+                "spot.csv",
+                "--samples",
+                "0",
+            ],
+        ), patch.object(seed_builder, "build_seed_manifest") as builder, \
+                self.assertRaises(SystemExit):
+            agent.main()
+
+        builder.assert_not_called()
+
+    def test_learning_seed_cli_requires_stopped_worker(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+        import testnet_learning_store as learning_store
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "agent.py",
+                "binance-testnet-seed-learning",
+                "--data",
+                "spot.csv",
+            ],
+        ), patch.object(
+            worker,
+            "status_snapshot",
+            return_value={"running": True, "desired_running": True},
+        ), patch.object(
+            seed_builder, "build_seed_manifest"
+        ) as builder, patch.object(
+            learning_store, "seed_historical_development"
+        ) as store, self.assertRaisesRegex(ValueError, "tamamen durmuşken"):
+            agent.main()
+
+        builder.assert_not_called()
+        store.assert_not_called()
+
+    def test_learning_seed_validate_only_never_touches_worker_or_store(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+        import testnet_learning_store as learning_store
+
+        data_path = Path(self.temp.name) / "spot.csv"
+        data_path.write_text("fixture", encoding="utf-8")
+        manifest = {
+            "sample_count": 60,
+            "first_decision_ts": 1,
+            "last_label_available_ts": 2,
+            "last_close": "100",
+            "raw_dataset_sha256": "a" * 64,
+            "immutable_sha256": "b" * 64,
+            "evidence_role": "development_only_not_forward_or_execution_evidence",
+        }
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "agent.py",
+                "binance-testnet-seed-learning",
+                "--data",
+                str(data_path),
+                "--interval",
+                "15m",
+                "--validate-only",
+            ],
+        ), patch.object(
+            seed_builder, "build_seed_manifest", return_value=manifest
+        ) as builder, patch.object(
+            learning_store, "seed_historical_development"
+        ) as store, patch.object(
+            worker, "status_snapshot"
+        ) as status, patch.object(
+            worker, "learning_snapshot"
+        ) as learning, patch("builtins.print") as printer:
+            agent.main()
+
+        builder.assert_called_once_with(
+            data_path,
+            source_manifest_path=None,
+            interval="15m",
+            sample_limit=None,
+        )
+        store.assert_not_called()
+        status.assert_not_called()
+        learning.assert_not_called()
+        output = json.loads(printer.call_args.args[0])
+        self.assertTrue(output["valid"])
+        self.assertFalse(output["mutation_performed"])
+
+    def test_learning_seed_cli_surfaces_nonfatal_refresh_failure(self):
+        import agent
+        import binance_testnet_learning_seed as seed_builder
+        import testnet_learning_store as learning_store
+
+        data_path = Path(self.temp.name) / "spot.csv"
+        data_path.write_text("fixture", encoding="utf-8")
+        with patch.object(
+            sys,
+            "argv",
+            ["agent.py", "binance-testnet-seed-learning", "--data", str(data_path)],
+        ), patch.object(
+            seed_builder,
+            "build_seed_manifest",
+            return_value={"immutable_sha256": "a" * 64},
+        ), patch.object(
+            learning_store,
+            "seed_historical_development",
+            return_value={"seed_id": "history:test"},
+        ), patch.object(
+            worker,
+            "status_snapshot",
+            return_value={"running": False, "desired_running": False},
+        ), patch.object(
+            worker, "learning_maintenance_lease"
+        ), patch.object(
+            worker,
+            "learning_snapshot",
+            return_value={
+                "status": "learning_refresh_unhealthy",
+                "provenance_valid": False,
+                "refresh_health": {"healthy": False, "last_attempt_failed": True},
+                "last_error": "refresh failed",
+            },
+        ), self.assertRaisesRegex(ValueError, "yenilemesi doğrulanamadı"):
+            agent.main()
 
     def test_api_cycles_are_at_least_sixty_seconds_apart(self):
         client = FakeClient(daily_closes(100, 109))

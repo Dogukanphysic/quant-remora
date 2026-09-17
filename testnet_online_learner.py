@@ -29,7 +29,7 @@ from typing import Mapping, Sequence
 
 SCHEMA = 2
 LEARNER_ID = "binance_testnet_daily_momentum_online_challenger_v2"
-IMPLEMENTATION_REVISION = 4
+IMPLEMENTATION_REVISION = 5
 DAY_MS = 86_400_000
 CANDIDATE_THRESHOLDS = tuple(
     Decimal(value) for value in ("0.03", "0.05", "0.10", "0.15", "0.20")
@@ -106,6 +106,9 @@ _SPEC = {
         "post_freeze_suffix"
     ),
     "maximum_prebind_embargo_samples": 1,
+    "pre_registration_embargo_provenance": (
+        "false_oos_boundary_allowed_only_after_store_verified_historical_seed"
+    ),
     "deployment": "proposal_only_manual_review_required",
 }
 
@@ -792,8 +795,12 @@ def learn(samples: Sequence[Mapping[str, object]], *,
           incumbent_threshold: str | Decimal = "0.10",
           frozen_candidate: Mapping[str, object] | None = None,
           actual_round_trips: Sequence[Mapping[str, object]] = (),
-          safety_violations: Sequence[str] = ()) -> dict[str, object]:
+          safety_violations: Sequence[str] = (),
+          verified_pre_registration_embargo: bool = False,
+          ) -> dict[str, object]:
     """Freeze a challenger, or evaluate it on strictly future evidence."""
+    if not isinstance(verified_pre_registration_embargo, bool):
+        raise TypeError("verified_pre_registration_embargo must be boolean.")
     daily = _validate_samples(samples)
     incumbent = _validate_incumbent(incumbent_threshold)
     violations = _validate_violations(safety_violations)
@@ -876,7 +883,10 @@ def learn(samples: Sequence[Mapping[str, object]], *,
         if (
             int(candidate.payload["decision_ts"]) != cutoff
             or int(candidate.payload["label_available_ts"]) != cutoff + DAY_MS
-            or not candidate.payload["out_of_sample"]
+            or (
+                not candidate.payload["out_of_sample"]
+                and not verified_pre_registration_embargo
+            )
             or candidate.payload.get("freeze_id") is not None
         ):
             raise ValueError(

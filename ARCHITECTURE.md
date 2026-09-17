@@ -452,8 +452,42 @@ kohortuyla izlenir. Dondurma sınırındaki tek örnek embargo olarak performans
 çıkarılır. Dondurma sonrası süreklilik boşluğu adayı emekli eder ve yeni kesintisiz
 bölüm ayrı bir eğitim yaşam döngüsü başlatır.
 
+İlk seçim süresi, tamamlanmış ve kesintisiz Binance Spot geçmişinden üretilen tek
+bir development-only seed ile kısaltılabilir. Builder ham CSV'yi, varsa kaynak
+manifestini, mum ve etiket sınırlarını ve sıralı örnek kümesini SHA-256 özetleriyle
+mühürler. Aggregate seed'i kendi kaynak defteri ile policy/model kimliğine bağlar.
+Bu yol yalnız model fitine girdi sağlar; yürütme defterindeki emir, bakiye, pozisyon,
+config veya credential durumuna yazmaz ve canlı validation kanıtı üretmez.
+
+Seed kurulumu canlı yürütmeden ayrılmış, kapılı bir bakım geçişidir. Ham mutasyon CLI'sı
+worker `running` veya `desired_running` iken reddedilir. Önerilen
+`scripts/upgrade-binance-testnet-learning.ps1` akışı duruş süresini bütün salt-okunur
+ve imzalı kontrollerden sonraya bırakır:
+
+```mermaid
+flowchart LR
+    V[Validate seed input without mutation] --> I[Read worker identity and state]
+    I --> N[Verify Testnet credentials, bound ledger key, network, account and order parameters]
+    N --> C{Explicit operator confirmation}
+    C -- No --> K[Leave worker and ledger unchanged]
+    C -- Yes --> L[Acquire one control lease for the full transition]
+    L --> S[Controlled stop without selling open position]
+    S --> B[Install immutable development seed and verify learning refresh]
+    B --> R[Restore initial running intent before releasing the lease]
+```
+
+Stop açık pozisyonu kapatmaz; yalnız karar/emir döngüsünü kısa süreli durdurur. Kontrol
+kilidi başlangıç durumu okunmadan önce alınır ve restore tamamlanana kadar tutulur.
+Betik başlangıçta durmuş worker'ı durmuş bırakır; çalışan worker için bakım hata verse
+bile çalışma niyetini kilidi bırakmadan önce geri yükler.
+Companion manifest varsa interval oradan doğrulanır; yoksa betikte `-Interval 15m`
+veya `-Interval 1d`, ham CLI'da `--interval 15m` veya `--interval 1d` açıkça
+verilmelidir. `--validate-only` veri ve hash
+mühürlerini hesaplar fakat defter, emir, bakiye, pozisyon veya config değiştirmez.
+
 ```mermaid
 flowchart TD
+    HS[Validated contiguous Binance Spot history] --> Z[Seal development-only seed and provenance hashes]
     C[Closed UTC daily candle] --> D[Persist causal decision features]
     D --> X{Exactly one day after prior decision?}
     X -- No --> Q[Quarantine continuity gap]
@@ -463,8 +497,9 @@ flowchart TD
     E -- No --> H[Keep open or quarantine ambiguity]
     E -- Yes --> R[Seal cost and exact P&L evidence]
     S --> L[Source-bound learning database]
+    Z --> L
     R --> L
-    L --> T{60 labels, or 30 more after no candidate?}
+    L --> T{60 development labels, or 30 more after no candidate?}
     T -- No --> W[Collect only]
     T -- Yes --> G[Evaluate 3/5/10/15/20 percent thresholds]
     G --> F[Freeze challenger artifact]
@@ -474,24 +509,33 @@ flowchart TD
     V -- Yes --> Y[proposal_ready_for_review]
 ```
 
-İlk fit 60 geçerli günlük etikette çalışır; aday çıkmazsa en az 30 yeni etiketten
-sonra sabit `{%3, %5, %10, %15, %20}` eşiği yeniden karşılaştırılabilir. Eğitimde
-görülen sonuçlar adayın performans ve üstünlük metriklerine katılmaz; yalnız toplam
-veri-yeterliliği sayımına dahildir. Üretilen artifact dondurulur, yeni fit durur ve bu
+İlk fit, tarihsel seed ile canlı geliştirme girdilerinin toplamı olan
+`cadence.development_labels` 60'a ulaştığında çalışır; aday çıkmazsa en az 30 yeni
+geliştirme etiketinden sonra sabit `{%3, %5, %10, %15, %20}` eşiği yeniden
+karşılaştırılabilir. Eğitimde görülen sonuçlar adayın performans ve üstünlük
+metriklerine katılmaz. Üretilen artifact dondurulur, yeni fit durur ve bu
 metrikler yalnız dondurma zamanından sonra oluşan dokunulmamış etiketlerde hesaplanır.
 Günlük PF bileşik sermaye eğrisinin dönemsel P&L değerlerinden, gerçek tur PF'si ise
 uzlaştırılmış USDT P&L değerlerinden hesaplanır.
 Kapı kararları yuvarlanmamış `Decimal` metriklerle verilir; 12 basamaklı değerler
 yalnız rapor gösterimidir ve sınırdaki sonucu yukarı yuvarlayarak geçiremez.
 
-`proposal_ready_for_review` için toplam en az 200 ileri toplanmış günlük etiket, en az 60 kesin
-dondurma-sonrası etiket ve challenger geçişiyle eşleşen en az 8 kesin kapanmış Testnet
-turu gerekir. Hem günlük ileri kohortun hem eşleşen gerçek turların maliyet sonrası
+`proposal_ready_for_review` için etkin kesintisiz yaşam döngüsünde en az 200 canlı
+OOS günlük etiket, en az 60 canlı dondurma-sonrası true-forward etiket ve challenger
+geçişiyle eşleşen en az 8 kesin kapanmış Testnet turu gerekir. Tarihsel development
+seed'i bu üç sayacı da artırmaz. Hem günlük ileri kohortun hem eşleşen gerçek turların maliyet sonrası
 neti pozitif, PF'si en az `1,15`, azami düşüşü en fazla `%15` olmalı; challenger aynı
 günlük örneklerde incumbent'ı geçmeli ve güvenlik ihlali olmamalıdır. Bu sonuç yürütme
 yetkisi değildir. Öğrenme katmanı aktif config'i yazamaz, çalışan sürece hot-swap
 yapamaz ve paper, real veya live bayraklarını açamaz. Operatör durumu
 `python agent.py binance-testnet-learning-status` ile okuyabilir.
+Durumda `evidence.historical_development_labels` yalnız seed örneklerini,
+`evidence.development_labels` ve aynı değerdeki `cadence.development_labels` toplam
+fit girdisini,
+`evidence.finalized_daily_labels` mühürlü canlı etiket envanterini ve
+`evidence.eligible_oos_daily_labels` etkin yaşam döngüsünün canlı OOS kısmını
+gösterir. `evidence.true_forward_after_freeze_labels` etkin challenger'ın canlı
+dondurma-sonrası holdout sayısıdır.
 Durum komutu salt okunurdur. Günlük etiket, BUY-open, SELL-close ve epoch-karantina
 olayları kalıcı outbox'ta eklenme sırasıyla oynatılır; ilk başarısız olay çözülmeden
 sonraki olay uygulanmaz. Çözülmemiş outbox, başarısız son yenileme veya

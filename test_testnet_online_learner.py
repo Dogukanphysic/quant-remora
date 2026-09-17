@@ -201,6 +201,42 @@ class OnlineLearnerTests(unittest.TestCase):
             report["matched_holdout_comparison"]["matched_sample_count"], 60
         )
 
+    def test_pre_registration_boundary_requires_store_provenance_handling(self):
+        dev = [
+            learner.seal_sample(daily_payload(index, out_of_sample=False))
+            for index in range(140)
+        ]
+        artifact = freeze(dev)
+        bridge = learner.seal_sample(
+            daily_payload(140, out_of_sample=False)
+        )
+        forward = forward_samples(artifact, start=141)
+
+        with self.assertRaisesRegex(ValueError, "optional pre-bind embargo"):
+            learner.learn(
+                dev + [bridge] + forward,
+                frozen_candidate=artifact,
+                actual_round_trips=round_trips(artifact),
+            )
+
+        report = learner.learn(
+            dev + [bridge] + forward,
+            frozen_candidate=artifact,
+            actual_round_trips=round_trips(artifact),
+            verified_pre_registration_embargo=True,
+        )
+        self.assertEqual(report["prebind_embargo"]["sample_count"], 1)
+        self.assertEqual(report["untouched_true_forward"]["sample_count"], 60)
+        self.assertEqual(
+            report["matched_holdout_comparison"]["matched_sample_count"], 60
+        )
+        self.assertEqual(
+            report["review_gate_checks"][
+                "total_oos_daily_labels_at_least_200"
+            ],
+            False,
+        )
+
     def test_only_one_exact_prebind_boundary_sample_is_allowed(self):
         dev = development()
         artifact = freeze(dev)
@@ -488,18 +524,18 @@ class OnlineLearnerTests(unittest.TestCase):
             actual_round_trips=round_trips(artifact),
         )
 
-        self.assertEqual(learner.IMPLEMENTATION_REVISION, 4)
+        self.assertEqual(learner.IMPLEMENTATION_REVISION, 5)
         self.assertEqual(
             learner.LEARNER_VERSION,
-            "8b77b5de5887c30f062536f9651ffd4be4943442612438a5c927deca9b8f32e0",
+            "bc524e74e7458c07ac76285ad3e60bdbabd3e5fc8b06c69d6677a29dbaeee305",
         )
         self.assertEqual(
             fit["report_version"],
-            "a4b507bea1d2472b25e80c19e8b8f2e8decaa05c225237af2bf97172d10f3968",
+            "738165ba88c5e709ef9f5cdd44f9666f74954c2cb5f8cf70dbf26240314e298a",
         )
         self.assertEqual(
             evaluation["report_version"],
-            "d441f1e7c423192c3ba3a747fd2a4e588c2ad182c0f8e38496059bce4c3a338c",
+            "a151b187811b204c01ebe580259b7b55838252c51d2a15aaa6da50e9f32aca9a",
         )
 
 
