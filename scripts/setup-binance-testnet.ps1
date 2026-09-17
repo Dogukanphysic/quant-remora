@@ -67,13 +67,19 @@ function Resolve-PythonInvocation {
 function Invoke-AgentCommand {
     param([string[]]$AgentArguments)
 
-    & $script:pythonInvocation.Executable `
+    $commandOutput = @(& $script:pythonInvocation.Executable `
         @($script:pythonInvocation.PrefixArguments) `
         $script:agentPath `
-        @AgentArguments
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Agent komutu basarisiz oldu (cikis kodu: $LASTEXITCODE): $($AgentArguments -join ' ')"
+        @AgentArguments 2>&1)
+    $commandExitCode = $LASTEXITCODE
+    $commandOutput | ForEach-Object { Write-Host $_ }
+    if ($commandExitCode -ne 0) {
+        $detail = (($commandOutput | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+        if ($detail.Length -gt 500) {
+            $detail = $detail.Substring($detail.Length - 500)
+        }
+        if (-not $detail) { $detail = 'Alt komut ayrinti dondurmedi.' }
+        throw "Agent komutu basarisiz oldu (cikis kodu: $commandExitCode): $($AgentArguments -join ' ')`nAyrinti: $detail"
     }
 }
 
