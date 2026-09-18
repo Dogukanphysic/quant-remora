@@ -350,17 +350,33 @@ sözleşmesi `LIVE_TRADING_PLAN.md`; SDD uyarlaması
 `reports/quant-remora-sdd-v5-implementation.md` içindedir.
 
 Eğitim süresini kısaltmak için önce 200 adet nedensel tarihsel H8 örneği
-`historical_remora_h8` kaynağıyla eklenir. Bunlar ileri kanıt sayılmaz. Canlı worker,
-`%20/%80` sermaye StochRSI geçişlerine ek olarak `%30/%70` geniş probe geçişini ve
-saat kapanışında en az `0,05` StochRSI yön değişimi varsa tek bir adayı kaydeder.
-Her karar mumunda en fazla bir aday sekiz mum
-sonra maliyet dahil 1 USD'lik bağımsız sanal probe olarak kapanır. Sonuç
-`v3_probe_executions` ve `paper_remora_probe_h8` kaynağına yazılır; yalnız bu önceden
-kaydedilmiş, benzersiz karar zamanlı probe'lar `executed_forward_count` değerini
-artırır. Paper sermaye modelinin `eligible` olması için en az 200 toplam örnek, 60
-gerçekleşmiş ileri probe ve bütün kronolojik validation kapıları zorunludur. Son
-30–365 günlük ölçüm yaklaşık 16 yerine 34 probe/gün gösterir; başarısız validation
-halinde toplama devam eder.
+`historical_remora_h8_v2` kaynağıyla eklenir. Bunlar yalnız geliştirme verisidir ve
+ileri kanıt sayılmaz. Legacy `historical_remora_h8` örnekleri backward compatibility
+ve eğitim için ayrı tutulur. Canlı worker her kapanmış 15m mumda tek bir nedensel
+probe kaydeder.
+Yön önceliği `%20/%80` StochRSI geçişi, `%30/%70` geniş geçiş ve son olarak yalnız
+kapanmış mumların StochRSI yönüdür; StochRSI eşitse fiyat yönü kullanılır. Probe H8
+sonunda, en geç iki saatte maliyet dahil 1 USD nominal üzerinden kapanır. Sonuç
+`v3_probe_executions` ve `paper_remora_probe_h8_v2` kaynağına yazılır. Legacy
+`paper_remora_probe_h8` örnekleri backward compatibility ve eğitim için ayrı korunur.
+Worker kesintisinden sonra erişilebilir geçmiş mumları kronolojik evidence-only
+backfill eder. Bu satırların tamamı karar zamanından sonra yeniden kurulduğu için H8
+sonucu henüz tamamlanmamış olsa bile pre-registered `executed_forward` kanıtı
+sayılmaz. Backfill yalnız eğitim ve veri boşluğu kurtarma içindir; yeni forward probe
+sayılan tek kayıt, worker'ın canlı gözlediği en yeni fresh close için karar anında
+yazdığı kayıttır.
+
+Ham akış en fazla 96 etiket/gün üretebilir ve örtüşen H8 örnekleri fit sırasında
+kullanılabilir. Model schema 5, terfi ve validation için bütün zaman çizelgesinden
+çakışmayan `effective` alt kümeyi sayar; bu sayı yaklaşık 12 bağımsız örnek/gün ile
+sınırlıdır. En az 60 effective ileri probe bu nedenle teorik olarak en az beş gün
+ister. Paper sermaye modelinin `eligible` olması için ayrıca en az 200 toplam örnek
+ve bütün kronolojik kalite kapıları zorunludur; düşük kalite süreyi uzatabilir veya
+adayı reddettirebilir. En yeni 30 effective gerçekleşmiş ileri probe rolling
+doğrulama kümesinde tutulur; daha eski ileri sonuçlar eğitime katılır ve tarihsel
+başarı tek başına ileri kalite kapısını geçiremez. Sermaye karantinası, risk sınırları ve gerçek emir yetkisi
+değişmemiştir. Ayrı günlük Binance Testnet öğrenicisi ve mevcut açık pozisyonu bu
+15m hızlandırmadan etkilenmez.
 
 Binance bağlantısı açılmadan da yalnız public tarihsel veriyle ayrı challenger
 eğitilebilir. Sistem Spot REST mumlarını ve checksum doğrulamalı USD-M aylık arşivini

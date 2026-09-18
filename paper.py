@@ -421,6 +421,28 @@ def status_snapshot(db):
     }
 
 
+def _worker_fetch_count(db, epoch, now_ms):
+    """Combine bounded recovery windows for every policy run by the worker."""
+    fetch_count = 200
+    if epoch == 'bollinger_15m_v2':
+        import paper_v3
+        import v2_store
+        fetch_count = max(
+            1000,
+            v2_store.required_fetch_count(db, now_ms),
+        )
+        fetch_count = max(
+            fetch_count,
+            paper_v3.required_fetch_count(
+                db,
+                now_ms,
+                base_count=fetch_count,
+                max_count=v2_store.MAX_RECOVERY_FETCH_BARS,
+            ),
+        )
+    return fetch_count
+
+
 def worker():
     lock = acquire_lock()
     if lock is None:
@@ -449,13 +471,8 @@ def worker():
             try:
                 # A candle failure must not prevent current-quote protective exits.
                 try:
-                    fetch_count = 200
-                    if epoch == 'bollinger_15m_v2':
-                        import v2_store
-                        fetch_count = max(
-                            1000,
-                            v2_store.required_fetch_count(db, int(time.time() * 1000)),
-                        )
+                    fetch_count = _worker_fetch_count(
+                        db, epoch, int(time.time() * 1000))
                     rows = fetch(fetch_count)
                     candle_error = None
                 except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:

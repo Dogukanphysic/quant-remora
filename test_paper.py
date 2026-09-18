@@ -6,7 +6,7 @@ from paper import (connect, tick, get, put, check_quote, DEFAULT_BUDGETS,
                    TOTAL_PAPER_BUDGET_USD, status_snapshot, exploration_rotation,
                    EXPLORATION_STATE_KEY, EXPLORATION_HOLD_SECONDS,
                    EXPLORATION_SAMPLE_MAX_HOLD_SECONDS,
-                   control, migrate_to_bollinger)
+                   control, migrate_to_bollinger, _worker_fetch_count)
 import learning
 from strategies import BAR_MS, BAR_SECONDS, MODEL_KEYS, POLICY_ID
 
@@ -16,6 +16,14 @@ def candles(n=200):
 
 
 class PaperTests(unittest.TestCase):
+    @patch('paper_v3.required_fetch_count', return_value=1234)
+    @patch('v2_store.required_fetch_count', return_value=1100)
+    def test_worker_combines_v2_and_v3_recovery_fetch_windows(self, v2_count, v3_count):
+        self.assertEqual(
+            _worker_fetch_count(self.db, 'bollinger_15m_v2', 123_000), 1234)
+        v2_count.assert_called_once_with(self.db, 123_000)
+        self.assertEqual(v3_count.call_args.kwargs["base_count"], 1100)
+
     def test_default_portfolio_budgets_total_one_thousand(self):
         self.assertAlmostEqual(sum(DEFAULT_BUDGETS.values()), TOTAL_PAPER_BUDGET_USD)
         self.assertEqual(len(DEFAULT_BUDGETS), 6)

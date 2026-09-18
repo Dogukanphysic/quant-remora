@@ -15,20 +15,26 @@ REMORA_FEATURES = FEATURES + [
 MIN_SAMPLES = 200
 MIN_FORWARD = 60
 THRESHOLD = .55
-MODEL_SCHEMA = 4
+MODEL_SCHEMA = 5
 EXPLORATION_MODEL = 'bb15_exploration_v1'
 REMORA_MODEL = 'quant_remora_v5_forward'
 REMORA_SOURCE = 'paper_remora_v3'
 REMORA_SHADOW_SOURCE = 'paper_remora_shadow_h8'
-REMORA_PROBE_SOURCE = 'paper_remora_probe_h8'
-REMORA_HISTORICAL_SOURCE = 'historical_remora_h8'
+REMORA_PROBE_SOURCE_LEGACY = 'paper_remora_probe_h8'
+REMORA_PROBE_SOURCE_V2 = 'paper_remora_probe_h8_v2'
+REMORA_PROBE_SOURCE = REMORA_PROBE_SOURCE_V2
+REMORA_HISTORICAL_SOURCE_LEGACY = 'historical_remora_h8'
+REMORA_HISTORICAL_SOURCE_V2 = 'historical_remora_h8_v2'
+REMORA_HISTORICAL_SOURCE = REMORA_HISTORICAL_SOURCE_V2
+REMORA_EVIDENCE_HORIZON_SECONDS = 8 * 15 * 60
+REMORA_FORWARD_VALIDATION_COUNT = 30
 FORWARD_SOURCES = frozenset({
     'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE,
-    REMORA_SHADOW_SOURCE, REMORA_PROBE_SOURCE,
+    REMORA_SHADOW_SOURCE, REMORA_PROBE_SOURCE_LEGACY, REMORA_PROBE_SOURCE_V2,
 })
 EXECUTED_FORWARD_SOURCES = frozenset({
     'paper_bb15', 'paper_exploration_bb15', REMORA_SOURCE,
-    REMORA_PROBE_SOURCE,
+    REMORA_PROBE_SOURCE_LEGACY, REMORA_PROBE_SOURCE_V2,
 })
 EXTRA_COST_BUFFER = .001  # Additional 0.10% round-trip stress, beyond costs in labels.
 MIN_NET_EDGE = .0005  # 0.05% of position cost; no forced dollar target.
@@ -107,61 +113,274 @@ def is_forward(sample):
     return sample.get('source') in FORWARD_SOURCES
 
 
-def train_candidate(samples, feature_names=FEATURES):
+def _evidence_exit(sample, evidence_horizon_seconds=None):
+    if evidence_horizon_seconds is None:
+        return sample['exit_ts']
+    return sample['entry_ts'] + evidence_horizon_seconds
+
+
+def _non_overlapping_samples(samples, evidence_horizon_seconds=None):
+    """Return a maximum chronological set of globally non-overlapping labels.
+
+    The accelerated Remora stream can resolve one H8 paper outcome per 15-minute
+    bar.  Those observations are useful training rows, but eight adjacent H8
+    labels share most of the same future path.  Promotion evidence therefore
+    counts a greedy, globally non-overlapping subset instead of pretending every
+    overlapping row is an independent forward result.
+    """
+    eligible = sorted(
+        samples,
+        key=lambda sample: (
+            _evidence_exit(sample, evidence_horizon_seconds),
+            sample['entry_ts'],
+        ),
+    )
+    selected = []
+    last_exit = None
+    for sample in eligible:
+        entry = sample['entry_ts']
+        exit_ts = _evidence_exit(sample, evidence_horizon_seconds)
+        if last_exit is not None and entry < last_exit:
+            continue
+        selected.append(sample)
+        last_exit = exit_ts
+    return selected
+
+
+def _non_overlapping_count(samples, evidence_horizon_seconds=None):
+    return len(_non_overlapping_samples(samples, evidence_horizon_seconds))
+
+
+def _latest_non_overlapping_samples(samples, evidence_horizon_seconds=None):
+    """Return a non-overlapping sequence anchored on the newest evidence."""
+    selected = []
+    next_entry = None
+    for sample in sorted(
+            samples,
+            key=lambda item: (
+                item['entry_ts'],
+                _evidence_exit(item, evidence_horizon_seconds),
+            ),
+            reverse=True):
+        exit_ts = _evidence_exit(sample, evidence_horizon_seconds)
+        if next_entry is not None and exit_ts > next_entry:
+            continue
+        selected.append(sample)
+        next_entry = sample['entry_ts']
+    selected.reverse()
+    return selected
+
+
+def _validation_report(model, samples):
+    """Apply one validation contract to any chronological holdout subset."""
+    scores = [predict(model, sample['x']) for sample in samples]
+    accepted = [sample for sample in samples if assess(model, sample['x'])['accept']]
+    probability_only = [
+        sample for sample, score in zip(samples, scores) if score >= THRESHOLD
+    ]
+    base = sum(sample['net_return'] for sample in samples)
+    filtered = sum(sample['net_return'] for sample in accepted)
+    stressed = [sample['net_return'] - EXTRA_COST_BUFFER for sample in accepted]
+    stressed_mean = statistics.mean(stressed) if stressed else 0
+    stability_buffer = (
+        statistics.pstdev(stressed) / math.sqrt(len(stressed)) if stressed else 0
+    )
+    gross_win = sum(max(value, 0) for value in stressed)
+    gross_loss = -sum(min(value, 0) for value in stressed)
+    chunks = [samples[:len(samples)//2], samples[len(samples)//2:]]
+    segment_net = [
+        sum(
+            sample['net_return'] - EXTRA_COST_BUFFER
+            for sample in chunk if assess(model, sample['x'])['accept']
+        )
+        for chunk in chunks
+    ]
+    brier = (
+        sum(
+            (score - int(sample['net_return'] > 0)) ** 2
+            for score, sample in zip(scores, samples)
+        ) / len(samples)
+        if samples else None
+    )
+    baseline_brier = (
+        sum(
+            (model['base_win_rate'] - int(sample['net_return'] > 0)) ** 2
+            for sample in samples
+        ) / len(samples)
+        if samples else None
+    )
+    quality_pass = bool(
+        len(accepted) >= 10
+        and len(samples) - len(accepted) >= 5
+        and sum(stressed) > max(0, base)
+        and brier is not None
+        and baseline_brier is not None
+        and brier < baseline_brier
+        and stressed_mean > stability_buffer
+        and all(value > 0 for value in segment_net)
+    )
+    return {
+        'count': len(samples),
+        'accepted': len(accepted),
+        'probability_only_accepted': len(probability_only),
+        'probability_only_sum_trade_returns': sum(
+            sample['net_return'] for sample in probability_only),
+        'stressed_sum_trade_returns': sum(stressed),
+        'stressed_mean_trade_return': stressed_mean,
+        'stability_buffer': stability_buffer,
+        'stressed_profit_factor': gross_win / gross_loss if gross_loss else None,
+        'chronological_half_net_returns': segment_net,
+        'min_net_edge': MIN_NET_EDGE,
+        'extra_cost_buffer': EXTRA_COST_BUFFER,
+        'baseline_sum_trade_returns': base,
+        'filtered_sum_trade_returns': filtered,
+        'brier': brier,
+        'baseline_brier': baseline_brier,
+        'quality_pass': quality_pass,
+        'metric_note': (
+            'Sum of per-trade net returns, NOT portfolio return. Baseline trades '
+            'replayed; skipped-trade reentry effects excluded.'
+        ),
+    }
+
+
+def train_candidate(samples, feature_names=FEATURES, *,
+                    non_overlapping_validation=False,
+                    evidence_horizon_seconds=None,
+                    require_forward_quality=False):
     # Purge trades whose entry precedes the last training exit, even across strategies.
-    samples = sorted(samples, key=lambda s: (s['exit_ts'],s['entry_ts']))
-    forward = sum(is_forward(s) for s in samples)
-    executed_forward = sum(s.get('source') in EXECUTED_FORWARD_SOURCES for s in samples)
+    if (evidence_horizon_seconds is not None
+            and (isinstance(evidence_horizon_seconds, bool)
+                 or not isinstance(evidence_horizon_seconds, (int, float))
+                 or not math.isfinite(evidence_horizon_seconds)
+                 or evidence_horizon_seconds <= 0)):
+        raise ValueError('Evidence horizon must be positive and finite.')
+    if require_forward_quality and evidence_horizon_seconds is None:
+        raise ValueError('Forward quality requires a fixed evidence horizon.')
+    samples = sorted(
+        samples,
+        key=lambda sample: (
+            _evidence_exit(sample, evidence_horizon_seconds),
+            sample['entry_ts'],
+        ),
+    )
+    forward_samples = [s for s in samples if is_forward(s)]
+    executed_forward_samples = [
+        s for s in samples if s.get('source') in EXECUTED_FORWARD_SOURCES
+    ]
+    forward = len(forward_samples)
+    executed_forward = len(executed_forward_samples)
+    effective_forward = _non_overlapping_count(
+        forward_samples, evidence_horizon_seconds)
+    effective_executed_forward = _non_overlapping_count(
+        executed_forward_samples, evidence_horizon_seconds)
     result = {'schema':MODEL_SCHEMA, 'status':'collecting', 'sample_count':len(samples), 'forward_count':forward,
               'executed_forward_count':executed_forward,
+              'effective_forward_count':effective_forward,
+              'effective_executed_forward_count':effective_executed_forward,
               'minimum_samples':MIN_SAMPLES, 'minimum_forward_samples':MIN_FORWARD,
-              'threshold':THRESHOLD, 'model':None, 'eligible':False}
+              'threshold':THRESHOLD, 'model':None, 'eligible':False,
+              'evidence_horizon_seconds': evidence_horizon_seconds,
+              'forward_quality_pass': False,
+              'forward_validation': {'count': 0, 'quality_pass': False}}
     if len(samples) < MIN_SAMPLES:
         return result
-    split = int(len(samples)*.7)
-    train = samples[:split]
-    boundary = max(s['exit_ts'] for s in train)
-    valid = [s for s in samples[split:] if s['entry_ts'] > boundary]
+    rolling_forward = []
+    if require_forward_quality:
+        rolling_forward = _latest_non_overlapping_samples(
+            executed_forward_samples, evidence_horizon_seconds)
+    if len(rolling_forward) >= REMORA_FORWARD_VALIDATION_COUNT:
+        raw_valid = rolling_forward[-REMORA_FORWARD_VALIDATION_COUNT:]
+        holdout_start = min(sample['entry_ts'] for sample in raw_valid)
+        train = [
+            sample for sample in samples
+            if _evidence_exit(sample, evidence_horizon_seconds) <= holdout_start
+        ]
+        valid = raw_valid
+        split_mode = 'latest_executed_forward_holdout'
+    else:
+        split = int(len(samples)*.7)
+        train = samples[:split]
+        split_boundary = max(
+            _evidence_exit(sample, evidence_horizon_seconds) for sample in train)
+        raw_valid = [
+            sample for sample in samples[split:]
+            if sample['entry_ts'] >= split_boundary
+        ]
+        valid = raw_valid
+        if non_overlapping_validation:
+            valid = _non_overlapping_samples(valid, evidence_horizon_seconds)
+        split_mode = 'chronological_70_30'
+    boundary = (
+        max(_evidence_exit(sample, evidence_horizon_seconds) for sample in train)
+        if train else None
+    )
+    result.update({
+        'split_mode': split_mode,
+        'training_count': len(train),
+        'training_forward_count': sum(is_forward(sample) for sample in train),
+        'training_executed_forward_count': sum(
+            sample.get('source') in EXECUTED_FORWARD_SOURCES for sample in train),
+    })
+    pending_forward_validation = _non_overlapping_samples(
+        [
+            sample for sample in raw_valid
+            if sample.get('source') in EXECUTED_FORWARD_SOURCES
+        ],
+        evidence_horizon_seconds,
+    )
+    result['forward_validation'] = {
+        'count': len(pending_forward_validation),
+        'quality_pass': False,
+    }
     if len(valid)<30 or len({s['net_return']>0 for s in train})<2:
         result['status'] = 'insufficient_validation'
         return result
     model = fit(train, feature_names=feature_names)
-    scores = [predict(model,s['x']) for s in valid]
-    accepted = [s for s in valid if assess(model,s['x'])['accept']]
-    probability_only = [s for s,p in zip(valid,scores) if p>=THRESHOLD]
-    base = sum(s['net_return'] for s in valid)
-    filtered = sum(s['net_return'] for s in accepted)
-    stressed = [s['net_return']-EXTRA_COST_BUFFER for s in accepted]
-    stressed_mean = statistics.mean(stressed) if stressed else 0
-    stability_buffer = statistics.pstdev(stressed)/math.sqrt(len(stressed)) if stressed else 0
-    gross_win = sum(max(v,0) for v in stressed)
-    gross_loss = -sum(min(v,0) for v in stressed)
-    chunks = [valid[:len(valid)//2],valid[len(valid)//2:]]
-    segment_net = [sum(s['net_return']-EXTRA_COST_BUFFER for s in chunk if assess(model,s['x'])['accept']) for chunk in chunks]
-    brier = sum((p-int(s['net_return']>0))**2 for p,s in zip(scores,valid))/len(valid)
-    baseline_brier = sum((model['base_win_rate']-int(s['net_return']>0))**2 for s in valid)/len(valid)
-    passes = (len(accepted)>=10 and len(valid)-len(accepted)>=5
-              and sum(stressed)>max(0,base) and brier<baseline_brier
-              and stressed_mean>stability_buffer and all(v>0 for v in segment_net))
-    result.update(status='shadow', model=model,
-                  validation={'count':len(valid), 'accepted':len(accepted),
-                              'probability_only_accepted':len(probability_only),
-                              'probability_only_sum_trade_returns':sum(s['net_return'] for s in probability_only),
-                              'stressed_sum_trade_returns':sum(stressed),
-                              'stressed_mean_trade_return':stressed_mean,
-                              'stability_buffer':stability_buffer,
-                              'stressed_profit_factor':gross_win/gross_loss if gross_loss else None,
-                              'chronological_half_net_returns':segment_net,
-                              'min_net_edge':MIN_NET_EDGE, 'extra_cost_buffer':EXTRA_COST_BUFFER,
-                              'train_last_exit_ts':boundary,
-                              'validation_first_entry_ts':min(s['entry_ts'] for s in valid),
-                              'baseline_sum_trade_returns':base, 'filtered_sum_trade_returns':filtered,
-                              'brier':brier, 'baseline_brier':baseline_brier, 'quality_pass':passes,
-                              'metric_note':'Sum of per-trade net returns, NOT portfolio return. Baseline trades replayed; skipped-trade reentry effects excluded.'})
-    result['validation']['forward_count'] = sum(is_forward(s) for s in valid)
-    result['eligible'] = (passes and forward>=MIN_FORWARD
-                          and result['validation']['forward_count']>=20
-                          and executed_forward>=MIN_FORWARD)
+    validation = _validation_report(model, valid)
+    validation.update({
+        'train_last_exit_ts': boundary,
+        'validation_first_entry_ts': min(sample['entry_ts'] for sample in valid),
+        'split_mode': split_mode,
+    })
+    passes = validation['quality_pass']
+    result.update(status='shadow', model=model, validation=validation)
+    validation_forward = [s for s in valid if is_forward(s)]
+    result['validation']['forward_count'] = len(validation_forward)
+    result['validation']['effective_forward_count'] = _non_overlapping_count(
+        validation_forward, evidence_horizon_seconds)
+    forward_validation = pending_forward_validation
+    forward_report = _validation_report(model, forward_validation)
+    forward_report.update({
+        'first_entry_ts': (
+            min(sample['entry_ts'] for sample in forward_validation)
+            if forward_validation else None
+        ),
+        'last_evidence_exit_ts': (
+            max(
+                _evidence_exit(sample, evidence_horizon_seconds)
+                for sample in forward_validation
+            )
+            if forward_validation else None
+        ),
+    })
+    result['forward_validation'] = forward_report
+    result['forward_quality_pass'] = forward_report['quality_pass']
+    result['validation']['effective_executed_forward_count'] = len(
+        forward_validation)
+    result['eligible'] = (
+        passes
+        and effective_forward >= MIN_FORWARD
+        and result['validation']['effective_forward_count'] >= 20
+        and effective_executed_forward >= MIN_FORWARD
+        and (
+            not require_forward_quality
+            or (
+                len(forward_validation) >= 20
+                and result['forward_quality_pass']
+            )
+        )
+    )
     if result['eligible']:
         result['status'] = 'paper_eligible'
     result['version'] = hashlib.sha256(json.dumps(model,sort_keys=True).encode()).hexdigest()[:12]
@@ -248,7 +467,16 @@ def refresh(db, force=False):
                 if len(samples) == previous_count or len(samples) < previous_count + interval:
                     continue
             feature_names = REMORA_FEATURES if name == REMORA_MODEL else FEATURES
-            result = train_candidate(samples, feature_names=feature_names)
+            result = train_candidate(
+                samples,
+                feature_names=feature_names,
+                non_overlapping_validation=(name == REMORA_MODEL),
+                evidence_horizon_seconds=(
+                    REMORA_EVIDENCE_HORIZON_SECONDS
+                    if name == REMORA_MODEL else None
+                ),
+                require_forward_quality=(name == REMORA_MODEL),
+            )
             if name == EXPLORATION_MODEL:
                 result['label_policy'] = 'bollinger_lower_zone_protective_or_15m_timeout'
             elif name == REMORA_MODEL:

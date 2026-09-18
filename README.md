@@ -228,24 +228,44 @@ eşlenir; model yeterli ileri örnek oluşana kadar `collecting` kalır. Ayrınt
 `reports/v3-loss-analysis-20260914.md` dosyasındadır. Gerçek emir bağlantısı yoktur.
 
 Eğitimi hızlandırmak için 200 tarihsel H8 örneği tek komutla başlangıç modeline
-eklenebilir. Kaynak `historical_remora_h8` olduğu için bunlar ileri kanıt veya paper
-işlem sayılmaz. Karar anında kaydı dondurulan her `%20/%80` sermaye tetiğine,
-`%30/%70` geniş probe geçişi ve saat kapanışında StochRSI yönü en az `0,05`
-değişmişse tek bir yönlü aday
-kaydedilir. Her karar mumunda en fazla bir aday, sekiz mum sonra maliyet dahil 1
-USD'lik bağımsız paper probe olarak sonuçlandırılır. Kayıtlar
-`v3_probe_executions` ve `paper_remora_probe_h8` kaynağındadır. Böylece gerçek zaman
-bekleme sürerken long ve short sonuçları paralel toplanır; en az 60 benzersiz karar
-zamanlı ileri probe olmadan `paper_eligible` olunamaz.
+eklenebilir. Yeni kaynağın adı `historical_remora_h8_v2`'dir; bu satırlar yalnız
+geliştirme verisidir, ileri kanıt veya paper işlem sayılmaz. Legacy
+`historical_remora_h8` örnekleri backward compatibility ve eğitim için ayrı tutulur.
+Canlı kayıt politikası her kapanmış 15m mumda tam bir nedensel probe üretir. Yön
+seçiminde önce `%20/%80`, sonra `%30/%70` StochRSI geçişi kullanılır; ikisi de yoksa yalnız kapanmış mumların
+StochRSI yönü, eşitlikte ise fiyat yönü kullanılır. Aynı karar mumunda en fazla bir
+probe yazılır ve H8 sonucu sekiz mum sonra, en geç iki saatte ücret ve kayma dahil
+1 USD nominal üzerinden çözülür. Kayıtlar `v3_probe_executions` ve
+`paper_remora_probe_h8_v2` kaynağındadır. Legacy `paper_remora_probe_h8` örnekleri
+backward compatibility ve eğitim için ayrı korunur.
+
+Worker kesintiden sonra erişebildiği geçmiş mumları kronolojik sırayla evidence-only
+olarak tamamlar. Bu backfill satırlarının tamamı karar zamanından sonra yeniden
+kurulduğu için H8 sonucu henüz tamamlanmamış olsa bile pre-registered
+`executed_forward` sayılmaz. Backfill yalnız eğitim ve veri boşluğu kurtarma içindir;
+yeni forward probe sayılan tek kayıt, worker'ın canlı gözlediği en yeni fresh close
+için karar anında yazdığı kayıttır.
+
+Bu politika ham olarak en fazla 96 etiket/gün üretir. H8 pencereleri örtüştüğü için
+bu satırların tümü eğitimde kullanılabilse de model schema 5, terfi ve validation
+sayaçlarında zaman çizelgesinin tamamında çakışmayan `effective` alt kümeyi kullanır.
+Bağımsız kanıt üst sınırı yaklaşık 12/gündür; 60 effective ileri probe için teorik
+asgari süre yaklaşık beş gündür. Kronolojik validation, maliyet sonrası net avantaj,
+profit factor ve kararlılık kapıları süreyi uzatabilir veya adayı reddedebilir.
+En yeni 30 effective gerçekleşmiş ileri probe sabit bir rolling holdout olarak
+doğrulanır; daha eski ileri sonuçlar eğitim kümesine geçer. Böylece model yeni
+sonuçlardan öğrenirken tarihsel başarı kötü ileri performansı örtemez.
+`ENTRY_QUARANTINED`, risk sınırları ve gerçek emir yetkisi değişmemiştir. Bu 15m
+paper öğrenici, ayrı günlük Binance Testnet öğrenicisini ve onun açık pozisyonunu
+değiştirmez.
 
 ```powershell
 python agent.py seed-remora-history --samples 200
 ```
 
-200.000 mumluk yerel dosyada başlangıç üretimi yaklaşık 45 saniye sürer. Son 30–365
-günlük tarihsel ölçüm, saatlik yönlü adayla probe hızının yaklaşık 16/günden 34/güne
-çıktığını gösterir. Sıfırdan 60 probe yaklaşık 2 gün sürebilir; bu yalnız veri
-gelme tahminidir, validation başarısını garanti etmez.
+200.000 mumluk yerel dosyada 200 örnek ve model yenilemesi ölçümde yaklaşık 1,5
+saniye sürdü. Bu tarihsel seed canlı kanıt saatini kısaltmaz; yalnız ilk fit için
+geliştirme verisi sağlar.
 
 Binance Futures, gerçek short emri/kaldıraç, OI, funding, long/short oranı, tam order-book,
 reconciliation ve bağımsız watchdog alanları Binance bağlantısı kurulana kadar

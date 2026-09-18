@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import patch
 
 import paper_v3
+import learning
+import remora_signal
 from strategies import BAR_MS, BAR_SECONDS
 
 
@@ -165,6 +167,33 @@ class PaperV3Tests(unittest.TestCase):
         self.assertTrue(0 <= result["rsi"] <= 100)
         self.assertGreater(result["atr"], 0)
 
+    def test_decision_ignores_rows_older_than_fixed_remora_window(self):
+        history = bars(1000)
+        changed = [dict(row) for row in history]
+        for row in changed[:-remora_signal.MIN_BARS]:
+            row.update(open=500.0, high=501.0, low=499.0, close=500.0, volume=1.0)
+        self.assertEqual(
+            paper_v3.decide(history, False),
+            paper_v3.decide(changed, False),
+        )
+
+    def test_fast_historical_features_match_live_decision_contract(self):
+        historical_rows = bars(1100)
+        expected = paper_v3.decide(historical_rows[-1000:], False)
+        actual = paper_v3._historical_decision(
+            historical_rows, len(historical_rows) - 1)
+        self.assertEqual(actual["context"], expected["context"])
+        self.assertAlmostEqual(actual["atr"], expected["atr"], places=12)
+        self.assertEqual(actual["features"].keys(), expected["features"].keys())
+        for name, expected_value in expected["features"].items():
+            self.assertAlmostEqual(actual["features"][name], expected_value, places=12)
+
+    def test_historical_seed_sample_bounds_are_unchanged(self):
+        with self.assertRaisesRegex(ValueError, "200-2000"):
+            paper_v3.seed_historical_samples(self.db, self.rows, 199)
+        with self.assertRaisesRegex(ValueError, "200-2000"):
+            paper_v3.seed_historical_samples(self.db, self.rows, 2001)
+
     def test_position_size_rejects_trade_without_net_cost_edge(self):
         self.assertIsNone(paper_v3._size(100.0, 100.0, 0.05))
 
@@ -174,13 +203,13 @@ class PaperV3Tests(unittest.TestCase):
             self.rows, action="hold", strategy="no_entry", reason="hourly_probe")
         probe_decision["context"]["side"] = None
         probe_decision["context"]["probe_side"] = "long"
-        probe_decision["context"]["probe_profile"] = "hourly_stoch_direction_h8"
+        probe_decision["context"]["probe_profile"] = "closed_15m_stoch_direction_h8_v2"
         with patch("paper_v3.decide", return_value=probe_decision):
             first = paper_v3.tick(self.db, self.quote, self.rows, self.now)
         self.assertEqual(first["open_trades"], 0)
         extended = list(self.rows)
         previous = dict(extended[-1])
-        for offset in range(1, 10):
+        for offset in range(1, paper_v3.PROBE_HORIZON_BARS + 1):
             price = float(previous["close"]) + 0.05
             previous = {
                 "ts": self.rows[-1]["ts"] + offset * BAR_MS,
@@ -202,10 +231,215 @@ class PaperV3Tests(unittest.TestCase):
         self.assertEqual(state["remora_learning"]["executed_forward_count"], 1)
         self.assertEqual(state["forward_paper_probes"], 1)
         self.assertEqual(state["forward_probe_notional_usd"], 1.0)
-        source = self.db.execute(
-            "SELECT source FROM learning_samples"
+        source, detail = self.db.execute(
+            "SELECT source,detail FROM learning_samples"
+        ).fetchone()
+        self.assertEqual(source, learning.REMORA_PROBE_SOURCE_V2)
+        self.assertEqual(
+            json.loads(detail)["metadata"]["probe_profile"],
+            "closed_15m_stoch_direction_h8_v2",
+        )
+
+    def test_probe_profile_selects_legacy_or_v2_learning_source(self):
+        self.assertEqual(
+            paper_v3._probe_learning_source("hourly_stoch_direction_h8"),
+            learning.REMORA_PROBE_SOURCE_LEGACY,
+        )
+        self.assertEqual(
+            paper_v3._probe_learning_source("closed_15m_stoch_direction_h8_v2"),
+            learning.REMORA_PROBE_SOURCE_V2,
+        )
+
+    def test_recovery_backfills_each_observable_close_without_forward_leakage(self):
+        paper_v3.disable(self.db, self.now - 1)
+        first = paper_v3.tick(self.db, self.quote, self.rows, self.now)
+        first_ts = int(self.rows[-1]["ts"])
+        self.assertEqual(first["decision_records"], 1)
+
+        extended = list(self.rows)
+        for offset in range(1, 21):
+            previous = extended[-1]
+            price = float(previous["close"]) + 0.01
+            extended.append({
+                "ts": first_ts + offset * BAR_MS,
+                "open": price - 0.005, "high": price + 0.05,
+                "low": price - 0.05, "close": price, "volume": 10.0,
+            })
+        later_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        recovered = paper_v3.tick(self.db, self.quote, extended, later_now)
+        self.assertEqual(recovered["decision_records"], 21)
+        timestamps = [row[0] for row in self.db.execute(
+            "SELECT decision_ts FROM v3_paper_decisions ORDER BY decision_ts"
+        )]
+        self.assertEqual(
+            timestamps,
+            [first_ts + offset * BAR_MS for offset in range(21)],
+        )
+        evidence_only = self.db.execute(
+            "SELECT COUNT(*) FROM v3_paper_decisions "
+            "WHERE decision_ts>? AND decision_ts<? AND action='hold' "
+            "AND reason='remora_backfill_evidence_only'",
+            (first_ts, int(extended[-1]["ts"])),
         ).fetchone()[0]
-        self.assertEqual(source, "paper_remora_probe_h8")
+        self.assertEqual(evidence_only, 19)
+        self.assertEqual(recovered["shadow_training_labels"], 13)
+        self.assertEqual(recovered["forward_paper_probes"], 1)
+        source_counts = dict(self.db.execute(
+            "SELECT source,COUNT(*) FROM learning_samples GROUP BY source"
+        ).fetchall())
+        self.assertEqual(source_counts[learning.REMORA_PROBE_SOURCE_V2], 1)
+        self.assertEqual(source_counts[learning.REMORA_SHADOW_SOURCE], 12)
+
+        repeated = paper_v3.tick(self.db, self.quote, extended, later_now + 1)
+        self.assertEqual(repeated["decision_records"], 21)
+        self.assertEqual(repeated["shadow_training_labels"], 13)
+        self.assertEqual(repeated["forward_paper_probes"], 1)
+
+    def test_backfill_cannot_apply_historical_actions_to_open_capital(self):
+        with patch("paper_v3.ENTRY_QUARANTINED", False), patch(
+                "paper_v3.CAPITAL_REQUIRES_ELIGIBLE_MODEL", False), patch(
+                "paper_v3.decide", return_value=decision(self.rows)):
+            opened = paper_v3.tick(self.db, self.quote, self.rows, self.now)
+        self.assertEqual(opened["open_trades"], 1)
+        first_ts = int(self.rows[-1]["ts"])
+        extended = list(self.rows)
+        for offset in range(1, 3):
+            previous = extended[-1]
+            price = float(previous["close"])
+            extended.append({
+                "ts": first_ts + offset * BAR_MS,
+                "open": price, "high": price + 0.05, "low": price - 0.05,
+                "close": price, "volume": 10.0,
+            })
+        latest = decision(
+            extended, action="hold", strategy="manage_open", reason="latest_hold")
+        later_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        with patch("paper_v3.decide", return_value=latest):
+            recovered = paper_v3.tick(self.db, self.quote, extended, later_now)
+        self.assertEqual(recovered["open_trades"], 1)
+        self.assertEqual(recovered["execution_records"], 1)
+        historical = self.db.execute(
+            "SELECT action,reason FROM v3_paper_decisions WHERE decision_ts=?",
+            (first_ts + BAR_MS,),
+        ).fetchone()
+        self.assertEqual(historical, ("hold", "remora_backfill_evidence_only"))
+
+    def test_recent_backfill_is_never_executed_forward_evidence(self):
+        paper_v3.disable(self.db, self.now - 1)
+        paper_v3.tick(self.db, self.quote, self.rows, self.now)
+        first_ts = int(self.rows[-1]["ts"])
+
+        extended = list(self.rows)
+        for offset in range(1, 3):
+            previous = extended[-1]
+            price = float(previous["close"]) + 0.01
+            extended.append({
+                "ts": first_ts + offset * BAR_MS,
+                "open": price - 0.005, "high": price + 0.05,
+                "low": price - 0.05, "close": price, "volume": 10.0,
+            })
+        recovery_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        paper_v3.tick(self.db, self.quote, extended, recovery_now)
+
+        for offset in range(3, 11):
+            previous = extended[-1]
+            price = float(previous["close"]) + 0.01
+            extended.append({
+                "ts": first_ts + offset * BAR_MS,
+                "open": price - 0.005, "high": price + 0.05,
+                "low": price - 0.05, "close": price, "volume": 10.0,
+            })
+        later_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        paper_v3.tick(self.db, self.quote, extended, later_now)
+
+        backfill_ts = first_ts + BAR_MS
+        sample = self.db.execute(
+            "SELECT source,detail FROM learning_samples "
+            "WHERE json_extract(detail,'$.metadata.decision_ts')=?",
+            (backfill_ts,),
+        ).fetchone()
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample[0], learning.REMORA_SHADOW_SOURCE)
+        self.assertTrue(json.loads(sample[1])["metadata"]["evidence_backfilled"])
+        self.assertIsNone(self.db.execute(
+            "SELECT 1 FROM v3_probe_executions WHERE decision_ts=?", (backfill_ts,)
+        ).fetchone())
+
+    def test_recovery_fetch_count_is_bounded_and_includes_indicator_history(self):
+        last_ts = 100 * BAR_MS
+        self.db.execute(
+            "UPDATE v3_paper_state SET last_decision_ts=? WHERE id=1", (last_ts,))
+        latest_ts = last_ts + 25 * BAR_MS
+        now_ms = latest_ts + BAR_MS + 10_000
+        self.assertEqual(
+            paper_v3.required_fetch_count(self.db, now_ms),
+            remora_signal.MIN_BARS + 24,
+        )
+        self.assertEqual(
+            paper_v3.required_fetch_count(self.db, now_ms, base_count=1000),
+            1000,
+        )
+        self.assertEqual(
+            paper_v3.required_fetch_count(
+                self.db, now_ms + 20_000 * BAR_MS, base_count=1000),
+            paper_v3.MAX_RECOVERY_FETCH_BARS,
+        )
+
+    def test_one_decision_and_one_forward_label_per_closed_bar(self):
+        paper_v3.disable(self.db, self.now - 1)
+        probe_decision = decision(
+            self.rows, action="hold", strategy="no_entry", reason="every_bar_probe")
+        probe_decision["context"].update({
+            "side": None,
+            "probe_side": "short",
+            "probe_profile": "closed_15m_stoch_direction_h8_v2",
+        })
+        with patch("paper_v3.decide", return_value=probe_decision):
+            paper_v3.tick(self.db, self.quote, self.rows, self.now)
+            paper_v3.tick(self.db, self.quote, self.rows, self.now + 1)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM v3_paper_decisions").fetchone()[0], 1)
+
+        extended = list(self.rows)
+        for offset in range(1, paper_v3.PROBE_HORIZON_BARS + 1):
+            previous = extended[-1]
+            price = float(previous["close"]) - 0.01
+            extended.append({
+                "ts": self.rows[-1]["ts"] + offset * BAR_MS,
+                "open": price + 0.005, "high": price + 0.05,
+                "low": price - 0.05, "close": price, "volume": 10.0,
+            })
+        later_now = int(extended[-1]["ts"] + BAR_MS + 10_000)
+        next_decision = decision(
+            extended, action="hold", strategy="no_entry", reason="next_probe")
+        next_decision["context"].update({
+            "side": None,
+            "probe_side": "long",
+            "probe_profile": "closed_15m_stoch_direction_h8_v2",
+        })
+        with patch("paper_v3.decide", return_value=next_decision):
+            first = paper_v3.tick(self.db, self.quote, extended, later_now)
+            second = paper_v3.tick(self.db, self.quote, extended, later_now + 1)
+        self.assertEqual(first["shadow_training_labels"], 1)
+        self.assertEqual(second["shadow_training_labels"], 1)
+        self.assertEqual(second["forward_paper_probes"], 1)
+        self.assertEqual(second["remora_learning"]["forward_count"], 1)
+        self.assertEqual(second["remora_learning"]["executed_forward_count"], 1)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM v3_shadow_labels").fetchone()[0], 1)
+        self.assertEqual(
+            second["forward_probe_trigger"],
+            "every_closed_15m_bar_crossings_first_then_causal_direction_h8_v2",
+        )
+
+    def test_probe_acceleration_does_not_change_capital_or_order_authority(self):
+        state = paper_v3.status(self.db)
+        self.assertTrue(paper_v3.ENTRY_QUARANTINED)
+        self.assertEqual(paper_v3.RISK_FRACTION, 0.0015)
+        self.assertEqual(paper_v3.ALLOCATION_CAP, 0.12)
+        self.assertTrue(state["capital_requires_eligible_model"])
+        self.assertTrue(state["entry_quarantined"])
+        self.assertFalse(state["real_orders_enabled"])
 
     def test_capital_switch_fails_closed_when_quarantined(self):
         with patch("paper_v3.ENTRY_QUARANTINED", True), patch(

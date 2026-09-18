@@ -22,8 +22,7 @@ ENTRY_STOCH_LOWER = 0.20
 ENTRY_STOCH_UPPER = 0.80
 PROBE_STOCH_LOWER = 0.30
 PROBE_STOCH_UPPER = 0.70
-PROBE_SCHEDULE_BARS = 4
-PROBE_MIN_STOCH_CHANGE = 0.05
+PROBE_PROFILE_VERSION = "v2"
 
 
 def _cross_side(previous: float, current: float, lower: float, upper: float) -> str | None:
@@ -35,23 +34,37 @@ def _cross_side(previous: float, current: float, lower: float, upper: float) -> 
     return None
 
 
-def _probe_candidate(previous: float, current: float, decision_ts: int) -> tuple[str | None, str | None]:
-    """Select one pre-registered probe without duplicating a decision bar."""
+def _probe_candidate(
+    previous: float,
+    current: float,
+    previous_close: float,
+    current_close: float,
+) -> tuple[str, str]:
+    """Select exactly one causal H8 probe for a closed 15-minute bar.
+
+    Crossing directions keep priority so the accelerated label stream remains
+    comparable with the earlier sparse stream.  A non-crossing bar falls back
+    to its already-closed StochRSI direction, then to its close direction when
+    StochRSI is unchanged.  The final equality rule is deterministic and uses
+    no candle after the decision bar.
+    """
     capital_crossing = _cross_side(
         previous, current, ENTRY_STOCH_LOWER, ENTRY_STOCH_UPPER)
     if capital_crossing is not None:
-        return capital_crossing, "capital_stoch_rsi_cross_20_80_h8"
+        return capital_crossing, f"capital_stoch_rsi_cross_20_80_h8_{PROBE_PROFILE_VERSION}"
     crossing = _cross_side(
         previous, current, PROBE_STOCH_LOWER, PROBE_STOCH_UPPER)
     if crossing is not None:
-        return crossing, "stoch_rsi_cross_30_70_h8"
-    hourly_close_offset = (PROBE_SCHEDULE_BARS - 1) * BAR_MS
-    if (
-        decision_ts % (PROBE_SCHEDULE_BARS * BAR_MS) == hourly_close_offset
-        and abs(current - previous) >= PROBE_MIN_STOCH_CHANGE
-    ):
-        return ("long" if current > previous else "short"), "hourly_stoch_direction_h8"
-    return None, None
+        return crossing, f"stoch_rsi_cross_30_70_h8_{PROBE_PROFILE_VERSION}"
+    if current != previous:
+        return (
+            "long" if current > previous else "short",
+            f"closed_15m_stoch_direction_h8_{PROBE_PROFILE_VERSION}",
+        )
+    return (
+        "long" if current_close >= previous_close else "short",
+        f"closed_15m_price_direction_h8_{PROBE_PROFILE_VERSION}",
+    )
 
 
 def _ema(values: Sequence[float], period: int) -> list[float | None]:
@@ -113,12 +126,13 @@ def _session_vwap(rows: Sequence[Mapping[str, object]]) -> float:
     ) / volume
 
 
-def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """Build one explainable, look-ahead-free 1H-context/15M-trigger decision."""
-    validate_rows(rows)
+def _evaluate_from_indicators(
+    rows: Sequence[Mapping[str, object]],
+    f: Mapping[str, Sequence[float | None]],
+) -> dict[str, object]:
+    """Build a decision from already-causal RSI/ATR series."""
     if len(rows) < MIN_BARS:
         raise ValueError(f"Quant Remora needs at least {MIN_BARS} closed 15M candles.")
-    f = indicators(rows)
     i = len(rows) - 1
     hours = _complete_hours(rows)
     if len(hours) < 201:
@@ -172,7 +186,7 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     side = _cross_side(
         previous_stoch, stoch, ENTRY_STOCH_LOWER, ENTRY_STOCH_UPPER)
     probe_side, probe_profile = _probe_candidate(
-        previous_stoch, stoch, int(rows[i]["ts"]))
+        previous_stoch, stoch, previous_close, close)
     long_trigger = side == "long"
     short_trigger = side == "short"
     vwap = _session_vwap(rows)
@@ -238,8 +252,17 @@ def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
+def evaluate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Build one explainable, look-ahead-free 1H-context/15M-trigger decision."""
+    validate_rows(rows)
+    if len(rows) < MIN_BARS:
+        raise ValueError(f"Quant Remora needs at least {MIN_BARS} closed 15M candles.")
+    window = rows[-MIN_BARS:]
+    return _evaluate_from_indicators(window, indicators(window))
+
+
 __all__ = [
     "PROFILE", "MIN_BARS", "VWAP_TOLERANCE_ATR", "ENTRY_STOCH_LOWER",
     "ENTRY_STOCH_UPPER", "PROBE_STOCH_LOWER", "PROBE_STOCH_UPPER",
-    "PROBE_SCHEDULE_BARS", "PROBE_MIN_STOCH_CHANGE", "evaluate",
+    "PROBE_PROFILE_VERSION", "evaluate",
 ]

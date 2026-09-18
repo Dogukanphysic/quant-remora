@@ -277,12 +277,35 @@ geçmeden giriş olmaz. Her mumun `buy`, `sell`, `hold` veya `blocked` sonucu,
 `context_json` bileşenleri ve `feature_json` model girdileri saklanır.
 
 Başlangıç eğitimi son 60.000 mumdan zaman boyunca dağıtılmış 200 tarihsel H8 örneği
-üretir; kaynak adı bu satırların ileri sayaçlara girmesini engeller. Canlı kararda
-önceden kaydedilen her `%20/%80` sermaye tetiği, `%30/%70` geniş probe geçişi ve
-saatlik StochRSI yön adayı, H8 sonunda 1
-USD'lik bağımsız paper probe olarak `v3_probe_executions` tablosuna kapanır. Aynı
-karar mumunda en fazla bir probe yazılır. Bu yapı çakışan adayları ayrı ayrı
-ölçer; gerçek Binance short emri veya kaldıraç açmaz.
+üretir; `historical_remora_h8_v2` kaynak adı bu geliştirme satırlarının ileri
+sayaçlara girmesini engeller. Legacy `historical_remora_h8` satırları backward
+compatibility ve eğitim için ayrı saklanır. Canlı kararda her kapanmış 15m mum için
+tam bir nedensel probe önceden kaydedilir. Yön önceliği `%20/%80` StochRSI geçişi,
+`%30/%70` geniş geçiş ve
+son olarak yalnız kapanmış mumların StochRSI yönüdür; eşitlikte kapanmış mum fiyat
+yönü kullanılır. Aynı karar mumunda en fazla bir probe yazılır. H8 sonucu sekiz mum
+sonra, en geç iki saatte 1 USD nominal için ücret ve kayma dahil hesaplanarak
+`v3_probe_executions` tablosuna `paper_remora_probe_h8_v2` kaynağıyla kapanır. Legacy
+`paper_remora_probe_h8` örnekleri backward compatibility ve eğitim için ayrı korunur.
+
+Worker yeniden başladığında erişilebilir geçmiş mumları kronolojik evidence-only
+backfill eder. Bu satırların tamamı karar zamanından sonra yeniden kurulduğu için H8
+sonucu henüz tamamlanmamış olsa bile pre-registered `executed_forward` sayacını
+artırmaz. Backfill yalnız eğitim ve veri boşluğu kurtarma içindir. Yeni forward probe
+sayılan tek kayıt, worker'ın canlı gözlediği en yeni fresh close için karar anında
+yazdığı kayıttır.
+
+Ham etiket akışının üst sınırı 96/gündür. Örtüşen H8 satırları eğitimde kullanılabilir;
+model schema 5 ise terfi ve validation kanıtını bütün zaman çizelgesi üzerinde global
+olarak çakışmayan `effective` alt kümeyle ölçer. Sekiz mumluk ufuk nedeniyle bağımsız
+kanıt üst sınırı yaklaşık 12/gün, 60 effective ileri probe için teorik alt sınır
+yaklaşık beş gündür. Kalite kapıları daha uzun veri isteyebilir veya adayı reddedebilir.
+En yeni 30 effective gerçekleşmiş ileri probe rolling holdout olarak ayrılır; daha
+eski ileri sonuçlar eğitim kümesine geçer. Terfi için aynı kalite sözleşmesinin bu
+yalnız-ileri holdout üzerinde de geçmesi gerekir.
+Sermaye karantinası, risk sınırları ve gerçek emir yetkisi değişmez; gerçek Binance
+short emri veya kaldıraç açılmaz. Bu hat ayrı günlük Binance Testnet öğrenicisinin
+defterini, politikasını veya açık pozisyonunu değiştirmez.
 
 Binance public veri katmanı çalışan worker'dan ayrıdır. `binance_archive.py`, Spot
 REST veya checksum doğrulamalı Spot/USD-M aylık arşivini iç 15m CSV sözleşmesine

@@ -4,7 +4,12 @@ from pathlib import Path
 from unittest.mock import patch
 from learning import (fit,predict,train_candidate,add_sample,refresh,model_state,
                       vector,assess,is_forward,
-                      quarantine_overlong_exploration_samples)
+                      quarantine_overlong_exploration_samples,
+                      REMORA_EVIDENCE_HORIZON_SECONDS,
+                      REMORA_HISTORICAL_SOURCE_LEGACY,
+                      REMORA_HISTORICAL_SOURCE_V2,
+                      REMORA_PROBE_SOURCE_LEGACY,
+                      REMORA_PROBE_SOURCE_V2)
 from strategies import indicators, MODEL_KEYS, BAR_MS, BAR_SECONDS
 from paper import connect,tick,get
 
@@ -50,17 +55,172 @@ class LearningTests(unittest.TestCase):
         model=train_candidate(samples())
         self.assertTrue(model['eligible'])
         self.assertGreaterEqual(model['validation']['forward_count'],20)
+        self.assertEqual(model['effective_forward_count'], 200)
+
+    def test_overlapping_h8_labels_train_but_do_not_fake_forward_eligibility(self):
+        data = samples()
+        for index, sample in enumerate(data):
+            sample['entry_ts'] = index * 15 * 60
+            # Early realized exits must not manufacture extra independent H8 evidence.
+            sample['exit_ts'] = sample['entry_ts'] + 60
+            sample['source'] = REMORA_PROBE_SOURCE_V2
+        model = train_candidate(
+            data, evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS)
+        self.assertEqual(model['forward_count'], 200)
+        self.assertEqual(model['executed_forward_count'], 200)
+        self.assertEqual(model['effective_forward_count'], 25)
+        self.assertEqual(model['effective_executed_forward_count'], 25)
+        self.assertFalse(model['eligible'])
+
+    def test_remora_validation_can_be_forced_to_non_overlapping_h8_labels(self):
+        data = samples(900)
+        for index, sample in enumerate(data):
+            sample['entry_ts'] = index * 15 * 60
+            sample['exit_ts'] = sample['entry_ts'] + 8 * 15 * 60
+            sample['source'] = REMORA_PROBE_SOURCE_V2
+        raw = train_candidate(data)
+        blocked = train_candidate(
+            data,
+            non_overlapping_validation=True,
+            evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS,
+        )
+        self.assertGreater(
+            raw['validation']['count'], blocked['validation']['count'])
+        self.assertEqual(
+            blocked['validation']['count'],
+            blocked['validation']['effective_forward_count'],
+        )
 
     def test_exploration_is_forward_but_historical_is_not(self):
         self.assertTrue(is_forward({'source':'paper_bb15'}))
         self.assertTrue(is_forward({'source':'paper_exploration_bb15'}))
-        self.assertTrue(is_forward({'source':'paper_remora_probe_h8'}))
+        self.assertTrue(is_forward({'source':REMORA_PROBE_SOURCE_LEGACY}))
+        self.assertTrue(is_forward({'source':REMORA_PROBE_SOURCE_V2}))
         self.assertFalse(is_forward({'source':'paper'}))
         self.assertFalse(is_forward({'source':'historical_bb15'}))
-        self.assertFalse(is_forward({'source':'historical_remora_h8'}))
+        self.assertFalse(is_forward({'source':REMORA_HISTORICAL_SOURCE_LEGACY}))
+        self.assertFalse(is_forward({'source':REMORA_HISTORICAL_SOURCE_V2}))
         model=train_candidate(samples(source='paper_exploration_bb15'))
         self.assertEqual(model['forward_count'],200)
         self.assertGreaterEqual(model['validation']['forward_count'],20)
+
+    def test_positive_historical_mix_cannot_hide_negative_forward_validation(self):
+        data = []
+        spacing = REMORA_EVIDENCE_HORIZON_SECONDS
+        for index in range(630):
+            positive = bool(index % 2)
+            data.append({
+                'entry_ts': index * spacing,
+                'exit_ts': index * spacing + 60,
+                'source': REMORA_HISTORICAL_SOURCE_V2,
+                'x': [float(positive)] * 8,
+                'net_return': .02 if positive else -.01,
+            })
+        for offset in range(270):
+            index = 630 + offset
+            cycle = offset % 9
+            if cycle < 2:
+                source, positive_feature, net_return = (
+                    REMORA_PROBE_SOURCE_V2, True, -.01)
+            elif cycle < 5:
+                source, positive_feature, net_return = (
+                    REMORA_HISTORICAL_SOURCE_V2, True, .02)
+            else:
+                source, positive_feature, net_return = (
+                    REMORA_HISTORICAL_SOURCE_V2, False, -.01)
+            data.append({
+                'entry_ts': index * spacing,
+                'exit_ts': index * spacing + 60,
+                'source': source,
+                'x': [float(positive_feature)] * 8,
+                'net_return': net_return,
+            })
+        mixed = train_candidate(
+            data,
+            non_overlapping_validation=True,
+            evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS,
+        )
+        model = train_candidate(
+            data,
+            non_overlapping_validation=True,
+            evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS,
+            require_forward_quality=True,
+        )
+        self.assertTrue(mixed['validation']['quality_pass'])
+        self.assertTrue(mixed['eligible'])
+        self.assertEqual(model['split_mode'], 'latest_executed_forward_holdout')
+        self.assertGreaterEqual(model['forward_validation']['count'], 20)
+        self.assertFalse(model['forward_validation']['quality_pass'])
+        self.assertFalse(model['forward_quality_pass'])
+        self.assertFalse(model['eligible'])
+
+    def test_remora_rolling_holdout_trains_on_older_forward_evidence(self):
+        spacing = REMORA_EVIDENCE_HORIZON_SECONDS
+        data = []
+        for index in range(200):
+            data.append({
+                'entry_ts': index * spacing,
+                'exit_ts': index * spacing + 60,
+                'source': REMORA_HISTORICAL_SOURCE_V2,
+                'x': [float(index % 2)] * 8,
+                'net_return': .02 if index % 2 else -.01,
+            })
+        forward_start = 201 * spacing
+        for index in range(248):
+            entry = forward_start + index * 15 * 60
+            data.append({
+                'entry_ts': entry,
+                'exit_ts': entry + 60,
+                'source': REMORA_PROBE_SOURCE_V2,
+                'x': [float(index % 2)] * 8,
+                'net_return': .02 if index % 2 else -.01,
+            })
+        model = train_candidate(
+            data,
+            non_overlapping_validation=True,
+            evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS,
+            require_forward_quality=True,
+        )
+        self.assertEqual(model['split_mode'], 'latest_executed_forward_holdout')
+        self.assertEqual(model['validation']['count'], 30)
+        self.assertEqual(model['forward_validation']['count'], 30)
+        self.assertEqual(model['validation']['forward_count'], 30)
+        self.assertGreater(model['training_executed_forward_count'], 0)
+        self.assertGreater(model['training_count'], 200)
+        self.assertEqual(model['model']['train_count'], model['training_count'])
+
+    def test_legacy_and_v2_probe_rows_both_remain_executed_forward_evidence(self):
+        data = []
+        for index, source in enumerate(
+                [REMORA_PROBE_SOURCE_LEGACY, REMORA_PROBE_SOURCE_V2] * 30):
+            entry = index * REMORA_EVIDENCE_HORIZON_SECONDS
+            data.append({
+                'entry_ts': entry,
+                'exit_ts': entry + 60,
+                'source': source,
+                'x': [float(index % 2)] * 8,
+                'net_return': .02 if index % 2 else -.01,
+            })
+        model = train_candidate(
+            data, evidence_horizon_seconds=REMORA_EVIDENCE_HORIZON_SECONDS)
+        self.assertEqual(model['forward_count'], 60)
+        self.assertEqual(model['executed_forward_count'], 60)
+        self.assertEqual(model['effective_forward_count'], 60)
+        self.assertEqual(model['effective_executed_forward_count'], 60)
+
+    def test_legacy_historical_rows_stay_in_training_without_forward_credit(self):
+        data = samples(200)
+        for index, sample in enumerate(data):
+            sample['source'] = (
+                REMORA_HISTORICAL_SOURCE_LEGACY
+                if index % 2 else REMORA_HISTORICAL_SOURCE_V2
+            )
+        model = train_candidate(data)
+        self.assertEqual(model['sample_count'], 200)
+        self.assertEqual(model['model']['train_count'], 140)
+        self.assertEqual(model['forward_count'], 0)
+        self.assertEqual(model['executed_forward_count'], 0)
+        self.assertFalse(model['eligible'])
 
     def test_validation_labels_never_change_fitted_weights(self):
         data=samples()

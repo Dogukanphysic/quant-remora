@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import json
 import math
 import sqlite3
+from statistics import pstdev
 from typing import Mapping, Sequence
 
 from strategies import BAR_MS, BAR_SECONDS, FRESH_WINDOW_SECONDS, indicators
@@ -34,6 +35,7 @@ LOSS_STREAK_COOLDOWN_BARS = 8
 BREAKEVEN_ARM_NET_RETURN = 0.001
 PROBE_NOTIONAL_USD = 1.0
 PROBE_HORIZON_BARS = 8
+MAX_RECOVERY_FETCH_BARS = 10_000
 # The 200,000-candle replay was negative. After reviewing that result and the
 # fail-closed collection period, the user explicitly authorized a slightly
 # larger bounded paper trial on 2026-09-15. All loss guards remain active.
@@ -293,10 +295,45 @@ def disable(db: sqlite3.Connection, now_ms: int) -> dict[str, object] | None:
     return status(db)
 
 
+def required_fetch_count(
+    db: sqlite3.Connection,
+    now_ms: int,
+    *,
+    base_count: int | None = None,
+    max_count: int = MAX_RECOVERY_FETCH_BARS,
+) -> int:
+    """Return a bounded window that can replay every still-observable V3 close."""
+    import remora_signal
+
+    ensure_tables(db)
+    now = _now_ms(now_ms)
+    base = remora_signal.MIN_BARS if base_count is None else base_count
+    if (
+        isinstance(base, bool) or not isinstance(base, int)
+        or isinstance(max_count, bool) or not isinstance(max_count, int)
+        or base < remora_signal.MIN_BARS or max_count < base
+    ):
+        raise ValueError("Invalid V3 recovery fetch bounds.")
+    state = _read_state(db)
+    if state is None or state["last_decision_ts"] is None:
+        return base
+    latest_closed_start = (now // BAR_MS) * BAR_MS - BAR_MS
+    missed = max(
+        0,
+        (latest_closed_start - int(state["last_decision_ts"])) // BAR_MS,
+    )
+    needed = remora_signal.MIN_BARS + max(0, missed - 1)
+    return min(max_count, max(base, needed))
+
+
 def decide(rows: Sequence[Mapping[str, object]], has_position: bool) -> dict[str, object]:
     """Return one causal Quant Remora subset decision for the latest closed candle."""
     import remora_signal
     validate_rows(rows)
+    if len(rows) < remora_signal.MIN_BARS:
+        raise ValueError(
+            f"Quant Remora needs at least {remora_signal.MIN_BARS} closed 15M candles.")
+    rows = rows[-remora_signal.MIN_BARS:]
     context = remora_signal.evaluate(rows)
     f = indicators(rows)
     i = len(rows) - 1
@@ -448,6 +485,26 @@ def _encoded_context(decision: Mapping[str, object]) -> str:
     return json.dumps(context, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _record_backfill_decision(
+    db: sqlite3.Connection,
+    decision: Mapping[str, object],
+    now_ms: int,
+) -> None:
+    """Persist causal probe evidence without authorizing a historical trade."""
+    db.execute(
+        "INSERT OR IGNORE INTO v3_paper_decisions "
+        "(decision_ts,version,action,strategy,reason,close,rsi,percent_b,"
+        "bandwidth,atr,created_ts,feature_json,context_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            decision["decision_ts"], VERSION, "hold", "remora_shadow_backfill",
+            "remora_backfill_evidence_only", decision["close"], decision["rsi"],
+            decision["percent_b"], decision["bandwidth"], decision["atr"],
+            now_ms, _encoded_features(decision), _encoded_context(decision),
+        ),
+    )
+
+
 def _learning_vector(decision: Mapping[str, object]) -> list[float]:
     import learning
     features = decision.get("features")
@@ -526,6 +583,17 @@ def _shadow_net_return(side: str, entry_reference: float, exit_reference: float)
     raise ValueError("Unknown Remora shadow side.")
 
 
+def _probe_learning_source(probe_profile: object) -> str:
+    """Keep pre-deploy pending probes in their original evidence namespace."""
+    import learning
+
+    return (
+        learning.REMORA_PROBE_SOURCE_V2
+        if isinstance(probe_profile, str) and probe_profile.endswith("_v2")
+        else learning.REMORA_PROBE_SOURCE_LEGACY
+    )
+
+
 def _resolve_shadow_labels(
     db: sqlite3.Connection,
     rows: Sequence[Mapping[str, object]],
@@ -535,7 +603,8 @@ def _resolve_shadow_labels(
     import learning
     by_ts = {int(row["ts"]): index for index, row in enumerate(rows)}
     pending = db.execute(
-        "SELECT d.decision_ts,d.atr,d.feature_json,d.context_json,d.created_ts "
+        "SELECT d.decision_ts,d.atr,d.feature_json,d.context_json,d.created_ts,"
+        "d.strategy,d.reason "
         "FROM v3_paper_decisions d LEFT JOIN v3_shadow_labels s "
         "ON s.decision_ts=d.decision_ts "
         "WHERE d.version=? AND d.context_json IS NOT NULL AND s.decision_ts IS NULL "
@@ -543,11 +612,15 @@ def _resolve_shadow_labels(
         (VERSION,),
     ).fetchall()
     resolved = 0
-    for decision_ts, atr_value, feature_json, context_json, decision_created_ts in pending:
+    for (decision_ts, atr_value, feature_json, context_json, decision_created_ts,
+         decision_strategy, decision_reason) in pending:
         context = json.loads(str(context_json))
         side = (
             context.get("probe_side", context.get("side"))
             if isinstance(context, dict) else None
+        )
+        probe_profile = (
+            context.get("probe_profile") if isinstance(context, dict) else None
         )
         if side not in {"long", "short"}:
             continue
@@ -593,7 +666,14 @@ def _resolve_shadow_labels(
                     break
         net_return = _shadow_net_return(side, entry_reference, exit_reference)
         label_available_ts = int(rows[exit_index]["ts"]) + BAR_MS
-        pre_registered = int(decision_created_ts) < label_available_ts
+        evidence_backfilled = (
+            str(decision_strategy) == "remora_shadow_backfill"
+            or str(decision_reason) == "remora_backfill_evidence_only"
+        )
+        pre_registered = (
+            not evidence_backfilled
+            and int(decision_created_ts) < label_available_ts
+        )
         db.execute(
             "INSERT INTO v3_shadow_labels VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -617,14 +697,16 @@ def _resolve_shadow_labels(
         learning.ensure_tables(db)
         learning.add_sample(
             db, learning.REMORA_MODEL,
-            (learning.REMORA_PROBE_SOURCE if pre_registered
+            (_probe_learning_source(probe_profile) if pre_registered
              else learning.REMORA_SHADOW_SOURCE),
             int(rows[entry_index]["ts"]) / 1000,
             (int(rows[exit_index]["ts"]) + BAR_MS) / 1000,
             vector, net_return,
             metadata={
                 "decision_ts": int(decision_ts), "side": side,
+                "probe_profile": probe_profile,
                 "exit_reason": reason, "capital_used": False,
+                "evidence_backfilled": evidence_backfilled,
                 "paper_probe_executed": pre_registered,
                 "paper_probe_notional_usd": (
                     PROBE_NOTIONAL_USD if pre_registered else 0.0),
@@ -637,6 +719,94 @@ def _resolve_shadow_labels(
     if resolved:
         learning.refresh(db)
     return resolved
+
+
+def _historical_decision(
+    rows: Sequence[Mapping[str, object]],
+    index: int,
+) -> dict[str, object]:
+    """Compute the fixed live decision window without full rolling bands."""
+    import remora_signal
+
+    window = list(rows[index - remora_signal.MIN_BARS + 1:index + 1])
+    closes = [float(row["close"]) for row in window]
+    changes = [closes[cursor] - closes[cursor - 1]
+               for cursor in range(1, len(closes))]
+
+    def wilder(values: Sequence[float], period: int = 14) -> list[float | None]:
+        result: list[float | None] = [None] * len(values)
+        if len(values) < period:
+            return result
+        result[period - 1] = sum(values[:period]) / period
+        for cursor in range(period, len(values)):
+            previous = result[cursor - 1]
+            assert previous is not None
+            result[cursor] = (previous * (period - 1) + values[cursor]) / period
+        return result
+
+    gains = wilder([max(change, 0.0) for change in changes])
+    losses = wilder([max(-change, 0.0) for change in changes])
+    rsi: list[float | None] = [None]
+    for gain, loss in zip(gains, losses):
+        rsi.append(
+            None if gain is None else
+            50.0 if gain == loss == 0 else
+            100.0 if loss == 0 else
+            100.0 - 100.0 / (1.0 + gain / loss)
+        )
+    true_ranges = []
+    for cursor, row in enumerate(window):
+        high, low = float(row["high"]), float(row["low"])
+        true_ranges.append(
+            high - low if cursor == 0 else
+            max(high - low, abs(high - closes[cursor - 1]),
+                abs(low - closes[cursor - 1]))
+        )
+    atr = wilder(true_ranges)
+    context = remora_signal._evaluate_from_indicators(
+        window, {"rsi": rsi, "atr": atr})
+
+    current = len(window) - 1
+    close = closes[current]
+    previous_close = closes[current - 1]
+    current_prices = closes[-20:]
+    previous_prices = closes[-21:-1]
+    middle = sum(current_prices) / 20
+    previous_middle = sum(previous_prices) / 20
+    deviation = pstdev(current_prices)
+    upper, lower = middle + 2 * deviation, middle - 2 * deviation
+    width = upper - lower
+    mean_volume = sum(float(row["volume"]) for row in window[-20:]) / 20
+    open_price = float(window[current]["open"])
+    current_atr = float(atr[current])
+    current_rsi = float(rsi[current])
+    feature_values = {
+        "rsi14": current_rsi / 100,
+        "atr_fraction": current_atr / close,
+        "bollinger_percent_b": (close - lower) / width if width else 0.5,
+        "bollinger_bandwidth": width / middle if middle else 0.0,
+        "return_15m": close / previous_close - 1,
+        "return_1h": close / closes[current - 4] - 1,
+        "relative_volume": (
+            float(window[current]["volume"]) / mean_volume if mean_volume else 0.0),
+        "candle_body_fraction": (close - open_price) / open_price,
+        "middle_slope": middle / previous_middle - 1,
+        "distance_sma50": close / (sum(closes[-50:]) / 50) - 1,
+    }
+    feature_values.update({
+        str(key): _finite(value, f"remora.{key}")
+        for key, value in context["features"].items()
+    })
+    return {
+        "decision_ts": int(window[current]["ts"]),
+        "close": close,
+        "rsi": current_rsi,
+        "atr": current_atr,
+        "percent_b": feature_values["bollinger_percent_b"],
+        "bandwidth": feature_values["bollinger_bandwidth"],
+        "features": feature_values,
+        "context": context,
+    }
 
 
 def seed_historical_samples(
@@ -655,23 +825,20 @@ def seed_historical_samples(
         raise ValueError("Historical Remora seed data is too short.")
 
     # Recent history is enough for the seed and keeps the one-off command fast.
-    # Every evaluated decision still receives the same 1,000 closed bars as the
+    # Every evaluated decision receives the same fixed closed-bar window as the
     # live worker, while the source remains explicitly historical.
     analysis_rows = list(rows[-60_000:])
-    f = indicators(analysis_rows)
-    candidates = []
-    for index in range(max(999, remora_signal.MIN_BARS - 1),
-                       len(analysis_rows) - PROBE_HORIZON_BARS):
-        current = remora_signal._stoch_rsi(f["rsi"], index)
-        previous = remora_signal._stoch_rsi(f["rsi"], index - 1)
-        if current is None or previous is None:
-            continue
-        if previous <= 0.20 < current or previous >= 0.80 > current:
-            candidates.append(index)
+    # The live contract now pre-registers exactly one causal H8 probe on every
+    # closed 15-minute bar.  Sample that same bar population here; the fast
+    # decision path below selects direction from the decision-time window only.
+    candidates = list(range(
+        remora_signal.MIN_BARS - 1,
+        len(analysis_rows) - PROBE_HORIZON_BARS,
+    ))
     if not candidates:
         raise ValueError("Historical Remora seed found no trigger candidates.")
 
-    evaluation_target = min(len(candidates), math.ceil(max_samples * 1.5))
+    evaluation_target = min(len(candidates), max_samples)
     if evaluation_target == 1:
         chosen = candidates
     else:
@@ -681,10 +848,9 @@ def seed_historical_samples(
         ]
     samples = []
     for index in chosen:
-        window = analysis_rows[index - 999:index + 1]
-        decision = decide(window, False)
+        decision = _historical_decision(analysis_rows, index)
         context = decision.get("context", {})
-        side = context.get("side") if isinstance(context, Mapping) else None
+        side = context.get("probe_side") if isinstance(context, Mapping) else None
         if side not in {"long", "short"}:
             continue
         entry_index = index + 1
@@ -717,6 +883,7 @@ def seed_historical_samples(
             "entry_ts": int(analysis_rows[entry_index]["ts"]),
             "exit_ts": int(analysis_rows[exit_index]["ts"]),
             "side": side,
+            "probe_profile": context.get("probe_profile"),
             "x": _learning_vector(decision),
             "net_return": _shadow_net_return(side, entry_reference, exit_reference),
             "exit_reason": reason,
@@ -743,6 +910,7 @@ def seed_historical_samples(
                 sample["x"], sample["net_return"],
                 metadata={
                     "decision_ts": sample["decision_ts"], "side": sample["side"],
+                    "probe_profile": sample["probe_profile"],
                     "exit_reason": sample["exit_reason"], "capital_used": False,
                     "historical_replay": True, "label_horizon_bars": PROBE_HORIZON_BARS,
                     "causal_features": True,
@@ -803,7 +971,7 @@ def tick(
     rows: Sequence[Mapping[str, object]] | None,
     now_ms: int,
 ) -> dict[str, object] | None:
-    """Manage V3 protection and process at most one new closed-bar decision."""
+    """Manage current capital and backfill causal evidence for missed closes."""
     ensure_tables(db)
     now = _now_ms(now_ms)
     state = _read_state(db)
@@ -813,19 +981,40 @@ def tick(
     ask = _finite(quote.get("ask"), "quote.ask")
     if not 0 < bid <= ask:
         raise ValueError("V3 quote is invalid.")
+    if rows:
+        validate_rows(rows)
     latest_ts = int(rows[-1]["ts"]) if rows else None
     fresh = bool(
         rows and 0 <= now / 1000 - (latest_ts / 1000 + BAR_SECONDS)
         <= FRESH_WINDOW_SECONDS
     )
-    new_bar = bool(
-        fresh
-        and (state["last_decision_ts"] is None
-             or latest_ts > int(state["last_decision_ts"]))
-    )
-    decision = decide(rows, state["position"] is not None) if new_bar else None
+    decision = None
+    backfill_decisions: list[dict[str, object]] = []
+    last_decision_ts = state["last_decision_ts"]
+    if rows and (
+        last_decision_ts is None or latest_ts > int(last_decision_ts)
+    ):
+        if last_decision_ts is None:
+            # A new account anchors on one current close; pre-start history is
+            # historical research rather than forward paper evidence.
+            if fresh:
+                decision = decide(rows, state["position"] is not None)
+        else:
+            import remora_signal
+            for index in range(remora_signal.MIN_BARS - 1, len(rows)):
+                candidate_ts = int(rows[index]["ts"])
+                if candidate_ts <= int(last_decision_ts):
+                    continue
+                if index == len(rows) - 1 and fresh:
+                    # Only the current close may affect paper capital.
+                    decision = decide(rows, state["position"] is not None)
+                else:
+                    backfill_decisions.append(_historical_decision(rows, index))
     closed_result = None
     with db:
+        for backfill_decision in backfill_decisions:
+            _record_backfill_decision(db, backfill_decision, now)
+            state["last_decision_ts"] = int(backfill_decision["decision_ts"])
         shadow_labels_resolved = _resolve_shadow_labels(db, rows, now) if rows else 0
         position = state["position"]
         if position:
@@ -1125,7 +1314,9 @@ def status(db: sqlite3.Connection) -> dict[str, object] | None:
                 float(probe_counts[4]) / probe_gross_loss if probe_gross_loss else None),
             "forward_probe_notional_usd": PROBE_NOTIONAL_USD,
             "forward_probe_horizon_bars": PROBE_HORIZON_BARS,
-            "forward_probe_trigger": "stoch_rsi_cross_30_70_or_hourly_direction",
+            "forward_probe_trigger": (
+                "every_closed_15m_bar_crossings_first_then_causal_direction_h8_v2"
+            ),
             "included_in_main_1000_usd": False,
             "real_orders_enabled": False,
         }
@@ -1169,8 +1360,9 @@ __all__ = [
     "STOP_ATR", "TARGET_ATR", "MAX_HOLD_BARS", "MIN_TARGET_NET_RETURN",
     "MIN_NET_REWARD_RISK", "LOSS_COOLDOWN_BARS", "LOSS_STREAK_COOLDOWN_BARS",
     "BREAKEVEN_ARM_NET_RETURN", "PROBE_NOTIONAL_USD", "PROBE_HORIZON_BARS",
+    "MAX_RECOVERY_FETCH_BARS",
     "ENTRY_QUARANTINED", "ENTRY_QUARANTINE_REASON", "ENTRY_AUTHORIZATION",
     "CAPITAL_REQUIRES_ELIGIBLE_MODEL",
-    "ensure_tables", "enable", "disable", "decide", "tick", "status",
+    "ensure_tables", "enable", "disable", "required_fetch_count", "decide", "tick", "status",
     "learning_samples", "seed_historical_samples",
 ]
