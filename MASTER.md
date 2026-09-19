@@ -969,3 +969,11 @@ PowerShell sözdizimi, yerel modül bağımlılıkları ve hassas dosya/anahtar 
 taraması geçti. Test özeti konsola aktarılırken Windows kodlama hatası oluştu;
 kaydedilmiş test raporu doğrudan okunarak 485 testin geçtiği doğrulandı.
 Canlı süreç başlatılmadı/durdurulmadı; işlem ve eğitim defterleri yayımlanmadı.
+
+## 19 Eylül 21:58 kontrolü — model çalıştı, yürütme durdu
+20:45 karar mumunda model 4, negatif tahminle nakit hedefledi; zaman kontrolü
+geçti. Yürütme API HTTP 401 ile durdu, bekleyen niyet var; 0 kayıtlı dolum
+borsada hiçbir dolum olmadığını tek başına kanıtlamaz. Son bakiye kaydı eskidir.
+Sayısal/sansürlü API hata tanısı ve kullanıcıya ReconcileOnly başlatıcı seçeneği
+eklendi; yeni emir veya otomatik yeniden başlatma yapılmadı. 28 ilgili test geçti.
+Sıradaki adım kullanıcının aynı anahtarla emir sorgulama çıktısını paylaşmasıdır.

@@ -78,3 +78,17 @@ En az 200 etiketle eğitim başlar; her yeni tamamlanmış etikette yenilenir. G
 Ctrl+C varlığı satmaz. `halted` doluysa nedeni inceleyin; defteri silmeyin. `pending` varsa emir sonucu uzlaştırılmadan yeni emir açılmaz. `reconcile --live` yalnız sonuç sorgular, haltı kendiliğinden kaldırmaz.
 
 19 Eylül zaman hatası düzeltmesi model ve tahmin damgalarını aynı borsa/monoton saatine bağlar. Eski reddedilmiş mum kaydı status içinde kalabilir; yeni mumdaki `latest_candle_decision` kontrol edilmelidir. Düzeltmenin yüklenmesi için kullanıcı normal yeniden başlatma komutunu çalıştırır.
+
+## Bekleyen emir sorgulama — worker başlatmadan
+
+HTTP hatası sonrası `pending` doluysa aşağıdaki komut yalnız borsadaki aynı
+emri ve dolumlarını sorgular, bulunan sonucu yerel deftere işler. Yeni emir
+göndermez ve haltı kaldırmaz. Aynı API anahtarı kullanılmalıdır.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -ReconcileOnly
+```
+
+HTTP hata mesajı artık yalnız sayısal Binance kodunu ve sabit açıklamayı
+gösterir; ham yanıt/anahtar/imzalı URL yazılmaz. `-2013` bulunamadı cevabı
+bekleyen niyeti otomatik silmez; sonuç incelenmeden yeniden emir gönderilmez.

@@ -122,8 +122,26 @@ class Client:
             with self.opener.open(request,timeout=15) as response:
                 return json.load(response)
         except HTTPError as exc:
-            # Never include signed URL, API response or credentials in logs.
-            raise RuntimeError(f'API HTTP {exc.code}; no automatic order retry') from None
+            # Only a numeric exchange code and local fixed descriptions are safe.
+            code = None
+            try:
+                body = json.loads(exc.read(8192))
+                candidate = body.get('code') if isinstance(body,dict) else None
+                if type(candidate) is int and -99999 <= candidate < 0:
+                    code = candidate
+            except Exception:
+                pass
+            finally:
+                exc.close()
+            hints = {-2015:'Check API key, allowed IP and Spot trading permissions',
+                     -2014:'Invalid API key format', -1022:'Invalid request signature',
+                     -1021:'Request timestamp outside allowed window',
+                     -2013:'Order not found; pending record retained for review',
+                     -1002:'Request not authorized'}
+            detail = f'; Binance code {code}' if code is not None else ''
+            if code in hints:
+                detail += '; '+hints[code]
+            raise RuntimeError(f'API HTTP {exc.code}{detail}; no automatic order retry') from None
         except Exception:
             raise RuntimeError('API transport/response failure; order outcome may be unknown') from None
 

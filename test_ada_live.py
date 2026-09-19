@@ -1,10 +1,11 @@
 import copy
+import io
 from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import ada_live as a
 
 
@@ -42,6 +43,26 @@ class Fake:
 
 
 class LiveTests(unittest.TestCase):
+    def test_http_error_exposes_code_not_secrets(self):
+        client = object.__new__(a.Client)
+        client.opener = Mock()
+        error = a.HTTPError('https://example.invalid/?signature=PRIVATE',401,'PRIVATE',{},
+                            io.BytesIO(b'{"code":-2015,"msg":"PRIVATE"}'))
+        client.opener.open.side_effect = error
+        with self.assertRaises(RuntimeError) as caught:
+            client.request('GET','time')
+        self.assertIn('Binance code -2015',str(caught.exception))
+        self.assertNotIn('PRIVATE',str(caught.exception))
+        self.assertEqual(client.opener.open.call_count,1)
+    def test_http_non_json_error_is_sanitized(self):
+        client = object.__new__(a.Client)
+        client.opener = Mock()
+        client.opener.open.side_effect = a.HTTPError('https://example.invalid/',401,'PRIVATE',{},
+                                                    io.BytesIO(b'<html>PRIVATE</html>'))
+        with self.assertRaises(RuntimeError) as caught:
+            client.request('GET','time')
+        self.assertIn('API HTTP 401',str(caught.exception))
+        self.assertNotIn('PRIVATE',str(caught.exception))
     def test_new_key_preserves_allocation_and_audits_old_state(self):
         a.initialize(self.db,self.client,self.client.market())
         old=a.read(self.db)

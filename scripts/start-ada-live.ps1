@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
-      [switch]$ModelDecisions)
+      [switch]$ModelDecisions, [switch]$ReconcileOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -10,6 +10,9 @@ $secretSecure = $null
 $apiPointer = [IntPtr]::Zero
 $secretPointer = [IntPtr]::Zero
 $previousEncoding = $env:PYTHONIOENCODING
+if ($ReconcileOnly -and ($CheckOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
+    throw 'ReconcileOnly yalniz Interval/PythonPath ile kullanilir; emir gondermez.'
+}
 $modelArgs = @()
 if ($ModelDecisions) {
     if ($Interval -ne '15m' -or $CheckOnly) { throw 'ModelDecisions yalniz -Interval 15m ile baslatilir.' }
@@ -19,8 +22,9 @@ if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
 }
 try {
-    if ($CheckOnly) {
-        Write-Host 'SALT OKUNUR TANILAMA: Emir gonderilmez, durmus agent yeniden baslatilmaz.'
+    if ($CheckOnly -or $ReconcileOnly) {
+        Write-Host 'EMIR GONDERILMEZ; durmus agent yeniden baslatilmaz.'
+        if ($ReconcileOnly) { Write-Host 'Bekleyen emir borsadan sorgulanir; bulunan dolumlar yerel defterle uzlastirilir. Halt kaldirilmaz.' }
         $confirmation = '294 ADA ILE GERCEK ISLEM BASLAT'
     }
     else {
@@ -49,6 +53,9 @@ try {
     $env:PYTHONIOENCODING = 'utf-8'
     if ($CheckOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') diagnose --live --interval $Interval
+    }
+    elseif ($ReconcileOnly) {
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') reconcile --live --interval $Interval
     }
     else {
         if ($NewKey) {
