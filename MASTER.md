@@ -985,3 +985,10 @@ OrderCheckOnly eklendi: aynı hesap bağına ve mevcut tahsise göre güncel
 parametrelerle order/test kullanır; gerçek emir göndermez ve defteri değiştirmez.
 İlgili 31 çevrimdışı test ve PowerShell sözdizimi kontrolü geçti. Kullanıcı test
 çıktısı bekleniyor; gerçek emir yolu yeniden başlatılmadı.
+
+## 19 Eylül — işlem yetkisi doğrulandı, kurtarma hazır
+Kullanıcı OrderCheckOnly çıktısında ok:true, SELL bildirdi. İlk HTTP 401 niyeti
+için RecoverUnsentOnly eklendi. Kimlik, tahsis, yakın zaman aralığı, iki -2013
+sorgusu, boş allOrders/myTrades ve açık emir kontrolünden sonra denetim kaydıyla
+kurtarır; yeni emir veya worker başlatması yapmaz. 35 ilgili test geçti.
+Gerçek hesapta kurtarma araçlarla çalıştırılmadı; kullanıcı komutu gereklidir.

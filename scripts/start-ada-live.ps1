@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
-      [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly)
+      [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
+      [switch]$RecoverUnsentOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -10,6 +11,9 @@ $secretSecure = $null
 $apiPointer = [IntPtr]::Zero
 $secretPointer = [IntPtr]::Zero
 $previousEncoding = $env:PYTHONIOENCODING
+if ($RecoverUnsentOnly -and ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
+    throw 'RecoverUnsentOnly yalniz Interval/PythonPath ile kullanilir.'
+}
 if ($OrderCheckOnly -and ($CheckOnly -or $ReconcileOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
     throw 'OrderCheckOnly yalniz Interval/PythonPath ile kullanilir; gercek emir gondermez.'
 }
@@ -25,8 +29,9 @@ if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
 }
 try {
-    if ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly) {
+    if ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly) {
         Write-Host 'EMIR GONDERILMEZ; durmus agent yeniden baslatilmaz.'
+        if ($RecoverUnsentOnly) { Write-Host 'Ilk HTTP 401 emrinin yoklugu ve dolum olmamasi dogrulanirsa kayit arsivlenir; yeni baslatma ayridir.' }
         if ($OrderCheckOnly) { Write-Host 'Binance order/test: islem yetkisi ve parametre kontrolu; gercek emir/defter degisikligi yok.' }
         if ($ReconcileOnly) { Write-Host 'Bekleyen emir borsadan sorgulanir; bulunan dolumlar yerel defterle uzlastirilir. Halt kaldirilmaz.' }
         $confirmation = '294 ADA ILE GERCEK ISLEM BASLAT'
@@ -63,6 +68,9 @@ try {
     }
     elseif ($OrderCheckOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') order-check --live --interval $Interval
+    }
+    elseif ($RecoverUnsentOnly) {
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') recover-unsent --live --interval $Interval
     }
     else {
         if ($NewKey) {

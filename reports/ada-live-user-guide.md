@@ -106,3 +106,21 @@ Aynı anahtar gerekir. Binance `POST /api/v3/order/test` kullanılır; matching
 engine'e emir gönderilmez, yerel defter değiştirilmez, agent başlatılmaz.
 Başarı, bekleyen eski emrin durumunu veya gelecekteki dolumu garanti etmez.
 Sonuçtaki hata koduyla yetki/IP/imza/filtre sorunu ayrıştırılır.
+
+## İlk 401 hatalı, borsada bulunmayan emir için kurtarma
+
+OrderCheckOnly başarılı olduktan sonra, aynı anahtarla:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -RecoverUnsentOnly
+```
+
+Bu kullanıcı komutu yalnız ilk tahsisteki tek, dolumsuz SELL niyetini ele alır.
+HTTP 401 haltı, aynı hesap/strateji, 294 ADA ve sıfır USDT şarttır. Yakın dönem
+(1 dakikadan eski, 24 saatten yeni) emir iki kez -2013 ile bulunamamalı;
+allOrders/myTrades sorguları boş, açık emirler boş ve 294 ADA serbest olmalıdır.
+Herhangi bir belirsizlikte durum değişmez. Başarılıysa eski durum recoveries
+tablosunda ve sonuç orders kaydında korunur; niyet/halt temizlenir.
+Gerçek emir göndermez ve worker başlatmaz. Eski satış talebi yeniden oynatılmaz.
+Yalnız ok:true görüldükten sonra normal -Interval 15m -ModelDecisions başlatması
+kullanıcı tarafından yapılır; yeni karar güncel mum/veri üzerinden verilir.

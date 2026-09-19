@@ -31,6 +31,13 @@ STEP_SECONDS = 14400
 MODEL_DECISIONS = False
 
 
+class ApiError(RuntimeError):
+    def __init__(self, message, status, code):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
 def configure_interval(interval):
     global INTERVAL, STEP_SECONDS, CONTRACT
     if interval not in ('4h', '15m'):
@@ -103,7 +110,7 @@ class Client:
         self.opener = build_opener(NoRedirect())
 
     def request(self, method, path, params=None, signed=False):
-        reads = {'time','exchangeInfo','ticker/bookTicker','klines','account','account/commission','openOrders','order','myTrades'}
+        reads = {'time','exchangeInfo','ticker/bookTicker','klines','account','account/commission','openOrders','order','myTrades','allOrders'}
         if not (method=='GET' and path in reads or method=='POST' and path in {'order','order/test'}):
             raise ValueError('Unsupported API operation')
         values = dict(params or {})
@@ -141,7 +148,7 @@ class Client:
             detail = f'; Binance code {code}' if code is not None else ''
             if code in hints:
                 detail += '; '+hints[code]
-            raise RuntimeError(f'API HTTP {exc.code}{detail}; no automatic order retry') from None
+            raise ApiError(f'API HTTP {exc.code}{detail}; no automatic order retry',exc.code,code) from None
         except Exception:
             raise RuntimeError('API transport/response failure; order outcome may be unknown') from None
 
@@ -292,6 +299,61 @@ def check_trade_permission(client, path=DB):
     except Exception as exc:
         report.update(ok=False,reason=type(exc).__name__)
     return report
+
+
+def recover_unsent(db, client):
+    """User-run recovery of the first rejected sell only; never submits an order."""
+    s = read(db)
+    if not s or s['identity']!=client.identity or s['contract']!=CONTRACT:
+        raise ValueError('Account/strategy binding mismatch')
+    if (not s['pending'] or not s['halted'] or s['filled_orders'] or
+            dec(s['ada'])!=CAP or dec(s['usdt'])!=0 or s['phase']!='long' or
+            not s.get('halt_reason','').startswith('API HTTP 401;')):
+        raise ValueError('Recovery is limited to the initial unfilled sell rejected with HTTP 401')
+    records = db.execute('SELECT request,response,applied FROM orders').fetchall()
+    if len(records)!=1 or records[0][1] is not None or records[0][2]:
+        raise ValueError('Order history requires manual reconciliation')
+    intent = json.loads(records[0][0])
+    if intent['client_id']!=s['pending'] or intent['side']!='SELL':
+        raise ValueError('Unexpected pending intent')
+    now = int(client.request('GET','time')['serverTime'])
+    start = int(dec(intent['created'])*1000)-60000
+    if not 120000 <= now-start < 86400000:
+        raise ValueError('Recovery requires an intent aged 1 minute to less than 24 hours')
+    def require_absent():
+        try:
+            client.lookup(intent)
+        except ApiError as exc:
+            if exc.status==400 and exc.code==-2013:
+                return
+            raise
+        raise ValueError('Order exists; use ReconcileOnly')
+    require_absent()
+    if client.open_orders():
+        raise ValueError('Open ADA orders prevent recovery')
+    for endpoint in ('allOrders','myTrades'):
+        history = client.request('GET',endpoint,dict(symbol=SYMBOL,startTime=start,endTime=now,limit=1000),True)
+        if not isinstance(history,list) or history:
+            raise ValueError('Nonempty or invalid ADA history requires manual reconciliation')
+    free = balances(client.account())
+    if free.get('ADA',Decimal(0)) < CAP:
+        raise ValueError('Initial ADA allocation is unavailable')
+    require_absent()
+    proof = dict(kind='verified_absent_initial_401',checked_ms=now,
+                 history_start_ms=start,order_queries_absent=2,
+                 all_orders_count=0,trades_count=0,orders_submitted=0)
+    previous = json.dumps(s)
+    s.update(pending=None,halted=None,exit_requested=False,stopped=True,
+             last_recovery=proof)
+    s.pop('halt_reason',None)
+    with db:
+        db.execute('CREATE TABLE IF NOT EXISTS recoveries(id INTEGER PRIMARY KEY,client_id TEXT,previous_state TEXT,evidence TEXT)')
+        db.execute('INSERT INTO recoveries(client_id,previous_state,evidence) VALUES (?,?,?)',
+                   (intent['client_id'],previous,json.dumps(proof)))
+        db.execute('UPDATE orders SET applied=1,response=? WHERE client_id=?',
+                   (json.dumps(proof),intent['client_id']))
+        write(db,s)
+    return dict(ok=True,orders_submitted=0,recovered_client_id=intent['client_id'],worker_started=False)
 
 
 def initialize(db, client, market):
@@ -472,7 +534,7 @@ def tick(db,client):
             side='SELL'; s['exit_requested']=True
     elif fresh and market['enter'] and 0 <= market['now']-market['bar']/1000-STEP_SECONDS <= 300:
         side='BUY'
-    s.update(last_bar=market['bar'],last_poll=market['now'],
+    s.update(last_bar=market['bar'],last_poll=market['now'],stopped=False,
              marked_equity_usdt=str(dec(s['usdt'])+dec(s['ada'])*bid))
     s['marked_pnl_from_activation_usdt'] = str(dec(s['marked_equity_usdt'])-dec(s['initial_mark_usdt']))
     intent = size(s,market,side,rates[side]) if side else None
@@ -513,7 +575,7 @@ def singleton(path):
 def main():
     global MODEL_DECISIONS
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check'])
+    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent'])
     parser.add_argument('--live',action='store_true')
     parser.add_argument('--new-key',action='store_true')
     parser.add_argument('--interval',choices=['4h','15m'],default='4h')
@@ -548,6 +610,8 @@ def main():
     with singleton(DB.with_suffix('.lock')):
         db=connect()
         try:
+            if args.action=='recover-unsent':
+                print(json.dumps(recover_unsent(db,client),indent=2)); return
             if args.migrate_interval:
                 migrate_interval(db,client)
             if args.new_key:
