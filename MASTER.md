@@ -1,5 +1,133 @@
 # Yerel Kripto Trader Agent — Ana Proje Belgesi
 
+## Güncel özet — 19 Eylül 2026
+
+ADA mainnet yerelde 15m karar süresine geçirildi; kullanıcı `-ModelDecisions` ile deneysel ridge karar yetkisini açtı. 4h ve 15m öğrenme defterleri ayrı. Emir defteri, 294 ADA tahsisi ve mevcut pozisyonun stop/hedefi korunur. Model yetkisi kârlılık kanıtı değildir; geçersiz/güncel olmayan tahminde EMA/ATR karar yolu kullanılır. Son zaman damgası düzeltmesi 26 çevrimdışı testten geçti; bu testler canlı dolum veya kârlılık kanıtı değildir.
+
+Güncel teknik kaynak: [model sözleşmeleri](docs/CURRENT_MODELS.md), [ADA işletim kılavuzu](reports/ada-live-user-guide.md). Bu doküman yayını yeni yerel kodun tamamının GitHub'a yayımlandığı anlamına gelmez. Çalışma durumu yalnız taze yerel kayıtla doğrulanır.
+
+## Tarihsel karar günlüğü
+
+Aşağıdaki kayıtlar tarih sırasındaki kararları korur. Önceki “4h”, “henüz açılmadı” ve benzeri durumlar güncel özetin yerine geçmez.
+
+**19 Eylül kullanıcı kontrollü ADA canlı kodu:** Kullanıcının kendi başlatması
+için `ada_live.py` ve `scripts/start-ada-live.ps1` hazırlandı. Kodda gerçek Spot
+emir desteği vardır; hazırlama sırasında çalıştırılmadı, gerçek emir gönderilmedi.
+294 ADA tahsisi, yalnız satış gelirini yeniden kullanma, LIMIT IOC fiyat sınırı,
+kalıcı emir niyeti ve belirsiz POST sonrası tekrar göndermeden uzlaştırma uygulanır.
+Günlük risk/hacim durdurması yoktur; başlangıç sermayesinin tamamı risk altındadır.
+ADA öğrenici ayrı defterde veri toplar/eğitilir, canlı kararları sabit 4h strateji
+verir. İşletim ve sınırlamalar: `reports/ada-live-user-guide.md`.
+
+**19 Eylül ADA mainnet hazırlığı:** Kullanıcı 294 ADA sermaye ve tamamına kadar
+risk tercihi belirtti. `config/ada-mainnet-readonly.json` yalnız tercihi kaydeder;
+emir kontrolü uyguladığı iddia edilmez. `ada_mainnet_readonly.py` public ADAUSDT
+fiyatını/filtrelerini okur; hesap veya emir API'si içermez. 19:09 Türkiye saati
+public kontrolünde piyasa TRADING, bid 0,227 USDT, beyan edilen 294 ADA'nın
+masraf öncesi gösterge değeri 66,738 USDT. Hesap bakiyesi doğrulanmadı.
+Gerçek emir gönderilmedi, otomatik gerçek işlem etkinleştirilmedi. 3 test geçti.
+Mevcut BTC Testnet ve 4h paper süreçleri ADA canlı işleme dönüştürülmedi.
+
+**19 Eylül 15m geçiş hazırlığı:** Kullanıcı saatlik yerine 15 dakikalık Testnet
+kararı ve öğrenme istedi. `BINANCE_TESTNET_DECISION_INTERVAL=15m` desteği eklendi;
+24 saat momentum geçmişi 96 tamamlanmış 15m mum aralığına çevrildi. 15 USDT
+giriş limiti ve mevcut pozisyon/ledger korunur; yeniden başlatma satış yapmaz.
+Eski policy id ledger sürekliliği için korunur; yeni karar feature_schema/interval
+ve cadence_contract alanları değişikliği açıkça kaydeder. Saatlik ve 15m
+öğrenme farklı SQLite dosyalarında, farklı model sürümleriyle tutulur.
+36371 tamamlanmış tarihsel 15m etiket yüklendi; son 3000 örnekle fit yapıldı.
+Her yeni kapanmış 15m sonuçta yeniden eğitim, günde en fazla 96 yeni örnek.
+109 test geçti. 19 Eylül 14:26 kontrolünde aktivasyon doğrulandı: worker çalışıyor,
+hata/bekleyen emir yok; 0,00018 BTC pozisyon ve 14,6304 USDT maliyet korundu.
+Son karar `btc_15m_causal_v1`, `hold_long`, automatic_authority etkin,
+decision_owner `momentum_fallback`. 15m öğrenici son 3000 örnekle eğitilmiş;
+doğrulama kapısı geçilmediği için öğrenilen model henüz karar sahibi değil.
+Kullanıcı `scripts/enable-15m-testnet.ps1` komutuyla geçişi yaptı. Karar kaydında
+`decision_interval=15m` görülmesi çalışan sürümün doğrulamasıdır; sorgulayan
+oturumun interval alanı tek başına kanıt değildir. Saatlik veriler 15m kanıtı sayılmaz.
+
+**19 Eylül otomatik model yetkisi:** Kullanıcı Testnet öğrenicisine otomatik karar
+yetkisi istedi. `hourly_model_authority.py` uygulandı: en az 200 kontrol örneği,
+20 pozitif tahminle kabul edilmiş proxy, pozitif kabul edilen ortalama net getiri
+ve sabit ortalamadan düşük MSE gerektirir. Bunlar Testnet deney kapılarıdır;
+ileri kârlılık veya gerçek para terfisi değildir. Model digest'i ve karar mumuyla
+eşleşen önceden kayıtlı tahmini doğrulanır. Model uygunsa long/nakit kararını
+devralır; değilse momentum çalışır. Boyut/endpoint/emir uzlaştırma modeli yönetmez.
+Yetki çalışan worker'a henüz yüklenmedi: yerel anahtar oturumunda
+`scripts/enable-hourly-model-authority.ps1` ile yeniden başlatma gerekir.
+Mevcut pozisyon/defter korunur. `caller_env_automatic_model_authority` yalnız
+durum sorgulayan oturumun bayrağıdır; çalışan süreçteki yetkinin kanıtı değildir.
+Etkin kararın kanıtı worker_decisions.feature_json içindeki automatic_authority,
+decision_owner, model_id ve model_digest alanlarıdır.
+
+**19 Eylül saatlik Testnet:** Kullanıcı aktivasyon istedi. Ayrı 1h/24h momentum
+politikası, 15 USDT giriş ve saatlik challenger hazırlandı. Geçmiş 8939 etiket
+yüklendi (fit penceresi 3000). Anahtar yalnız kullanıcının yerel oturumunda
+alındı ve 19 Eylül 14:03 kontrolünde aktivasyon doğrulandı. Günlük worker durdu,
+eski pozisyon +0,60082230 USDT gerçekleşmiş Testnet P&L ile kapandı. Saatlik
+worker çalışıyor, hata/bekleyen emir yok; ilk alım 0,00018 BTC, maliyet 14,6304 USDT.
+Saatlik öğrenme model 2'ye güncellendi; 8998 tamamlanmış geçmiş/backfill örneğinin
+son 3000'i kullanılıyor. Henüz tamamlanmış ileri saatlik kanıt değildir.
+Geçiş günlük takipli pozisyonu kayıtlı operatör çıkışıyla kapatır, flat teyidinden
+sonra ayrı ledger'ı başlatır. İşletim: `reports/hourly-testnet-activation.md`.
+
+**19 Eylül hızlı 4h öğrenme:** `trend4h_learning.py` ayrı ridge getiri challenger'ıdır.
+Binance Spot geçmişinden 2081 tamamlanmış örnekle ilk eğitim hemen yapıldı.
+Her yeni tamamlanmış 4h etikette tekrar eğitim; kesintisiz akışta günde 6 örnek.
+İşlem açılması gerekmez. Hedef, sonraki 4h kapanış getirisinin tek yön %0,25
+maliyet varsayımıyla düzeltilmiş araştırma karşılığıdır; gerçek işlem sonucu
+ve mevcut 48 mum stop/hedef politikasının P&L'ı değildir.
+Geçmiş, geriden tamamlanan veri ve zamanında gözlenen örnekler ayrı tutulur.
+İleri tahmin önce model kimliğiyle kaydedilir, sonuç daha sonra mühürlenir.
+Son 3000 etiketin ilk %80'inde eğitim, bir örnek ara, son %20'de tanısal kontrol
+vardır. Tekrarlanan kontrol bağımsız terfi kanıtı sayılmaz. Model otomatik olarak
+emir yetkisi almaz; sabit paper stratejisi işlem yapmaya devam eder.
+İlk model kontrol MSE 0,000052503, sabit ortalama 0,000051520; daha iyi değil.
+Eğitim defteri `state/trend4h-learning.sqlite3`; paper durumunda `learning` alanı.
+
+**18 Eylül 4h aktivasyon:** Kullanıcı isteğiyle `trend4h_paper.py` ayrı 1000 USD
+sanal defterli ileri deneme olarak başlatıldı. Testnet günlük pilotundan bağımsızdır;
+negatif araştırma sonucu değişmedi, kârlılık terfisi değildir. İşletim sözleşmesi:
+`reports/trend4h-forward-activation.md`. Durum: `python trend4h_paper.py status`.
+
+**18 Eylül Spot maliyet denetimi:** `spot_cost_audit.py` sabit 4h kuralını nakit
+ve başlangıçta %20 tahsisli al-tut ile karşılaştırdı. Binance Spot geçmişinde
+40 işlem: maliyetsiz +3,35 USD; her yönde %0,15 maliyetle -8,82 USD;
+%0,25 maliyetle -15,35 USD (1000 USD başlangıç). %0,15 senaryosunda al-tut
+-75,84 USD; nakit 0. Ortalama pozisyon/risk eşit değildir. Aday terfi ettirilmedi.
+Kaynak ve sonuç: `reports/spot-cost-audit-20260918T173631467550Z/`.
+Public `exchangeInfo` ve emir defteri alındı; hesaba özel komisyon ve gerçekleşmiş
+kayma bilinmiyor. Güncel filtreler tarihsel simülasyona uygulanmadı; araştırma
+sonucu emir uygulanabilirliğinin tamamlandığı anlamına gelmez.
+
+**18 Eylül araştırma değerlendirmesi:**
+`reports/research-assessment-20260918.md` deneylerin ortak karar kaydıdır.
+Son rejim filtresi reddedildi; aynı BTC 15m olaylarında ek parametre araması
+yerine önce Spot maliyet/yürütme varsayımları ve ortak referans karşılaştırması
+doğrulanmalıdır. Günlük Testnet pilotu kârlılığı doğrulanmış model değildir.
+
+## 18 Eylül ek araştırma: piyasa koşulu filtresi
+
+`regime_research.py` 4h dengeli trend stratejisinin girişlerini altı koşula ayırır:
+yükselen/düşen/yatay yönlü verimlilik ve yüksek/düşük ATR oynaklığı. Oynaklık
+medyanı ve kabul listesi yalnız ilk %60 geliştirme verisinden öğrenilir;
+model dosyası sonraki %20 kontrol sonuçları hesaplanmadan önce yazılır.
+Bu geçmiş veri ve temel strateji daha önce incelendiğinden bağımsız ileri kanıt değildir.
+
+Geliştirme işlemlerinde yatay/düşük oynaklık grubu -20,20 USD,
+yükselen/düşük oynaklık +19,57 USD verdi. İkinci grup filtreye seçildi.
+Ancak filtreli strateji baştan yürütüldüğünde geliştirme +1,89 USD,
+kontrol -11,71 USD oldu (1000 USD sermaye, her yönde %0,25 maliyet).
+Kontrolde temel strateji +7,48 USD idi; filtreli PF 0,802 ve üç alt dönemin
+tamamı negatif. Filtre reddedildi, son dönem/Binance testine ve yürütmeye taşınmadı.
+İşlem listesinden iyi grubu seçmek yeniden yürütmenin sonucuyla aynı değildir:
+filtre pozisyon zamanlamasını ve sonraki uygun girişleri de değiştirir.
+
+Kayıt: `reports/regime-study-20260918T172835094316Z/REPORT.md`.
+Nedensellik, eğitim sınırı ve yetersiz örnek davranışı dahil 11 araştırma testi geçti.
+Testnet kontrolünde worker çalışıyor, hata yok, açık miktar 0,00013000 BTC;
+gerçekleşmiş P&L 0 ve kapanmış tur 0. Bunlar kârlılık kanıtı değildir.
+
 **Proje:** Bitstamp BTC/USD 15 dakikalık yerel sanal işlem agent'ı  
 **Aktif politika:** `bollinger_15m_v2`  
 **Çalışma türü:** Yalnız sanal işlem ve gölge öğrenme  
@@ -413,6 +541,11 @@ paper veya gerçek sermayeye geçirilmedi.
 
 ## 11. Sermaye ve risk politikası
 
+18 Eylül 2026: Kullanıcının Testnet risk artışı isteği için sonraki girişleri
+10 yerine 15 USDT yapan operatör seçeneği etkinleştirildi. Kullanıcının yeniden
+başlatmasının ardından worker çalışıyor, giriş ayarı 15 USDT ve hata yok.
+Komut, kapsam ve kontroller: `reports/testnet-sizing-20260918.md`.
+
 Altı defterin toplam nominal başlangıcı 1.000 USD'dir. V2 geçişi defterleri sıfırlamaz.
 
 | Defter | V2 rolü |
@@ -761,6 +894,29 @@ tam otomatik test paketi **367/367** geçti.
 
 ## 18. Kaynaklar
 
+### 2026-09-18: Strateji araştırmasının yeniden değerlendirilmesi
+
+`strategy_research.py` bağımsız, emir göndermeyen araştırma motorudur. 200.000
+Bitstamp 15m mumundan 1h/4h mum üretir; trend, kanal kırılması ve trend içi
+geri çekilme ailelerinde toplam 12 sabit adayı karşılaştırır. Sinyal kapanışta,
+giriş sonraki açılışta; çift bariyer temasında stop önce, iki yönde maliyet vardır.
+Referans sermaye 1000 USD, tahsis tavanı %20, planlanan stop riski %0,25'tir.
+Gap nedeniyle gerçekleşen zarar planlanan stop riskini aşabilir.
+
+Sonuç: 12 adaydan hiçbiri geliştirme ve seçim kapılarını birlikte geçmedi.
+4h dengeli trend adayının seçim getirisi +%0,74845 (83 işlem), PF 1,07513;
+geliştirme PF 1,00317 ve seçim alt dönemlerinin yalnız 1/3'ü pozitiftir.
+Dolayısıyla bu sonuç kârlı model kanıtı değildir. Seçim eşiği düşürülmedi;
+aday seçilmediği için son %20 dönem ve Binance karşılaştırması çalıştırılmadı.
+Geçmiş veri daha önce incelenmiştir; yeni dokunulmamış/ileri kanıt sayılmaz.
+Sözleşme, kaynak hashleri, tüm adaylar ve sonuç:
+`reports/strategy-reset-20260918T165355Z/`.
+
+Testnet günlük momentum pilotu ayrı olarak çalışmaya devam ediyor; açık
+0,00013000 BTC pozisyonu, 0 kapanmış tur ve 0 gerçekleşmiş P&L mevcut.
+Yeni giriş tutarı 15 USDT; araştırma motoru aktif politikayı değiştirmez.
+
+
 - [John Bollinger — Bollinger Band Rules](https://www.bollingerbands.com/bollinger-band-rules)
 - [Bitstamp — API Documentation](https://www.bitstamp.net/api/)
 - [Meta-labeling ve triple barrier](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3257419)
@@ -772,3 +928,30 @@ tam otomatik test paketi **367/367** geçti.
 
 Kaynaklar yöntem tasarımını destekler; bu projedeki eşikler ve ölçülen sonuçlar
 yerel araştırmaya aittir. Hiçbir kaynak bu agent'ın gelecekte kârlı olacağını söylemez.
+
+## 2026-09-19 ADA 15m geçiş hazırlığı
+Kullanıcı 15 dakikalık strateji istedi. ada_live.py ve start-ada-live.ps1 artık
+-Interval 15m -MigrateInterval ile kullanıcı tarafından geçişi destekliyor.
+Çalışan canlı süreç araçla durdurulmadı/başlatılmadı; gerçek defter değiştirilmedi.
+Geçiş singleton kilidi altında aynı hesap anahtarını, sağlıklı defteri ve bekleyen
+emir olmamasını denetler. Bakiye, emir geçmişi ve mevcut stop/hedef korunur;
+önceki durum interval_changes tablosunda saklanır. Yeni EMA/ATR sinyalleri 15m;
+60 saniye kontrol, 192 saat azami tutma ve 294 ADA sermaye sınırı korunur.
+15m öğrenme ayrı ada-live-15m-learning.sqlite3 dosyasında; model karar yetkisi yok.
+Canlıya geçirmek için reports/ada-live-user-guide.md içindeki kullanıcı komutu gerekir.
+
+## 2026-09-19 deneysel model kararı ve zaman damgası düzeltmesi
+Kullanıcı -Interval 15m -ModelDecisions ile deneysel model kararlarını açtı.
+ada_model_decisions.py güncel mumun tahminini, model özetini ve nedensel zaman
+sıralamasını doğrular. Pozitif tahmin al/tut, sıfır/negatif tahmin sat/nakit;
+stop/hedef önceliklidir. Kârlılık doğrulanmış değildir; seçenek varsayılan kapalıdır.
+20:35 durum kontrolünde emir sayısı 0, 294 ADA, model 3, 2 gözlenen etiket vardı.
+Tahminin veri çekme zamanını, modelin eğitim bitiş zamanını kullanması nedeniyle
+model kararları invalid_or_unavailable_model ile reddediliyordu. ADA artık borsa
+zamanına monoton geçen süre ekleyen ortak clock kullanır: model eğitim sonunda,
+tahmin hesaplandıktan sonra damgalanır, değerlendirme güncel aynı saatle yapılır.
+Eski kayıtlar değiştirilmedi; geriye dönük tahmin/işlem oluşturulmadı. Kullanıcının
+aynı -Interval 15m -ModelDecisions komutuyla yeniden başlatması gerekir.
+26 test geçti: eğitim gecikmesi, gelecek/eski tahmin reddi, bozuk özet reddi,
+negatif model satış kararı, pozitif modelin stopu geçersiz kılamaması ve önceki
+sermaye/uzlaştırma testleri. Canlı yeniden başlatma araçla yapılmadı.

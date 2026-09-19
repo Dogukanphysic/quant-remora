@@ -1,4 +1,62 @@
-# Yerel Kripto Trader Agent — V2 Mimari
+# Quant Remora — sistem mimarisi
+
+**Güncelleme: 19 Eylül 2026.** Güncel model sözleşmeleri [CURRENT_MODELS.md](docs/CURRENT_MODELS.md) içinde; aşağıdaki yeni mimari bölümü, devamındaki tarihsel V2 açıklamalarından ayrıdır. Yeni uygulama dosyalarının bir kısmı henüz GitHub kod yayınına dahil değildir.
+
+## Güncel ADA 15m veri ve emir yolu
+
+```mermaid
+flowchart TD
+    U[Kullanıcının yerel başlatması] --> W[ada_live.py: tek süreç kilidi]
+    B[Binance public Spot: kapalı 15m mumlar] --> F[EMA20/50/200 ve ATR]
+    F --> L[ADA'ya özel ridge öğrenici]
+    L --> LD[(ada-live-15m-learning.sqlite3)]
+    LD --> M[ada_model_decisions: zaman ve model özeti kontrolü]
+    F --> R[EMA/ATR temel karar]
+    M --> D[Seçenek açıksa model; yoksa temel karar]
+    R --> D
+    D --> G[Stop/hedef, tahsis, bakiye, komisyon ve filtre kontrolleri]
+    W --> G
+    G --> I[(ada-live.sqlite3: POST öncesi emir niyeti)]
+    I --> X[Binance Spot mainnet LIMIT IOC]
+    X --> Q[Emir ve myTrades dolum uzlaştırması]
+    Q --> I
+```
+
+- Testnet ve paper istemcileri/defterleri ADA mainnet yürütme yolundan ayrıdır.
+- Anahtarlar kullanıcı başlatıcısının süreç ortamında; durum çıktısı anahtar içermez.
+- 15m geçişi aynı kilit altında yapılır. Pozisyon, maliyet referansı, emir geçmişi ve mevcut stop/hedef korunur; eski durum `interval_changes` içinde saklanır.
+- `pending` emir yeniden POST edilmez. Durumu sorgulanıp dolumlar uzlaştırılır; belirsiz veya tutarsız durumda yürütme durur.
+- 4h ve 15m eğitim ayrı SQLite dosyalarında tutulur. Ortak öğrenici ADA için özel modül örneğiyle yüklenir; BTC/paper global ayarları değiştirilmez.
+- Model ve tahmin kayıtları borsa zamanı + monoton geçen süre üzerinden sıralanır. Eğitim bitişi ≤ tahmin oluşturma ≤ karar kontrolü; model etiket sonu karar mumunun kapanışını aşamaz.
+- Yerel kilit iki ayrı bilgisayarı koordine etmez. Aynı tahsisi yöneten ikinci canlı kopya çalıştırılmamalıdır.
+
+## Karar ve öğrenme gözlenebilirliği
+
+`model_decisions_enabled` açılış seçeneğini, `latest_candle_decision.owner` son yeni mumun gerçek karar kaynağını belirtir. `decision` ve `learning.decision_authority` mevcut kontrol döngüsüne aittir; yeni mum olmayan döngüde `false`/`ema_atr` görülmesi seçeneğin kapandığı anlamına gelmez. `halted`, `pending`, `last_poll`, `filled_orders` ayrıca izlenir.
+
+## Tarihsel mimari ve araştırma kayıtları
+
+Aşağıdaki bölümler kendi tarihindeki paper/Testnet bileşenlerini anlatır. “Gerçek emir yok”, “aktif V2” ve “otomatik yetki yok” ifadeleri tüm projeyi değil, ilgili eski hattı tanımlar.
+
+## 19 Eylül: 4h hızlı challenger eğitimi
+
+`trend4h_paper.run` → kapalı Binance Spot mumları → `trend4h_learning.update`.
+Örnekler timestamp ile tekilleştirilir. Ardışık sonraki mum kapanmadan etiket
+üretilmez. Ridge regresyonu 200 etiketle başlayabilir; her yeni etiket sonrası
+yenilenir. Geçmiş bootstrap ilk beklemeyi kaldırır. Model sürümleri, standartlaştırma
+parametreleri, kontrol metrikleri ve önceden yapılmış tahminler ayrı SQLite
+dosyasında saklanır. Eğitim hatası açık paper pozisyonunun yönetimini engellemez.
+Bu bir araştırma challenger'ıdır; otomatik strateji aktivasyonu yoktur.
+
+## 18 Eylül: çevrimdışı koşul öğrenme deneyi
+
+`regime_research.py` → `strategy_research.py` simülatörü → zaman damgalı araştırma raporu.
+İlk %60 veride koşul istatistikleri ve oynaklık medyanı öğrenilir; sözleşme,
+kaynak SHA256 ve dondurulan filtre dosyası kaydedilir. Sonraki %20'de filtre
+yeniden eğitilmeden temel stratejiyle ve %0 nakit referansıyla karşılaştırılır.
+Geçerse son dönem ve Binance spot kontrolü açılır. Başarı bile otomatik emir
+yetkisi vermez; yeni ileri kanıt gerekir. Modül worker durumuna veya aktif
+politikaya yazmaz. Son deney başarısızdır ve filtre etkinleştirilmemiştir.
 
 **Belge tarihi:** 14 Eylül 2026
 

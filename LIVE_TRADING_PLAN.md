@@ -1,5 +1,15 @@
 # Gerçek para geçiş ve riskle öğrenme planı
 
+## Güncel durum — 19 Eylül 2026
+
+Yerel uygulamada ayrı ADAUSDT mainnet yürütme yolu vardır; kullanıcı tarafından 15m ve deneysel model karar seçeneğiyle başlatılmıştır. Bu, aşağıdaki eski Remora paper terfi koşullarının başarıyla geçildiği anlamına gelmez. Kârlılık henüz doğrulanmamıştır. Ayrıntılar: [model sözleşmeleri](docs/CURRENT_MODELS.md) ve [ADA kılavuzu](reports/ada-live-user-guide.md).
+
+294 ADA tahsisi, ek USDT kullanmama, kaldıraç/short/para çekme olmaması, kalıcı emir niyeti ve dolum uzlaştırması uygulanır. Günlük zarar/hacim kesicisi yoktur. Yerel stop/hedef uygulama/ağ kesilince çalışmaz. Yeni kod dosyalarının bir kısmı bu doküman commit'inden ayrı yayımlanmayı bekler.
+
+## Önceki Remora paper geçiş planı (tarihsel)
+
+Aşağıdaki “gerçek emir kapalı” ve terfi eşikleri, eski Remora paper hattının sözleşmesidir. ADA'nın deneysel kullanıcı yetkisi bu eşiklerin başarı kanıtı olarak sayılmaz.
+
 **Güncel aşama:** Quant Remora ayrı 100 USD sanal hesapta kullanıcı yetkili mikro risk  
 **Gerçek emir:** Kapalı ve henüz uygulanmadı  
 **Yetki kaydı:** `user_authorized_higher_forward_paper_risk_2026-09-15`

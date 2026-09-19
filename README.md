@@ -1,24 +1,48 @@
-# Yerel BTC/USD sanal işlem agent'ı
+# Quant Remora — kripto araştırma, Testnet ve ADA Spot agent'ı
 
-**Belge tarihi:** 14 Eylül 2026
+**Güncelleme: 19 Eylül 2026.** Proje artık birden fazla bağımsız yürütme ve öğrenme hattı içeriyor. Ortamlar, sermaye defterleri ve model yetkileri birbirinden ayrıdır.
 
-Bu proje Bitstamp'ın herkese açık BTC/USD verisini kullanarak 15 dakikalık Bollinger
-adaylarını araştırır ve yerel bir sanal hesapta izler. Aktif politika
-`bollinger_15m_v2`'dir. Sistem API anahtarı kullanmaz, borsaya emir göndermez ve gerçek
-paraya erişmez.
+| Hat | Veri / karar süresi | Öğrenme ve karar yetkisi | Emir ortamı |
+|---|---|---|---|
+| ADAUSDT | Binance Spot, 15m mum; 60 saniye kontrol | EMA20/50/200 + ATR; kullanıcı açarsa deneysel ridge model kararı | Binance Spot **mainnet / gerçek para** |
+| BTCUSDT Testnet | Binance public Spot, 15m karar; 24 saat momentum bağlamı | Ayrı ridge aday; doğrulama kapılı model yetkisi, aksi hâlde momentum | Binance Spot Testnet |
+| BTC 4h paper | Binance Spot, 4 saatlik mum | Sabit trend stratejisi; ridge öğrenici yalnız araştırma | Yerel sanal defter |
+| Bollinger V2/V3 ve Remora | Bitstamp/Binance araştırma veri yolları, çoğunlukla 15m | Eski deneyler, gölge modeller ve paper doğrulama | Araştırma / sanal |
 
-V2'nin amacı her Bollinger temasında işlem açmak değildir. Bollinger kuralları iki
-aday olay üretir; lojistik meta-model bu olayları puanlar. Tarihsel kanıt yeterince
-sağlam olmadığı için model şu anda `shadow` durumundadır ve normal sermayeyi
-kullanamaz. İleriye dönük veri toplamak için keşif açıksa aynı anda yalnız bir çok
-küçük sanal deneme açılabilir.
+**Yayın kapsamı:** Bu doküman güncellemesi yerel çalışma alanında hazırlanmış yeni modelleri de kapsar. ADA ve hızlı öğrenme uygulamasının bazı kod dosyaları bu doküman yayını sırasında henüz ayrı bir kod commit'i olarak yayımlanmadı. Temiz GitHub klonunda ilgili dosyalar yoksa aşağıdaki yeni komutlar çalışmaz. Belgelenmiş özellik, yayımlanmış sürüm veya çalışan süreç kanıtı değildir.
 
-Proje kararlarının kalıcı kaydı [MASTER.md](MASTER.md), bileşenler ve veri akışı
-[ARCHITECTURE.md](ARCHITECTURE.md), araştırma sonucu ise
-[reports/bollinger-v2-research.md](reports/bollinger-v2-research.md) içindedir. Yedi
-model ailesinin karşılaştırması
-[reports/bollinger-v2-model-family-benchmark.md](reports/bollinger-v2-model-family-benchmark.md)
-belgesinde özetlenir.
+## Güncel belgeler
+
+- [Modeller, eğitim ve karar yetkisi](docs/CURRENT_MODELS.md)
+- [ADA canlı kullanım ve yeniden başlatma](reports/ada-live-user-guide.md)
+- [Mimari ve veri akışı](ARCHITECTURE.md)
+- [Ana proje kaydı ve tarihçe](MASTER.md)
+- [Canlı ortam sınırları ve eski geçiş planı](LIVE_TRADING_PLAN.md)
+
+## ADA 15m — yerel kullanıcı komutları
+
+Komutlar proje klasöründe çalıştırılır. Yalnız mevcut yerel sürümde ilgili dosyalar bulunuyorsa kullanılabilir.
+
+```powershell
+# Salt okunur durum; anahtar veya emir gerektirmez
+python ada_live.py status
+
+# Hesap, komisyon, piyasa ve açık emir kontrolü; emir göndermez
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -CheckOnly
+
+# GERÇEK EMİR: kullanıcı onayı ve yerel anahtar girişi ister
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -ModelDecisions
+```
+
+Onay cümlesi: `294 ADA ILE GERCEK ISLEM BASLAT`. Yeniden başlatmadan önce eski ADA penceresini Ctrl+C ile durdurun. `-NewKey` rutin yeniden başlatma seçeneği değildir. 4h defterinden ilk geçiş için kullanıcı kılavuzundaki `-MigrateInterval` adımını izleyin.
+
+Model karar seçeneği kârlılık kapısını geçtiği anlamına gelmez: kullanıcı tarafından açılan deneysel yetkidir. Zamanı/sürümü/özeti geçerli pozitif tahmin AL/TUT, sıfır veya negatif tahmin SAT/NAKİT hedefi üretir. Stop/hedef önceliklidir. Geçerli güncel tahmin yoksa EMA/ATR yolu kullanılır. Her 15 dakikada işlem yapılacağı garanti edilmez.
+
+294 ADA tahsisi; yalnız bu varlığın satış gelirinden yeniden alım; başka hesap USDT'si kullanılmaz. Günlük zarar/hacim kesicisi yoktur. Stop/hedef sunucuya bırakılmış emirler değil, yerel uygulama kontrolleridir. PC, internet ve PowerShell açık; uyku/hibernasyon kapalı olmalıdır. Piyasa değerindeki değişim gerçekleşmiş işlem kârı değildir.
+
+## Tarihsel Bollinger / paper kılavuzu
+
+Aşağıdaki bölüm 14–17 Eylül paper hattını belgeler. Buradaki aktif politika, gölge durum ve emir yetkisi ifadeleri yalnız o hatta aittir; ADA mainnet için geçerli değildir.
 
 ## Hızlı kullanım
 
