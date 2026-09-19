@@ -124,3 +124,15 @@ tablosunda ve sonuç orders kaydında korunur; niyet/halt temizlenir.
 Gerçek emir göndermez ve worker başlatmaz. Eski satış talebi yeniden oynatılmaz.
 Yalnız ok:true görüldükten sonra normal -Interval 15m -ModelDecisions başlatması
 kullanıcı tarafından yapılır; yeni karar güncel mum/veri üzerinden verilir.
+
+
+## 20 Eylül — tahsisli bakiyenin tamamını kullanma seçeneği
+Kullanıcı kâr ayırmadan toplam yönetilen bakiyeyle devam etmek istedi.
+`-UseAllAllocatedFunds` (`--use-all-allocated-funds`) sonraki alımlarda 294 ADA
+adet tavanını kaldırır; yalnız yerel defterdeki USDT (kazançlar dahil) harcanabilir.
+İlk tahsis 294 ADA olarak kalır; hesapta başka amaçla tutulan varlıklar eklenmez.
+Seçenek varsayılan kapalıdır, açık modla çalışmış defter aynı seçenekle yeniden
+başlatılmalıdır. Bu değişiklik mevcut bakiye uyuşmazlığını otomatik düzeltmez.
+`-CheckOnly` artık ADA/USDT free, locked, tracked ve shortfall alanlarını gösterir.
+Bakiye farkı doğrulanana kadar halt kaldırılmadı ve canlı yeniden başlatılmadı.
+37 ilgili test geçti. Yetki/anahtar/bakiye korumaları sürer.

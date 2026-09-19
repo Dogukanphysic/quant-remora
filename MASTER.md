@@ -992,3 +992,15 @@ için RecoverUnsentOnly eklendi. Kimlik, tahsis, yakın zaman aralığı, iki -2
 sorgusu, boş allOrders/myTrades ve açık emir kontrolünden sonra denetim kaydıyla
 kurtarır; yeni emir veya worker başlatması yapmaz. 35 ilgili test geçti.
 Gerçek hesapta kurtarma araçlarla çalıştırılmadı; kullanıcı komutu gereklidir.
+
+
+## 20 Eylül — tahsisli bakiyenin tamamını kullanma seçeneği
+Kullanıcı kâr ayırmadan toplam yönetilen bakiyeyle devam etmek istedi.
+`-UseAllAllocatedFunds` (`--use-all-allocated-funds`) sonraki alımlarda 294 ADA
+adet tavanını kaldırır; yalnız yerel defterdeki USDT (kazançlar dahil) harcanabilir.
+İlk tahsis 294 ADA olarak kalır; hesapta başka amaçla tutulan varlıklar eklenmez.
+Seçenek varsayılan kapalıdır, açık modla çalışmış defter aynı seçenekle yeniden
+başlatılmalıdır. Bu değişiklik mevcut bakiye uyuşmazlığını otomatik düzeltmez.
+`-CheckOnly` artık ADA/USDT free, locked, tracked ve shortfall alanlarını gösterir.
+Bakiye farkı doğrulanana kadar halt kaldırılmadı ve canlı yeniden başlatılmadı.
+37 ilgili test geçti. Yetki/anahtar/bakiye korumaları sürer.

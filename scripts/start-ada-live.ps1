@@ -2,7 +2,7 @@
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
       [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
-      [switch]$RecoverUnsentOnly)
+      [switch]$RecoverUnsentOnly, [switch]$UseAllAllocatedFunds)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -21,9 +21,10 @@ if ($ReconcileOnly -and ($CheckOnly -or $NewKey -or $MigrateInterval -or $ModelD
     throw 'ReconcileOnly yalniz Interval/PythonPath ile kullanilir; emir gondermez.'
 }
 $modelArgs = @()
+if ($UseAllAllocatedFunds) { $modelArgs += '--use-all-allocated-funds' }
 if ($ModelDecisions) {
     if ($Interval -ne '15m' -or $CheckOnly) { throw 'ModelDecisions yalniz -Interval 15m ile baslatilir.' }
-    $modelArgs = @('--model-decisions')
+    $modelArgs += '--model-decisions'
 }
 if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
@@ -39,6 +40,7 @@ try {
     else {
     Write-Host 'BINANCE MAINNET: Bu betigi calistirmaniz GERCEK ADA/USDT emirleri baslatabilir.'
     Write-Host '294 serbest ADA ayrilir. Hesaptaki diger USDT kullanilmaz. Tum ayrilan sermaye risk altindadir.'
+    if ($UseAllAllocatedFunds) { Write-Host 'Tahsisli USDT ve kazanclarin tamami kullanilabilir; sonraki alimlarda 294 ADA adet tavani yoktur. Baska hesap bakiyeleri eklenmez.' }
     Write-Host "Ilk dongude satis olabilir. $Interval mum stratejisi, 60 saniye kontrol. Kar garantisi yoktur."
     if ($ModelDecisions) { Write-Host 'DENEYSEL MODEL KARARLARI: Karlilik dogrulanmadi. Pozitif tahmin AL/TUT, diger tahmin SAT/NAKIT. Stop/hedef onceliklidir.' }
     if ($MigrateInterval) { Write-Host 'Eski pencereyi Ctrl+C ile durdurun. Bakiye ve mevcut stop/hedef korunarak 15m gecisi yapilir.' }
@@ -64,7 +66,7 @@ try {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') diagnose --live --interval $Interval
     }
     elseif ($ReconcileOnly) {
-        & $PythonPath (Join-Path $projectRoot 'ada_live.py') reconcile --live --interval $Interval
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') reconcile --live --interval $Interval @modelArgs
     }
     elseif ($OrderCheckOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') order-check --live --interval $Interval

@@ -29,6 +29,7 @@ CONFIRM = '294 ADA ILE GERCEK ISLEM BASLAT'
 INTERVAL = '4h'
 STEP_SECONDS = 14400
 MODEL_DECISIONS = False
+USE_ALL_ALLOCATED_FUNDS = False
 
 
 class ApiError(RuntimeError):
@@ -250,10 +251,34 @@ def fee_rates(data):
     return rates
 
 
-def diagnose(client):
+def allocation_snapshot(client, path=None):
+    path = DB if path is None else path
+    account = client.account()
+    free = balances(account)
+    items = {r['asset']:r for r in account['balances']}
+    s = None
+    if path.exists():
+        db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+        try:
+            s = read(db)
+        finally:
+            db.close()
+    if s and s['identity']!=client.identity:
+        raise ValueError('Account binding mismatch')
+    rows = {}
+    for asset,field in [('ADA','ada'),('USDT','usdt')]:
+        available = free.get(asset,Decimal(0))
+        tracked = dec(s[field]) if s else Decimal(0)
+        rows[asset] = dict(free=str(available),locked=str(dec(items.get(asset,{}).get('locked','0'))),
+                           tracked=str(tracked),shortfall=str(max(Decimal(0),tracked-available)))
+    return dict(assets=rows,allocation_available=all(dec(r['shortfall'])==0 for r in rows.values()),
+                ledger_present=bool(s))
+
+
+def diagnose(client, check_allocation=True):
     """Read-only checks. Never calls submit or mutates the trading ledger."""
     report = {'orders_submitted':0,'checks':{}}
-    checks = [('account',lambda: balances(client.account())),
+    checks = [('account',lambda: allocation_snapshot(client) if check_allocation else balances(client.account())),
               ('commission',lambda: fee_rates(client.commission())),
               ('market',client.market),
               ('open_orders',lambda: not bool(client.open_orders()))]
@@ -261,6 +286,9 @@ def diagnose(client):
         try:
             value = check()
             report['checks'][name] = {'ok': value is not False}
+            if name=='account' and check_allocation:
+                report['allocation'] = value
+                report['checks']['allocated_balance'] = {'ok':value['allocation_available']}
         except (ValueError,RuntimeError) as exc:
             report['checks'][name] = {'ok':False,'reason':str(exc)}
         except Exception as exc:
@@ -386,7 +414,7 @@ def prepare_new_key(db,client):
         raise ValueError('New-key shortcut requires an untouched 294 ADA allocation')
     if db.execute('SELECT COUNT(*) FROM orders').fetchone()[0]:
         raise ValueError('Existing order history requires separate account reconciliation')
-    report=diagnose(client)
+    report=diagnose(client,check_allocation=False)
     (ROOT/'reports/ada-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     if not all(check['ok'] for check in report['checks'].values()):
         reasons=[name+': '+check.get('reason','check failed') for name,check in report['checks'].items() if not check['ok']]
@@ -412,8 +440,12 @@ def size(s,market,side,rate):
         raise ValueError('Missing quantity/price steps')
     # IOC caps limit price and never reserves more than tracked capital + fees.
     price = grid(dec(market['ask'])*Decimal('1.001') if side=='BUY' else dec(market['bid'])*Decimal('.999'),tick,side=='BUY')
-    available = (min(CAP-dec(s['ada']),dec(s['usdt'])/(price*(1+rate))) if side=='BUY'
-                 else dec(s['ada'])/(1+rate))
+    if side=='BUY':
+        available = dec(s['usdt'])/(price*(1+rate))
+        if not USE_ALL_ALLOCATED_FUNDS:
+            available = min(CAP-dec(s['ada']),available)
+    else:
+        available = dec(s['ada'])/(1+rate)
     qty = grid(min(available,dec(lot['maxQty'])),step)
     if price <= 0 or qty <= 0 or qty < dec(lot['minQty']):
         return None
@@ -473,7 +505,7 @@ def settle(db,client):
         if quote+Decimal('.00000001') < qty*dec(intent['price']):
             raise ValueError('Sell execution below limit')
         ada -= qty+fees['ADA']; usdt += quote-fees['USDT']
-    if ada < 0 or usdt < 0 or ada > CAP:
+    if ada < 0 or usdt < 0 or (not USE_ALL_ALLOCATED_FUNDS and ada > CAP):
         raise ValueError('Fill violates allocated capital')
     s.update(ada=str(ada),usdt=str(usdt),pending=None,filled_orders=s['filled_orders']+int(qty>0))
     with db:
@@ -484,6 +516,8 @@ def settle(db,client):
 
 def tick(db,client):
     existing = read(db)
+    if existing and existing.get('use_all_allocated_funds') and not USE_ALL_ALLOCATED_FUNDS:
+        raise ValueError('Restart with --use-all-allocated-funds to preserve allocation mode')
     if existing and existing['identity']!=client.identity:
         raise ValueError('Account binding mismatch')
     if existing and existing['pending']:
@@ -535,6 +569,7 @@ def tick(db,client):
     elif fresh and market['enter'] and 0 <= market['now']-market['bar']/1000-STEP_SECONDS <= 300:
         side='BUY'
     s.update(last_bar=market['bar'],last_poll=market['now'],stopped=False,
+             use_all_allocated_funds=USE_ALL_ALLOCATED_FUNDS,
              marked_equity_usdt=str(dec(s['usdt'])+dec(s['ada'])*bid))
     s['marked_pnl_from_activation_usdt'] = str(dec(s['marked_equity_usdt'])-dec(s['initial_mark_usdt']))
     intent = size(s,market,side,rates[side]) if side else None
@@ -573,7 +608,7 @@ def singleton(path):
 
 
 def main():
-    global MODEL_DECISIONS
+    global MODEL_DECISIONS, USE_ALL_ALLOCATED_FUNDS
     parser=argparse.ArgumentParser()
     parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent'])
     parser.add_argument('--live',action='store_true')
@@ -581,9 +616,11 @@ def main():
     parser.add_argument('--interval',choices=['4h','15m'],default='4h')
     parser.add_argument('--migrate-interval',action='store_true')
     parser.add_argument('--model-decisions',action='store_true')
+    parser.add_argument('--use-all-allocated-funds',action='store_true')
     args=parser.parse_args()
     configure_interval(args.interval)
     MODEL_DECISIONS = args.model_decisions
+    USE_ALL_ALLOCATED_FUNDS = args.use_all_allocated_funds
     if MODEL_DECISIONS and (args.interval!='15m' or args.action!='run'):
         raise ValueError('Experimental model decisions require run --interval 15m')
     if args.migrate_interval and (args.action!='run' or args.new_key):

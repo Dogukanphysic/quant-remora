@@ -66,3 +66,15 @@ python -m unittest test_ada_model_decisions test_ada_live test_trend4h_learning
 ```
 
 19 Eylül son kontrol: 26 test geçti. Eğitim gecikmesi/zaman sırası, eski/gelecek tahmin reddi, bozuk model özeti, negatif tahminde çıkış, stop önceliği, tahsis ve uzlaştırma kapsanır. Testler sahte hesap/veri ve geçici veritabanı kullanır; gerçek emir göndermez. Bu sayı tüm proje testlerinin sonucu değildir.
+
+
+## 20 Eylül — tahsisli bakiyenin tamamını kullanma seçeneği
+Kullanıcı kâr ayırmadan toplam yönetilen bakiyeyle devam etmek istedi.
+`-UseAllAllocatedFunds` (`--use-all-allocated-funds`) sonraki alımlarda 294 ADA
+adet tavanını kaldırır; yalnız yerel defterdeki USDT (kazançlar dahil) harcanabilir.
+İlk tahsis 294 ADA olarak kalır; hesapta başka amaçla tutulan varlıklar eklenmez.
+Seçenek varsayılan kapalıdır, açık modla çalışmış defter aynı seçenekle yeniden
+başlatılmalıdır. Bu değişiklik mevcut bakiye uyuşmazlığını otomatik düzeltmez.
+`-CheckOnly` artık ADA/USDT free, locked, tracked ve shortfall alanlarını gösterir.
+Bakiye farkı doğrulanana kadar halt kaldırılmadı ve canlı yeniden başlatılmadı.
+37 ilgili test geçti. Yetki/anahtar/bakiye korumaları sürer.

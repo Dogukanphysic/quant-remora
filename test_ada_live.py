@@ -121,6 +121,9 @@ class LiveTests(unittest.TestCase):
     def setUp(self):
         a.configure_interval('4h')
         self.temp=tempfile.TemporaryDirectory()
+        self.db_patch=patch.object(a,'DB',Path(self.temp.name)/'ledger.db')
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
         self.db=a.connect(Path(self.temp.name)/'ledger.db')
         self.client=Fake()
     def tearDown(self):
@@ -187,6 +190,21 @@ class LiveTests(unittest.TestCase):
             with self.assertRaises(ValueError): a.Client(live=True)
             with self.assertRaises(ValueError): a.Client(live=False)
             opener.assert_not_called()
+    def test_all_allocated_funds_can_buy_more_than_initial_ada(self):
+        s=dict(ada='0.3',usdt='200')
+        with patch.object(a,'USE_ALL_ALLOCATED_FUNDS',True):
+            order=a.size(s,self.client.market(),'BUY',Decimal('.001'))
+        self.assertGreater(a.dec(order['qty']),a.CAP)
+        self.assertLessEqual(a.dec(order['qty'])*a.dec(order['price'])*Decimal('1.001'),Decimal('200'))
+        self.assertEqual(self.client.posts,[])
+    def test_allocation_diagnostic_reports_shortfall_without_mutation(self):
+        s=a.initialize(self.db,self.client,self.client.market())
+        self.client.bal['ADA']=Decimal('290')
+        report=a.diagnose(self.client)
+        self.assertEqual(report['allocation']['assets']['ADA']['shortfall'],'4')
+        self.assertFalse(report['checks']['allocated_balance']['ok'])
+        self.assertEqual(a.read(self.db),s)
+        self.assertEqual(self.client.posts,[])
     def test_only_294_allocated_and_no_quote_import(self):
         s=a.tick(self.db,self.client)
         self.assertEqual(s['ada'],'294'); self.assertEqual(s['usdt'],'0')
