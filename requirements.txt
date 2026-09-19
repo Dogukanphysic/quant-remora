@@ -1,0 +1,2 @@
+# Core runtime; validated with Python 3.12 on Windows
+numpy==2.4.3

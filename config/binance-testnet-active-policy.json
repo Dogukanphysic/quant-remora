@@ -262,5 +262,10 @@
   "status": "testnet_exploration_candidate",
   "testnet_execution_eligible": true,
   "testnet_only": true,
-  "trainer_version": "43faaa6925cb436e3e5c5f873f41c1714b4d124fcf3871d9a49b0b8e55a1e2cd"
+  "trainer_version": "43faaa6925cb436e3e5c5f873f41c1714b4d124fcf3871d9a49b0b8e55a1e2cd",
+  "testnet_sizing_override": {
+    "quote_usdt": "15",
+    "scope": "next_entries_only",
+    "authorization": "user_requested_testnet_risk_increase"
+  }
 }

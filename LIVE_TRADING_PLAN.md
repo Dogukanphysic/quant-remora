@@ -4,7 +4,7 @@
 
 Yerel uygulamada ayrı ADAUSDT mainnet yürütme yolu vardır; kullanıcı tarafından 15m ve deneysel model karar seçeneğiyle başlatılmıştır. Bu, aşağıdaki eski Remora paper terfi koşullarının başarıyla geçildiği anlamına gelmez. Kârlılık henüz doğrulanmamıştır. Ayrıntılar: [model sözleşmeleri](docs/CURRENT_MODELS.md) ve [ADA kılavuzu](reports/ada-live-user-guide.md).
 
-294 ADA tahsisi, ek USDT kullanmama, kaldıraç/short/para çekme olmaması, kalıcı emir niyeti ve dolum uzlaştırması uygulanır. Günlük zarar/hacim kesicisi yoktur. Yerel stop/hedef uygulama/ağ kesilince çalışmaz. Yeni kod dosyalarının bir kısmı bu doküman commit'inden ayrı yayımlanmayı bekler.
+294 ADA tahsisi, ek USDT kullanmama, kaldıraç/short/para çekme olmaması, kalıcı emir niyeti ve dolum uzlaştırması uygulanır. Günlük zarar/hacim kesicisi yoktur. Yerel stop/hedef uygulama/ağ kesilince çalışmaz. Yeni uygulama ve test kodları depoya dahildir; yayımlama çalışan süreçleri başlatmaz veya değiştirmez.
 
 ## Önceki Remora paper geçiş planı (tarihsel)
 

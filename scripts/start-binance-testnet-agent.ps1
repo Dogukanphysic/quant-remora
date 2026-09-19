@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$PythonPath
+    [string]$PythonPath,
+    [ValidateSet('10', '15')]
+    [string]$EntryQuoteUsdt = '10',
+    [switch]$Restart,
+    [switch]$Hourly
 )
 
 Set-StrictMode -Version Latest
@@ -96,9 +100,15 @@ $secretKeyPlain = $null
 $confirmation = $null
 
 try {
+    if ($Hourly -and (-not $Restart -or $EntryQuoteUsdt -ne '15')) {
+        throw 'Hourly gecisi -Restart -EntryQuoteUsdt 15 gerektirir.'
+    }
     Write-Host 'Bu betik yalniz Binance Spot Testnet background agentini baslatir.'
-    Write-Host 'Agent, sinyal degisimlerinde 10 USDT sanal BTCUSDT emirleri gonderebilir.'
+    Write-Host "Agent, sonraki girislerde $EntryQuoteUsdt USDT sanal BTCUSDT emirleri gonderebilir."
     Write-Host 'Gercek Binance endpointleri ve gercek para desteklenmez.'
+    if ($Hourly) {
+        Write-Host 'Saatlik gecis: eski agentin takip ettigi Testnet BTC pozisyonu kapatilir; sonra ayri 1h politika baslar.'
+    }
 
     $statusOutput = & $pythonInvocation.Executable `
         @($pythonInvocation.PrefixArguments) `
@@ -108,12 +118,12 @@ try {
         throw 'Mevcut Binance Testnet worker durumu okunamadi.'
     }
     $currentStatus = ($statusOutput -join "`n") | ConvertFrom-Json
-    if ($currentStatus.running) {
+    if ($currentStatus.running -and -not $Restart) {
         throw 'Binance Testnet worker zaten calisiyor. Anahtar degistirmek icin once binance-testnet-agent-stop kullanin.'
     }
     Write-Host (
         "Aktif politika: $($currentStatus.policy); " +
-        "30 gun momentum esigi: $($currentStatus.momentum_threshold); " +
+        "Momentum esigi: $($currentStatus.momentum_threshold); " +
         "emir: $($currentStatus.entry_quote_usdt) USDT"
     )
 
@@ -143,8 +153,8 @@ try {
     Invoke-AgentCommand -AgentArguments @('binance-execution-doctor')
     Write-Host "`n[2/3] Imzali hesap ve acik emir uzlastirmasi"
     Invoke-AgentCommand -AgentArguments @('binance-testnet-account')
-    Write-Host "`n[3/3] Emir olusturmadan 10 USDT parametre kontrolu"
-    Invoke-AgentCommand -AgentArguments @('binance-testnet-order-check', '--quote-usdt', '10')
+    Write-Host "`n[3/3] Emir olusturmadan $EntryQuoteUsdt USDT parametre kontrolu"
+    Invoke-AgentCommand -AgentArguments @('binance-testnet-order-check', '--quote-usdt', $EntryQuoteUsdt)
 
     Write-Host "`nOn kontroller basarili. Background agent gelecekte sanal Testnet emirleri olusturabilir."
     $confirmation = Read-Host "Devam etmek icin tam olarak '$confirmationPhrase' yazin"
@@ -155,6 +165,18 @@ try {
 
     [Environment]::SetEnvironmentVariable('BINANCE_ORDER_EXECUTION_ENABLED', 'testnet', 'Process')
     [Environment]::SetEnvironmentVariable('BINANCE_TESTNET_WORKER_ENABLED', 'true', 'Process')
+    if ($Hourly) {
+        & $pythonInvocation.Executable @($pythonInvocation.PrefixArguments) `
+            (Join-Path $projectRoot 'switch_testnet_hourly.py')
+        if ($LASTEXITCODE -ne 0) { throw 'Saatlik gecis tamamlanamadi. Gunluk durumunu kontrol edin; komutu korlemesine tekrarlamayin.' }
+        return
+    }
+    if ($Restart) {
+        Invoke-AgentCommand -AgentArguments @('binance-testnet-agent-stop')
+    }
+    & $pythonInvocation.Executable @($pythonInvocation.PrefixArguments) `
+        (Join-Path $projectRoot 'testnet_sizing.py') '--quote-usdt' $EntryQuoteUsdt
+    if ($LASTEXITCODE -ne 0) { throw 'Testnet sizing update failed; worker was not started.' }
     Invoke-AgentCommand -AgentArguments @('binance-testnet-agent-start')
     Invoke-AgentCommand -AgentArguments @('binance-testnet-agent-status')
 }

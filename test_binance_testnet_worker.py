@@ -206,6 +206,10 @@ def run_once(*, db_path, client, market_data_client=None, **kwargs):
 
 class BinanceTestnetWorkerTests(unittest.TestCase):
     def setUp(self):
+        # Baseline fixtures must not inherit the operator's active sizing override.
+        sizing = patch.object(worker, "ENTRY_QUOTE_USDT", worker.Decimal("10"))
+        sizing.start()
+        self.addCleanup(sizing.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp.name) / "worker.sqlite3"
         self.lock_path = Path(self.temp.name) / "worker.lock"

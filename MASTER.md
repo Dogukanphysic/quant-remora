@@ -4,7 +4,7 @@
 
 ADA mainnet yerelde 15m karar süresine geçirildi; kullanıcı `-ModelDecisions` ile deneysel ridge karar yetkisini açtı. 4h ve 15m öğrenme defterleri ayrı. Emir defteri, 294 ADA tahsisi ve mevcut pozisyonun stop/hedefi korunur. Model yetkisi kârlılık kanıtı değildir; geçersiz/güncel olmayan tahminde EMA/ATR karar yolu kullanılır. Son zaman damgası düzeltmesi 26 çevrimdışı testten geçti; bu testler canlı dolum veya kârlılık kanıtı değildir.
 
-Güncel teknik kaynak: [model sözleşmeleri](docs/CURRENT_MODELS.md), [ADA işletim kılavuzu](reports/ada-live-user-guide.md). Bu doküman yayını yeni yerel kodun tamamının GitHub'a yayımlandığı anlamına gelmez. Çalışma durumu yalnız taze yerel kayıtla doğrulanır.
+Güncel teknik kaynak: [model sözleşmeleri](docs/CURRENT_MODELS.md), [ADA işletim kılavuzu](reports/ada-live-user-guide.md). Sonraki kod yayını ADA, hızlı öğrenme, Testnet ve ilgili testleri de depoya dahil eder; anahtarlar ve çalışma defterleri yerelde kalır. Çalışma durumu yalnız taze yerel kayıtla doğrulanır.
 
 ## Tarihsel karar günlüğü
 
@@ -955,3 +955,17 @@ aynı -Interval 15m -ModelDecisions komutuyla yeniden başlatması gerekir.
 26 test geçti: eğitim gecikmesi, gelecek/eski tahmin reddi, bozuk özet reddi,
 negatif model satış kararı, pozitif modelin stopu geçersiz kılamaması ve önceki
 sermaye/uzlaştırma testleri. Canlı yeniden başlatma araçla yapılmadı.
+
+
+## 19 Eylül 2026 — kod yayını
+ADA mainnet 15m, deneysel model karar okuyucusu, zaman damgası düzeltmesi,
+hızlı ridge öğrenme, BTC Testnet 1h/15m geçişleri, araştırma modülleri,
+PowerShell başlatıcıları ve testler GitHub kod yayınına alındı.
+NumPy çalışma bağımlılığı requirements.txt, opsiyonel scikit-learn benchmark
+bağımlılığı requirements-research.txt içinde sabitlendi.
+Git indeksinden çıkarılan ayrı, çalışma verisi/anahtar içermeyen kopyada
+`python -m unittest discover -p "test_*.py"`: 485 test, 74.179 saniye, OK.
+PowerShell sözdizimi, yerel modül bağımlılıkları ve hassas dosya/anahtar literal
+taraması geçti. Test özeti konsola aktarılırken Windows kodlama hatası oluştu;
+kaydedilmiş test raporu doğrudan okunarak 485 testin geçtiği doğrulandı.
+Canlı süreç başlatılmadı/durdurulmadı; işlem ve eğitim defterleri yayımlanmadı.

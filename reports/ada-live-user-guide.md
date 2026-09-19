@@ -1,10 +1,10 @@
 # ADA Spot 15m — kullanıcı işletim kılavuzu
 
-**Güncelleme: 19 Eylül 2026.** Yerel geliştirme sürümüne aittir. Yeni uygulama dosyalarının bir kısmı henüz ayrı kod commit'iyle GitHub'a yayımlanmadığından, temiz klonda dosyaları kontrol edin. [Model sözleşmeleri](../docs/CURRENT_MODELS.md).
+**Güncelleme: 19 Eylül 2026.** Depodaki geliştirme sürümüne aittir. Kodların indirilmesi canlı başlatma değildir. [Model sözleşmeleri](../docs/CURRENT_MODELS.md).
 
 ## Hazırlık
 
-Komutları projenin `okx-agent` klasöründe çalıştırın. Python ve proje bağımlılıkları kurulu olmalıdır. Anahtarları yalnız gizli terminal alanlarına girin; sohbete, GitHub'a veya komut satırına yazmayın.
+Komutları projenin `okx-agent` klasöründe çalıştırın. Windows/Python 3.12 ile doğrulandı. `python -m pip install -r requirements.txt` ile çalışma bağımlılığını kurun. Anahtarları yalnız gizli terminal alanlarına girin; sohbete, GitHub'a veya komut satırına yazmayın.
 
 - Binance MAINNET hesabının API anahtarı gerekir; Testnet anahtarı kullanılmaz. Hesap okuma ve Spot işlem izni gerekir; para çekme gerekmez.
 - BNB ile Spot komisyon ödeme kapalı olmalı; BNB tahsisi desteklenmez.

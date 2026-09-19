@@ -1,0 +1,3 @@
+# Optional historical model-family benchmarks
+-r requirements.txt
+scikit-learn==1.8.0

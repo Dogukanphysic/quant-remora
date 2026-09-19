@@ -9,7 +9,7 @@
 | BTC 4h paper | Binance Spot, 4 saatlik mum | Sabit trend stratejisi; ridge öğrenici yalnız araştırma | Yerel sanal defter |
 | Bollinger V2/V3 ve Remora | Bitstamp/Binance araştırma veri yolları, çoğunlukla 15m | Eski deneyler, gölge modeller ve paper doğrulama | Araştırma / sanal |
 
-**Yayın kapsamı:** Bu doküman güncellemesi yerel çalışma alanında hazırlanmış yeni modelleri de kapsar. ADA ve hızlı öğrenme uygulamasının bazı kod dosyaları bu doküman yayını sırasında henüz ayrı bir kod commit'i olarak yayımlanmadı. Temiz GitHub klonunda ilgili dosyalar yoksa aşağıdaki yeni komutlar çalışmaz. Belgelenmiş özellik, yayımlanmış sürüm veya çalışan süreç kanıtı değildir.
+**Yayın kapsamı:** ADA 15m, deneysel model kararı, hızlı öğrenme, Testnet geçişi ve çevrimdışı test kodları bu depoya dahildir. Anahtarlar, eğitim verileri ve yerel işlem defterleri dağıtılmaz. Depoyu klonlamak canlı worker başlatmaz.
 
 ## Güncel belgeler
 
@@ -21,7 +21,7 @@
 
 ## ADA 15m — yerel kullanıcı komutları
 
-Komutlar proje klasöründe çalıştırılır. Yalnız mevcut yerel sürümde ilgili dosyalar bulunuyorsa kullanılabilir.
+Windows ve Python 3.12 ile doğrulandı. Proje klasöründe önce `python -m pip install -r requirements.txt` çalıştırın. Tarihsel model benchmarkları için ayrıca `python -m pip install -r requirements-research.txt` kullanın. Komutlar proje klasöründe çalıştırılır.
 
 ```powershell
 # Salt okunur durum; anahtar veya emir gerektirmez

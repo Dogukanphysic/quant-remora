@@ -1,6 +1,6 @@
 # Güncel modeller ve karar sözleşmeleri
 
-**Tarih: 19 Eylül 2026.** Bu belge yerel geliştirme sürümünü tanımlar. Yeni uygulama kodunun bir kısmı doküman yayını sırasında GitHub'a ayrı commit ile gönderilmeyi beklemektedir. Anlık bakiye/süreç bilgisi içermez.
+**Tarih: 19 Eylül 2026.** Bu belge depodaki geliştirme sürümünü tanımlar. Uygulama, başlatıcılar ve çevrimdışı testler depoya dahildir; anahtarlar, piyasa veri setleri ve çalışma defterleri değildir. Anlık bakiye/süreç bilgisi içermez.
 
 ## ADAUSDT 15m mainnet
 

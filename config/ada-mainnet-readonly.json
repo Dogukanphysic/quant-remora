@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "mode": "public_read_only_preparation",
+  "symbol": "ADAUSDT",
+  "decision_interval": "4h",
+  "declared_initial_ada": "294",
+  "balance_verified": false,
+  "proposed_limits": {
+    "max_portfolio_allocation_fraction": "1",
+    "max_order_allocation_fraction": "1",
+    "daily_turnover_cap": null,
+    "daily_loss_cap_fraction_of_starting_equity": "1",
+    "use_external_account_funds": false,
+    "leverage": false,
+    "short": false
+  },
+  "limits_are_preferences_not_enforced_execution_controls": true,
+  "strategy_validated_for_ada": false,
+  "real_orders_enabled": false,
+  "automatic_execution_enabled": false
+}

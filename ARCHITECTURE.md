@@ -1,6 +1,6 @@
 # Quant Remora — sistem mimarisi
 
-**Güncelleme: 19 Eylül 2026.** Güncel model sözleşmeleri [CURRENT_MODELS.md](docs/CURRENT_MODELS.md) içinde; aşağıdaki yeni mimari bölümü, devamındaki tarihsel V2 açıklamalarından ayrıdır. Yeni uygulama dosyalarının bir kısmı henüz GitHub kod yayınına dahil değildir.
+**Güncelleme: 19 Eylül 2026.** Güncel model sözleşmeleri [CURRENT_MODELS.md](docs/CURRENT_MODELS.md) içinde; aşağıdaki yeni mimari bölümü, devamındaki tarihsel V2 açıklamalarından ayrıdır. Güncel uygulama ve test kodları depoya dahildir; anahtarlar ve yerel durum dosyaları hariçtir.
 
 ## Güncel ADA 15m veri ve emir yolu
 

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "kind": "testnet_execution_policy_config",
+  "environment": "binance_spot_testnet",
+  "market_data_source": "binance_public_spot",
+  "status": "testnet_exploration_candidate",
+  "testnet_only": true,
+  "testnet_execution_eligible": true,
+  "paper_eligible": false,
+  "real_money_eligible": false,
+  "real_orders_enabled": false,
+  "live_trading_enabled": false,
+  "policy_id": "btc_hourly_momentum_24h_t002_testnet_v1",
+  "rule": {
+    "family": "momentum",
+    "lookback_hours": 24,
+    "threshold": "0.002"
+  },
+  "order": {
+    "symbol": "BTCUSDT",
+    "mode": "long_cash",
+    "quote_usdt": "10"
+  },
+  "testnet_sizing_override": {
+    "quote_usdt": "15",
+    "scope": "next_entries_only",
+    "authorization": "user_requested_testnet_risk_increase"
+  },
+  "evidence": "user_authorized_exploration_not_profitable_model",
+  "model_version": "ebc57a970415d6231ef183b76b2cbe6643b5f1e083de5a4a702dd4dbbda96fd0"
+}

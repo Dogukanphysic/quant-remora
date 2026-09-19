@@ -40,7 +40,8 @@ import testnet_learning_store as learning_store
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / "state"
 
-POLICY_CONFIG_PATH = ROOT / "config" / "binance-testnet-active-policy.json"
+HOURLY_MODE = os.getenv("BINANCE_TESTNET_POLICY_MODE", "daily") == "hourly"
+POLICY_CONFIG_PATH = ROOT / "config" / ("binance-testnet-hourly-policy.json" if HOURLY_MODE else "binance-testnet-active-policy.json")
 
 
 def _load_policy_config(path: Path = POLICY_CONFIG_PATH) -> dict[str, object]:
@@ -73,7 +74,8 @@ def _load_policy_config(path: Path = POLICY_CONFIG_PATH) -> dict[str, object]:
     model_version = value.get("model_version")
     if not isinstance(policy_id, str) or not re.fullmatch(r"[a-z0-9_]{8,80}", policy_id):
         raise ValueError("Binance Testnet policy id is invalid.")
-    if policy_id != "btc_daily_momentum_30d_t10_testnet_v1":
+    expected_policy = "btc_hourly_momentum_24h_t002_testnet_v1" if HOURLY_MODE else "btc_daily_momentum_30d_t10_testnet_v1"
+    if policy_id != expected_policy:
         raise ValueError("Binance Testnet policy id is not approved by this worker build.")
     if not isinstance(model_version, str) or not re.fullmatch(
         r"[0-9a-f]{64}", model_version
@@ -84,13 +86,13 @@ def _load_policy_config(path: Path = POLICY_CONFIG_PATH) -> dict[str, object]:
     order = value.get("order")
     if not isinstance(rule, dict) or rule.get("family") != "momentum":
         raise ValueError("Binance Testnet policy rule is invalid.")
-    if int(rule.get("lookback_days", 0)) != 30:
+    if int(rule.get("lookback_hours" if HOURLY_MODE else "lookback_days", 0)) != (24 if HOURLY_MODE else 30):
         raise ValueError("Binance Testnet policy must use the registered 30-day lookback.")
     try:
         threshold = Decimal(str(rule.get("threshold")))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError("Binance Testnet policy threshold is invalid.") from exc
-    if not threshold.is_finite() or threshold != Decimal("0.10"):
+    if not threshold.is_finite() or threshold != Decimal("0.002" if HOURLY_MODE else "0.10"):
         raise ValueError("Binance Testnet policy threshold must match trained t10.")
     if not isinstance(order, dict) or order.get("symbol") != "BTCUSDT" or order.get(
         "mode"
@@ -102,6 +104,14 @@ def _load_policy_config(path: Path = POLICY_CONFIG_PATH) -> dict[str, object]:
         raise ValueError("Binance Testnet quote size is invalid.") from exc
     if not quote.is_finite() or quote != Decimal("10"):
         raise ValueError("Binance Testnet quote size must match trained 10 USDT pilot.")
+    override = value.get("testnet_sizing_override")
+    if override is not None:
+        if not isinstance(override, dict) or override != {
+            "quote_usdt": "15",
+            "scope": "next_entries_only",
+            "authorization": "user_requested_testnet_risk_increase",
+        }:
+            raise ValueError("Only the explicit 15 USDT Testnet sizing override is supported.")
     return value
 
 
@@ -126,14 +136,18 @@ LEARNING_DB_PATH = STATE_DIR / f"{_LEDGER_STEM}-online-learning.sqlite3"
 SYMBOL = "BTCUSDT"
 BASE_ASSET = "BTC"
 QUOTE_ASSET = "USDT"
-INTERVAL = "1d"
-LOOKBACK_DAYS = int(POLICY_CONFIG["rule"]["lookback_days"])
+INTERVAL = os.getenv("BINANCE_TESTNET_DECISION_INTERVAL", "1h") if HOURLY_MODE else "1d"
+if INTERVAL not in ({"1h", "15m"} if HOURLY_MODE else {"1d"}):
+    raise ValueError("Unsupported decision interval")
+LOOKBACK_DAYS = (96 if INTERVAL == "15m" else int(POLICY_CONFIG["rule"]["lookback_hours" if HOURLY_MODE else "lookback_days"]))
 MOMENTUM_THRESHOLD = Decimal(str(POLICY_CONFIG["rule"]["threshold"]))
-ENTRY_QUOTE_USDT = Decimal(str(POLICY_CONFIG["order"]["quote_usdt"]))
+ENTRY_QUOTE_USDT = Decimal(str(
+    POLICY_CONFIG.get("testnet_sizing_override", POLICY_CONFIG["order"])["quote_usdt"]
+))
 POLL_SECONDS = 5.0
 API_POLL_SECONDS = 60.0
-DAY_MS = 86_400_000
-MAX_CANDLE_AGE_MS = 36 * 60 * 60 * 1000
+DAY_MS = 900_000 if INTERVAL == "15m" else 3_600_000 if HOURLY_MODE else 86_400_000
+MAX_CANDLE_AGE_MS = (25*60*1000) if INTERVAL == "15m" else (90 * 60 * 1000) if HOURLY_MODE else (36 * 60 * 60 * 1000)
 STARTUP_WAIT_SECONDS = 3.0
 STOP_WAIT_SECONDS = 20.0
 _DECIMAL_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
@@ -932,7 +946,7 @@ def _signal_in_context(market_data_client: object) -> dict[str, object]:
         closes[index] / closes[index - 1] - Decimal("1")
         for index in range(1, len(closes))
     ]
-    volatility_window = daily_returns[-20:]
+    volatility_window = daily_returns[-(80 if INTERVAL == "15m" else 20):]
     mean_return = sum(volatility_window, Decimal("0")) / Decimal(
         len(volatility_window)
     )
@@ -950,12 +964,21 @@ def _signal_in_context(market_data_client: object) -> dict[str, object]:
         "momentum_30d": format(momentum, "f"),
         "realized_volatility_20d": format(realized_volatility, "f"),
     }
+    if HOURLY_MODE:
+        features = {"close": features["close"], "return_1h": features["return_1d"],
+                    "return_7h": features["return_7d"], "momentum_24h": features["momentum_30d"],
+                    "realized_volatility_20h": features["realized_volatility_20d"]}
+        features['decision_interval'] = INTERVAL
+        features['cadence_contract'] = 'momentum24h_15m_v1' if INTERVAL == '15m' else 'momentum24h_1h_v1'
+        if INTERVAL == '15m':
+            features['return_15m'] = features.pop('return_1h')
+            features['return_7h'] = format(latest_close/closes[-29]-Decimal('1'),'f')
     return {
         "candle_close_ms": window[-1][0],
         "close_latest": latest_close,
         "close_30d": old_close,
         "momentum": momentum,
-        "feature_schema": "btc_daily_causal_v1",
+        "feature_schema": "btc_15m_causal_v1" if INTERVAL == '15m' else "btc_hourly_causal_v1" if HOURLY_MODE else "btc_daily_causal_v1",
         "features": features,
         "target_long": momentum > MOMENTUM_THRESHOLD,
     }
@@ -1834,7 +1857,11 @@ def _persist_decision(
             "policy": POLICY,
             "model_version": POLICY_SPEC_HASH,
         }
-        if learning_refresh_healthy:
+        if HOURLY_MODE or signal.get("operator_exit"):
+            # Hourly labels live in their own challenger database. Never feed
+            # a 1h outcome into the daily store's immutable 24h contract.
+            pass
+        elif learning_refresh_healthy:
             _durable_learning_source_call(
                 db,
                 "capture_daily_label",
@@ -2010,6 +2037,7 @@ def run_once(
     client: object | None = None,
     market_data_client: object | None = None,
     enforce_desired: bool = False,
+    exit_only: bool = False,
 ) -> dict[str, object]:
     """Reconcile an existing intent or evaluate one completed daily candle."""
     _execution_gate()
@@ -2083,6 +2111,20 @@ def run_once(
         except execution.BinanceTransportError as exc:
             return _transient_retry(db, f"Daily-kline read outage: {exc}")
         last = state["last_candle_close_ms"]
+        if HOURLY_MODE and os.getenv("BINANCE_TESTNET_AUTO_MODEL") == "true" and not exit_only:
+            if last is None or int(last) < int(signal["candle_close_ms"]):
+                import hourly_testnet_learning
+                import hourly_model_authority
+                try:
+                    hourly_testnet_learning.refresh(market)
+                    signal = hourly_model_authority.apply(signal)
+                except Exception:
+                    signal['features']['model_authority_error'] = 'fallback_to_momentum'
+        if exit_only:
+            signal = dict(signal, target_long=False, operator_exit=True,
+                          candle_close_ms=max(_now_ms(), int(last or 0)+1),
+                          feature_schema="operator_exit_for_hourly_switch_v1",
+                          features={"reason": "user_requested_hourly_testnet_switch"})
         if last is not None and int(last) >= int(signal["candle_close_ms"]):
             _clear_transient_error(db)
             return {
@@ -3198,6 +3240,8 @@ def status_snapshot(
             "policy": state["active_policy"],
             "policy_model_version": state["policy_spec_hash"],
             "configured_policy": POLICY,
+            "decision_interval": INTERVAL,
+            "caller_env_automatic_model_authority": HOURLY_MODE and os.getenv("BINANCE_TESTNET_AUTO_MODEL") == "true",
             "policy_match": (
                 state["active_policy"] == POLICY
                 and state["policy_spec_hash"] == POLICY_SPEC_HASH
@@ -3300,6 +3344,13 @@ def run_forever(
                     enforce_desired=True,
                 )
                 _refresh_learning_nonfatal(db_path)
+                if HOURLY_MODE:
+                    try:
+                        import hourly_testnet_learning
+                        hourly_testnet_learning.refresh(market)
+                    except Exception:
+                        # Execution reconciliation and exits must remain available.
+                        pass
                 delay = max(api_poll, float(result.get("backoff_seconds", 0)))
                 next_api_poll = time.monotonic() + delay
                 if result.get("action") == "halted":
