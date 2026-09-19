@@ -104,7 +104,7 @@ class Client:
 
     def request(self, method, path, params=None, signed=False):
         reads = {'time','exchangeInfo','ticker/bookTicker','klines','account','account/commission','openOrders','order','myTrades'}
-        if not (method=='GET' and path in reads or method=='POST' and path=='order'):
+        if not (method=='GET' and path in reads or method=='POST' and path in {'order','order/test'}):
             raise ValueError('Unsupported API operation')
         values = dict(params or {})
         if signed:
@@ -182,6 +182,11 @@ class Client:
             timeInForce='IOC',quantity=intent['qty'],price=intent['price'],
             newClientOrderId=intent['client_id'],newOrderRespType='FULL'),True)
 
+    def test_order(self, intent):
+        # Binance validates TRADE permissions without sending to matching engine.
+        return self.request('POST','order/test',dict(symbol=SYMBOL,side=intent['side'],type='LIMIT',
+            timeInForce='IOC',quantity=intent['qty'],price=intent['price']),True)
+
     def lookup(self, intent):
         order = self.request('GET','order',{'symbol':SYMBOL,'origClientOrderId':intent['client_id']},True)
         if dec(order['executedQty']) > 0:
@@ -253,6 +258,39 @@ def diagnose(client):
             report['checks'][name] = {'ok':False,'reason':str(exc)}
         except Exception as exc:
             report['checks'][name] = {'ok':False,'reason':type(exc).__name__}
+    return report
+
+
+def check_trade_permission(client, path=DB):
+    """No real order and no ledger writes, including when an intent is pending."""
+    report = {'orders_submitted':0,'test_endpoint':'/api/v3/order/test','ledger_modified':False}
+    try:
+        db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+        try:
+            s = read(db)
+        finally:
+            db.close()
+        if not s or s['identity']!=client.identity or s['contract']!=CONTRACT:
+            raise ValueError('Account/strategy binding mismatch')
+        market = client.market()
+        rates = fee_rates(client.commission())
+        free = balances(client.account())
+        if free.get('ADA',Decimal(0)) < dec(s['ada']) or free.get('USDT',Decimal(0)) < dec(s['usdt']):
+            raise ValueError('Allocated balance changed; reconcile first')
+        if client.open_orders():
+            raise ValueError('Open ADA orders require reconciliation first')
+        side = 'SELL' if s['phase']=='long' else 'BUY'
+        intent = size(s,market,side,rates[side])
+        if intent is None:
+            raise ValueError('No valid test quantity within allocated funds')
+        response = client.test_order(intent)
+        if response != {}:
+            raise ValueError('Unexpected test-order response')
+        report.update(ok=True,side=side)
+    except (ValueError,RuntimeError) as exc:
+        report.update(ok=False,reason=str(exc))
+    except Exception as exc:
+        report.update(ok=False,reason=type(exc).__name__)
     return report
 
 
@@ -475,7 +513,7 @@ def singleton(path):
 def main():
     global MODEL_DECISIONS
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['status','run','reconcile','diagnose'])
+    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check'])
     parser.add_argument('--live',action='store_true')
     parser.add_argument('--new-key',action='store_true')
     parser.add_argument('--interval',choices=['4h','15m'],default='4h')
@@ -497,6 +535,10 @@ def main():
             s.pop('identity',None)
         print(json.dumps(s,indent=2)); return
     client=Client(live=args.live)
+    if args.action=='order-check':
+        report = check_trade_permission(client)
+        print(json.dumps(report,indent=2))
+        return 0 if report['ok'] else 1
     if args.action=='diagnose':
         report=diagnose(client)
         (ROOT/'reports/ada-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')

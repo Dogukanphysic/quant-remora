@@ -43,6 +43,33 @@ class Fake:
 
 
 class LiveTests(unittest.TestCase):
+    def test_order_check_does_not_change_pending_or_submit(self):
+        s=a.initialize(self.db,self.client,self.client.market())
+        s.update(pending='uncertain',halted='RuntimeError')
+        with self.db: a.write(self.db,s)
+        self.client.test_order=Mock(return_value={})
+        report=a.check_trade_permission(self.client,Path(self.temp.name)/'ledger.db')
+        self.assertTrue(report['ok'])
+        self.assertEqual(a.read(self.db),s)
+        self.assertEqual(self.client.posts,[])
+        self.assertEqual(self.client.test_order.call_count,1)
+        self.client.test_order.side_effect=RuntimeError('API HTTP 401; Binance code -2015')
+        report=a.check_trade_permission(self.client,Path(self.temp.name)/'ledger.db')
+        self.assertFalse(report['ok'])
+        self.assertIn('-2015',report['reason'])
+        self.assertEqual(a.read(self.db),s)
+    def test_order_check_requires_bound_key(self):
+        a.initialize(self.db,self.client,self.client.market())
+        self.client.identity='other'
+        self.client.test_order=Mock()
+        report=a.check_trade_permission(self.client,Path(self.temp.name)/'ledger.db')
+        self.assertFalse(report['ok'])
+        self.client.test_order.assert_not_called()
+    def test_test_order_routes_only_to_test_endpoint(self):
+        client=object.__new__(a.Client)
+        client.request=Mock(return_value={})
+        client.test_order(dict(side='SELL',qty='1',price='.5'))
+        self.assertEqual(client.request.call_args.args[:2],('POST','order/test'))
     def test_http_error_exposes_code_not_secrets(self):
         client = object.__new__(a.Client)
         client.opener = Mock()

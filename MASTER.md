@@ -977,3 +977,11 @@ borsada hiçbir dolum olmadığını tek başına kanıtlamaz. Son bakiye kaydı
 Sayısal/sansürlü API hata tanısı ve kullanıcıya ReconcileOnly başlatıcı seçeneği
 eklendi; yeni emir veya otomatik yeniden başlatma yapılmadı. 28 ilgili test geçti.
 Sıradaki adım kullanıcının aynı anahtarla emir sorgulama çıktısını paylaşmasıdır.
+
+## 19 Eylül — -2013 sonrası tanılama
+Kullanıcının ReconcileOnly sorgusu Binance -2013 (Order not found) döndürdü.
+Bekleyen niyet veya halt silinmedi. CheckOnly TRADE iznini sınamadığından
+OrderCheckOnly eklendi: aynı hesap bağına ve mevcut tahsise göre güncel
+parametrelerle order/test kullanır; gerçek emir göndermez ve defteri değiştirmez.
+İlgili 31 çevrimdışı test ve PowerShell sözdizimi kontrolü geçti. Kullanıcı test
+çıktısı bekleniyor; gerçek emir yolu yeniden başlatılmadı.

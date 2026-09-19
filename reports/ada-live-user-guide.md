@@ -92,3 +92,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live
 HTTP hata mesajı artık yalnız sayısal Binance kodunu ve sabit açıklamayı
 gösterir; ham yanıt/anahtar/imzalı URL yazılmaz. `-2013` bulunamadı cevabı
 bekleyen niyeti otomatik silmez; sonuç incelenmeden yeniden emir gönderilmez.
+
+## İşlem yetkisi testi — gerçek emir oluşturmadan
+
+`CheckOnly` hesap okumasını doğrular; TRADE yetkisini kanıtlamaz. Önceki
+HTTP 401 sonrasında emir sorgusu -2013 verirse bekleyen kaydı silmeden:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -OrderCheckOnly
+```
+
+Aynı anahtar gerekir. Binance `POST /api/v3/order/test` kullanılır; matching
+engine'e emir gönderilmez, yerel defter değiştirilmez, agent başlatılmaz.
+Başarı, bekleyen eski emrin durumunu veya gelecekteki dolumu garanti etmez.
+Sonuçtaki hata koduyla yetki/IP/imza/filtre sorunu ayrıştırılır.

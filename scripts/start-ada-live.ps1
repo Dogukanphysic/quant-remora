@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
-      [switch]$ModelDecisions, [switch]$ReconcileOnly)
+      [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -10,6 +10,9 @@ $secretSecure = $null
 $apiPointer = [IntPtr]::Zero
 $secretPointer = [IntPtr]::Zero
 $previousEncoding = $env:PYTHONIOENCODING
+if ($OrderCheckOnly -and ($CheckOnly -or $ReconcileOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
+    throw 'OrderCheckOnly yalniz Interval/PythonPath ile kullanilir; gercek emir gondermez.'
+}
 if ($ReconcileOnly -and ($CheckOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
     throw 'ReconcileOnly yalniz Interval/PythonPath ile kullanilir; emir gondermez.'
 }
@@ -22,8 +25,9 @@ if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
 }
 try {
-    if ($CheckOnly -or $ReconcileOnly) {
+    if ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly) {
         Write-Host 'EMIR GONDERILMEZ; durmus agent yeniden baslatilmaz.'
+        if ($OrderCheckOnly) { Write-Host 'Binance order/test: islem yetkisi ve parametre kontrolu; gercek emir/defter degisikligi yok.' }
         if ($ReconcileOnly) { Write-Host 'Bekleyen emir borsadan sorgulanir; bulunan dolumlar yerel defterle uzlastirilir. Halt kaldirilmaz.' }
         $confirmation = '294 ADA ILE GERCEK ISLEM BASLAT'
     }
@@ -56,6 +60,9 @@ try {
     }
     elseif ($ReconcileOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') reconcile --live --interval $Interval
+    }
+    elseif ($OrderCheckOnly) {
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') order-check --live --interval $Interval
     }
     else {
         if ($NewKey) {
