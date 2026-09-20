@@ -1004,3 +1004,32 @@ başlatılmalıdır. Bu değişiklik mevcut bakiye uyuşmazlığını otomatik d
 `-CheckOnly` artık ADA/USDT free, locked, tracked ve shortfall alanlarını gösterir.
 Bakiye farkı doğrulanana kadar halt kaldırılmadı ve canlı yeniden başlatılmadı.
 37 ilgili test geçti. Yetki/anahtar/bakiye korumaları sürer.
+
+
+## 20 Eylül — dışarıda ADA dönüşümü sonrası tüm Spot ADA/USDT tahsisi
+Kullanıcı Spot'taki tüm ADA/USDT bakiyesini yönetilecek bütçe olarak yetkilendirdi.
+TRY/BNB bu kapsamda değildir. `-AdoptSpotBalanceOnly` kullanıcı komutu aynı
+hesabı, bakiye-değişimi haltını, bekleyen/uygulanmamış emir olmamasını, açık emir
+olmamasını ve iki okumada değişmeyen serbest/kilitsiz ADA/USDT'yi doğrular.
+İlgili bakiyeleri yeni sermaye dönemine alır; önceki durum `capital_rebases`
+tablosunda korunur. Yeni dönemin PnL referansı güncel piyasa değeridir; manuel
+alım, transfer veya Earn getirisi agent işlemi/kârı olarak yazılmaz. Emir geçmişi
+ve öğrenme kayıtları korunur. Yeni ATR stop/hedef seviyeleri oluşturulur.
+Komut emir göndermez ve worker başlatmaz. Aynı işlemin tekrarı halt koşulu
+kalktığı için reddedilir. Sonraki start için UseAllAllocatedFunds zorunludur.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -AdoptSpotBalanceOnly
+```
+
+Eşleme onayı: `SPOT ADA USDT BAKIYESINI ESLE`.
+Yalnız eşleme ok:true ise kullanıcı şu gerçek emir başlatıcısını çalıştırır:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -ModelDecisions -UseAllAllocatedFunds
+```
+
+Bu modun canlı onayı: `TUM TAHSISLI BAKIYE ILE GERCEK ISLEM BASLAT`.
+294 adet tavanı kalkar; tahsisli USDT ve ücret rezervi sınırı sürer. Bundan sonra
+hesaba yapılan yeni yatırımlar otomatik bütçeye eklenmez. Auto-Subscribe kapalı
+kalmalıdır. 41 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.

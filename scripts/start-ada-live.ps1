@@ -2,7 +2,8 @@
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
       [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
-      [switch]$RecoverUnsentOnly, [switch]$UseAllAllocatedFunds)
+      [switch]$RecoverUnsentOnly, [switch]$UseAllAllocatedFunds,
+      [switch]$AdoptSpotBalanceOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -11,6 +12,9 @@ $secretSecure = $null
 $apiPointer = [IntPtr]::Zero
 $secretPointer = [IntPtr]::Zero
 $previousEncoding = $env:PYTHONIOENCODING
+if ($AdoptSpotBalanceOnly -and ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
+    throw 'AdoptSpotBalanceOnly yalniz Interval/PythonPath ile kullanilir.'
+}
 if ($RecoverUnsentOnly -and ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions)) {
     throw 'RecoverUnsentOnly yalniz Interval/PythonPath ile kullanilir.'
 }
@@ -30,7 +34,14 @@ if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
 }
 try {
-    if ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly) {
+    if ($AdoptSpotBalanceOnly) {
+        Write-Host 'Gercek emir gonderilmez. Spot ADA ve USDT serbest bakiyelerinin TAMAMI yeni tahsis olarak kaydedilir.'
+        Write-Host 'Harici donusum agent kari sayilmaz; eski kayitlar korunur, yeni PnL donemi baslar. TRY/BNB dahil edilmez.'
+        $adoptConfirmation = Read-Host 'Devam icin SPOT ADA USDT BAKIYESINI ESLE yazin'
+        if ($adoptConfirmation -cne 'SPOT ADA USDT BAKIYESINI ESLE') { throw 'Onay eslesmedi.' }
+        $confirmation = '294 ADA ILE GERCEK ISLEM BASLAT'
+    }
+    elseif ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly) {
         Write-Host 'EMIR GONDERILMEZ; durmus agent yeniden baslatilmaz.'
         if ($RecoverUnsentOnly) { Write-Host 'Ilk HTTP 401 emrinin yoklugu ve dolum olmamasi dogrulanirsa kayit arsivlenir; yeni baslatma ayridir.' }
         if ($OrderCheckOnly) { Write-Host 'Binance order/test: islem yetkisi ve parametre kontrolu; gercek emir/defter degisikligi yok.' }
@@ -39,17 +50,19 @@ try {
     }
     else {
     Write-Host 'BINANCE MAINNET: Bu betigi calistirmaniz GERCEK ADA/USDT emirleri baslatabilir.'
-    Write-Host '294 serbest ADA ayrilir. Hesaptaki diger USDT kullanilmaz. Tum ayrilan sermaye risk altindadir.'
+    Write-Host 'Mevcut defterin tahsisli bakiyesi kullanilir; ilk kurulum tahsisi 294 ADA dir. Tum tahsis risk altindadir.'
     if ($UseAllAllocatedFunds) { Write-Host 'Tahsisli USDT ve kazanclarin tamami kullanilabilir; sonraki alimlarda 294 ADA adet tavani yoktur. Baska hesap bakiyeleri eklenmez.' }
     Write-Host "Ilk dongude satis olabilir. $Interval mum stratejisi, 60 saniye kontrol. Kar garantisi yoktur."
     if ($ModelDecisions) { Write-Host 'DENEYSEL MODEL KARARLARI: Karlilik dogrulanmadi. Pozitif tahmin AL/TUT, diger tahmin SAT/NAKIT. Stop/hedef onceliklidir.' }
     if ($MigrateInterval) { Write-Host 'Eski pencereyi Ctrl+C ile durdurun. Bakiye ve mevcut stop/hedef korunarak 15m gecisi yapilir.' }
     Write-Host 'BNB ile komisyon odemesi bu sembolde kapali olmali. Para cekme yetkisi gerekli degildir.'
     Write-Host 'Durdurmak icin Ctrl+C. Durdurma eldeki ADA yi satmaz; bilgisayar kapaliyken stop calismaz.'
-    $confirmation = Read-Host 'Devam icin tam olarak 294 ADA ILE GERCEK ISLEM BASLAT yazin'
-    if ($confirmation -cne '294 ADA ILE GERCEK ISLEM BASLAT') {
+    $startPhrase = if ($UseAllAllocatedFunds) { 'TUM TAHSISLI BAKIYE ILE GERCEK ISLEM BASLAT' } else { '294 ADA ILE GERCEK ISLEM BASLAT' }
+    $confirmation = Read-Host "Devam icin tam olarak $startPhrase yazin"
+    if ($confirmation -cne $startPhrase) {
         throw 'Onay eslesmedi; hicbir islem baslatilmadi.'
     }
+    $confirmation = '294 ADA ILE GERCEK ISLEM BASLAT'
     }
     $apiSecure = Read-Host 'Binance MAINNET API key (Testnet degil)' -AsSecureString
     $secretSecure = Read-Host 'Binance MAINNET secret key' -AsSecureString
@@ -73,6 +86,9 @@ try {
     }
     elseif ($RecoverUnsentOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') recover-unsent --live --interval $Interval
+    }
+    elseif ($AdoptSpotBalanceOnly) {
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') adopt-spot-balance --live --interval $Interval --use-all-allocated-funds
     }
     else {
         if ($NewKey) {

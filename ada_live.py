@@ -384,6 +384,64 @@ def recover_unsent(db, client):
     return dict(ok=True,orders_submitted=0,recovered_client_id=intent['client_id'],worker_started=False)
 
 
+def adopt_spot_balance(db, client):
+    """Explicit user-run capital rebase after an external conversion; GETs only."""
+    s = read(db)
+    if not s or s['identity']!=client.identity or s['contract']!=CONTRACT:
+        raise ValueError('Account/strategy binding mismatch')
+    if not USE_ALL_ALLOCATED_FUNDS:
+        raise ValueError('Balance adoption requires --use-all-allocated-funds')
+    if s['pending'] or db.execute('SELECT COUNT(*) FROM orders WHERE applied=0').fetchone()[0]:
+        raise ValueError('Unresolved order prevents capital rebase')
+    if s.get('halt_reason')!='Allocated capital unavailable; external account change':
+        raise ValueError('Capital rebase is only for the external balance-change halt')
+    if client.open_orders():
+        raise ValueError('Open ADA orders prevent capital rebase')
+    market = client.market()
+    fee_rates(client.commission())
+    account = client.account()
+    free = balances(account)
+    for row in account['balances']:
+        if row['asset'] in ('ADA','USDT') and dec(row.get('locked','0')):
+            raise ValueError('Locked ADA/USDT prevents capital rebase')
+    ada,usdt = free.get('ADA',Decimal(0)),free.get('USDT',Decimal(0))
+    bid,atr = dec(market['bid']),dec(market['atr'])
+    if bid<=0 or atr<=0 or (ada>0 and bid<=2*atr) or ada*bid+usdt<=0:
+        raise ValueError('Invalid balance or market for capital rebase')
+    # Catch balance changes during the checks; never silently import locked funds.
+    second = client.account()
+    second_free = balances(second)
+    if any(second_free.get(asset,Decimal(0))!=value for asset,value in [('ADA',ada),('USDT',usdt)]):
+        raise ValueError('Balance changed during verification; retry diagnosis')
+    if any(row['asset'] in ('ADA','USDT') and dec(row.get('locked','0')) for row in second['balances']):
+        raise ValueError('Funds became locked during verification')
+    if client.open_orders():
+        raise ValueError('Order appeared during verification')
+    previous = json.dumps(s)
+    baseline = ada*bid+usdt
+    s.update(ada=str(ada),usdt=str(usdt),initial_mark_usdt=str(baseline),
+             pnl_basis='external_rebase_mark_not_trade_profit',
+             marked_equity_usdt=str(baseline),marked_pnl_from_activation_usdt='0',
+             phase='long' if ada>0 else 'cash',stop=str(max(Decimal(0),bid-2*atr)),
+             target=str(bid+4*atr),opened=market['now'],last_bar=None,last_poll=None,
+             halted=None,stopped=True,exit_requested=False,use_all_allocated_funds=True)
+    s.pop('halt_reason',None)
+    s.pop('decision',None)
+    s.pop('latest_candle_decision',None)
+    s.setdefault('learning',{})['decision_authority']=False
+    record = dict(kind='user_authorized_external_spot_rebase',ada=str(ada),usdt=str(usdt),
+                  reference_bid=str(bid),baseline_usdt=str(baseline),
+                  checked_at=market['now'],not_agent_profit=True)
+    with db:
+        db.execute('CREATE TABLE IF NOT EXISTS capital_rebases(id INTEGER PRIMARY KEY,previous_state TEXT,evidence TEXT)')
+        cur=db.execute('INSERT INTO capital_rebases(previous_state,evidence) VALUES (?,?)',(previous,json.dumps(record)))
+        s['capital_epoch']=cur.lastrowid
+        s['last_capital_rebase']=record
+        write(db,s)
+    return dict(ok=True,orders_submitted=0,worker_started=False,ada=str(ada),usdt=str(usdt),
+                new_epoch_baseline_usdt=str(baseline),use_all_allocated_funds=True)
+
+
 def initialize(db, client, market):
     s = read(db)
     if s:
@@ -610,7 +668,7 @@ def singleton(path):
 def main():
     global MODEL_DECISIONS, USE_ALL_ALLOCATED_FUNDS
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent'])
+    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent','adopt-spot-balance'])
     parser.add_argument('--live',action='store_true')
     parser.add_argument('--new-key',action='store_true')
     parser.add_argument('--interval',choices=['4h','15m'],default='4h')
@@ -647,6 +705,8 @@ def main():
     with singleton(DB.with_suffix('.lock')):
         db=connect()
         try:
+            if args.action=='adopt-spot-balance':
+                print(json.dumps(adopt_spot_balance(db,client),indent=2)); return
             if args.action=='recover-unsent':
                 print(json.dumps(recover_unsent(db,client),indent=2)); return
             if args.migrate_interval:
