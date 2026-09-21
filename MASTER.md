@@ -1098,3 +1098,11 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - İki satışta %0,10 tek yön komisyon; 15 halka açık örnekte medyan yaklaşık %0,041 spread. Geçmiş dolum maliyeti değildir.
 - 2 saat ağaç adayında bazı pozitif dönemler tek büyük kazanca bağımlı. %0,125 tek yön maliyet duyarlılığında dokuz adayın tamamı ikinci dönemde zarar etti.
 - 21 test geçti; canlı model/defter değiştirilmedi. [Maliyet ve kazanç analizi](reports/ada-edge-diagnostics.md).
+
+## 2026-09-22 — Uç hareketlere dayanıklı hedef / sanal risk ölçekleme
+
+- `ada_robust_training.py`: ham, eğitim yüzdelikleriyle sınırlanan ve ATR birimli hedefler; 1/2/4 saat, tam sermaye ve risk ölçeklemesi.
+- Dokuz model / iki sermaye yöntemi aynı üç geliştirme döneminde sınandı; hiçbir kombinasyon geçmedi.
+- Risk ölçekleme örnek dönem zararını %7,278'den %1,596'ya azalttı; kârlılık kanıtı çıkmadı. ATR birimli 4 saat modelinde yalnız yedi işlem var.
+- 24 test geçti. Canlı model ve kullanıcının sermaye ayarları değiştirilmedi.
+- Ayrıntılar: [Dayanıklı hedef ve risk deneyi](reports/ada-robust-training.md).
