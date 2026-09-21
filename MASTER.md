@@ -1033,3 +1033,15 @@ Bu modun canlı onayı: `TUM TAHSISLI BAKIYE ILE GERCEK ISLEM BASLAT`.
 294 adet tavanı kalkar; tahsisli USDT ve ücret rezervi sınırı sürer. Bundan sonra
 hesaba yapılan yeni yatırımlar otomatik bütçeye eklenmez. Auto-Subscribe kapalı
 kalmalıdır. 41 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.
+
+## 21 Eylül — ADA nakit bekleme denetimi
+Kullanıcı USDT bakiyesinin değiştiğini ve daha fazla işlem istediğini bildirdi.
+Yerel defter 72.50544198 USDT gösteriyor; güncel imzalı hesap sorgusu henüz yok.
+Modelin kayıtlı 29 tahmini negatif, validation MSE sabit ortalamadan kötü.
+ada_horizon_audit.py yalnız öğrenme DB sini salt okunur açarak 1/4/8/16 mum
+getiri ufuklarını, %70/%30 kronolojik ayrım ve sınırda etiket aralığı bırakmayla
+üç maliyet seviyesinde karşılaştırır. Çıktı reports/ada-horizon-audit.md.
+Canlı model/defter değiştirilmedi; bu test tekrar kullanılan kısa bir bölümde
+kapanış dolumu varsayar, bağımsız ileri kâr kanıtı değildir. Nedensel bölümleme,
+maliyet etkisi ve kaynak dosyanın değişmemesi için çevrimdışı test geçti.
+Bakiye artışı kendiliğinden tahsise eklenmez; güncel CheckOnly çıktısı gerekir.
