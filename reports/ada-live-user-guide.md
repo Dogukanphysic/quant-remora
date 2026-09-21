@@ -165,3 +165,32 @@ Bu modun canlı onayı: `TUM TAHSISLI BAKIYE ILE GERCEK ISLEM BASLAT`.
 294 adet tavanı kalkar; tahsisli USDT ve ücret rezervi sınırı sürer. Bundan sonra
 hesaba yapılan yeni yatırımlar otomatik bütçeye eklenmez. Auto-Subscribe kapalı
 kalmalıdır. 41 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.
+
+
+## 21 Eylül — otomatik Spot ADA/USDT sermaye girişi
+`-AutoAllocateSpot`, `-UseAllAllocatedFunds` ile normal kullanıcı başlatmasında
+etkinleştirilebilir. Mevcut ve sonraki serbest ADA/USDT artışları iki tutarlı
+hesap okuması ve açık/bekleyen/uygulanmamış emir kontrolleri sonrası bütçeye
+alınır. TRY/BNB veya diğer varlıklar dahil edilmez. Kilitli miktar, eksilme veya
+okumalar arasında değişiklik varsa otomatik tahsis yapılmaz; yürütme durur.
+Yeni artışın kaynağı yatırma/ödül/dış işlem olarak varsayılmaz: denetim kaydında
+`external_balance_increase_not_trade_profit` sınıfıyla tutulur. Bekleyen emir
+önce uzlaştırılır, dolumlar bir sonraki döngüde yeni sermaye olarak sayılmaz.
+`capital_flows` tablosu eski durumu ve miktar/değer farkını atomik saklar.
+Aynı artış tekrar eklenmez. `external_capital_inflows_usdt` yeni dönem içindeki
+artışların giriş anı piyasa değerini toplar; PnL = özkaynak - başlangıç referansı
+- sermaye girişleri. Ayrı dış dönüşüm/rebase bu sayacı yeni dönem için sıfırlar,
+eski dönem kayıtları korunur. ADA girişi pozisyon oluşturuyorsa ATR koruması kurulur.
+Mevcut 100 USDT farkı canlı seçenek açıldıktan sonra bu yöntemle bütçeye katılır;
+özellik hazırlığı sırasında gerçek hesap veya canlı defter değiştirilmedi.
+
+Önce eski ADA worker penceresinde Ctrl+C, ardından kullanıcı çalıştırır:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -ModelDecisions -UseAllAllocatedFunds -AutoAllocateSpot
+```
+
+Onay: `TUM SPOT ADA USDT VE YENI YATIRIMLARLA BASLAT`.
+Gerçek alım/satım etkinleşir; yeni yatırımlar sonraki döngülerde bütçeye alınır.
+Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam eder.
+48 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.

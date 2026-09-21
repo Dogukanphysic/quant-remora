@@ -30,6 +30,7 @@ INTERVAL = '4h'
 STEP_SECONDS = 14400
 MODEL_DECISIONS = False
 USE_ALL_ALLOCATED_FUNDS = False
+AUTO_ALLOCATE_SPOT = False
 
 
 class ApiError(RuntimeError):
@@ -422,6 +423,7 @@ def adopt_spot_balance(db, client):
     s.update(ada=str(ada),usdt=str(usdt),initial_mark_usdt=str(baseline),
              pnl_basis='external_rebase_mark_not_trade_profit',
              marked_equity_usdt=str(baseline),marked_pnl_from_activation_usdt='0',
+             external_capital_inflows_usdt='0',
              phase='long' if ada>0 else 'cash',stop=str(max(Decimal(0),bid-2*atr)),
              target=str(bid+4*atr),opened=market['now'],last_bar=None,last_poll=None,
              halted=None,stopped=True,exit_requested=False,use_all_allocated_funds=True)
@@ -592,6 +594,8 @@ def tick(db,client):
     if client.open_orders():
         raise ValueError('Untracked ADAUSDT orders exist')
     rates = fee_rates(client.commission())
+    if AUTO_ALLOCATE_SPOT:
+        s = allocate_spot_increases(db,client,s,market)
     if 'learning_rows' in market:
         try:
             learner = ada_learner()
@@ -628,8 +632,10 @@ def tick(db,client):
         side='BUY'
     s.update(last_bar=market['bar'],last_poll=market['now'],stopped=False,
              use_all_allocated_funds=USE_ALL_ALLOCATED_FUNDS,
+             auto_allocate_spot=AUTO_ALLOCATE_SPOT,
              marked_equity_usdt=str(dec(s['usdt'])+dec(s['ada'])*bid))
-    s['marked_pnl_from_activation_usdt'] = str(dec(s['marked_equity_usdt'])-dec(s['initial_mark_usdt']))
+    s['marked_pnl_from_activation_usdt'] = str(dec(s['marked_equity_usdt'])-dec(s['initial_mark_usdt'])
+                                             -dec(s.get('external_capital_inflows_usdt','0')))
     intent = size(s,market,side,rates[side]) if side else None
     if side=='SELL' and intent is None:
         # Residual untradeable ADA remains owned/accounted; no external top-up.
@@ -650,6 +656,54 @@ def tick(db,client):
     return settle(db,client)
 
 
+def allocate_spot_increases(db,client,s,market):
+    """Under worker lock: account increases are capital flows, never trading PnL."""
+    if not USE_ALL_ALLOCATED_FUNDS or not AUTO_ALLOCATE_SPOT:
+        raise ValueError('Automatic allocation requires both explicit allocation flags')
+    if s['identity']!=client.identity or s['contract']!=CONTRACT or s['halted'] or s['pending']:
+        raise ValueError('Unresolved ledger prevents automatic allocation')
+    if db.execute('SELECT COUNT(*) FROM orders WHERE applied=0').fetchone()[0]:
+        raise ValueError('Unapplied order prevents automatic allocation')
+    def snapshot():
+        account=client.account()
+        free=balances(account)
+        if any(r['asset'] in ('ADA','USDT') and dec(r.get('locked','0')) for r in account['balances']):
+            raise ValueError('Locked ADA/USDT requires reconciliation')
+        return {asset:free.get(asset,Decimal(0)) for asset in ('ADA','USDT')}
+    free=snapshot()
+    deltas={asset:free[asset]-dec(s[field]) for asset,field in [('ADA','ada'),('USDT','usdt')]}
+    if any(v<0 for v in deltas.values()):
+        raise ValueError('Allocated capital unavailable; external account change')
+    if not any(deltas.values()):
+        return s
+    if client.open_orders() or snapshot()!=free or client.open_orders():
+        raise ValueError('Account changed during allocation; reconciliation required')
+    bid,atr=dec(market['bid']),dec(market['atr'])
+    if bid<=0 or atr<=0:
+        raise ValueError('Invalid allocation market')
+    added=deltas['USDT']+deltas['ADA']*bid
+    result=dict(s)
+    result.update(ada=str(free['ADA']),usdt=str(free['USDT']),
+                  external_capital_inflows_usdt=str(dec(s.get('external_capital_inflows_usdt','0'))+added),
+                  use_all_allocated_funds=True,auto_allocate_spot=True)
+    if deltas['ADA']>0 and s['phase']=='cash' and size(result,market,'SELL',Decimal(0)) is not None:
+        if bid<=2*atr:
+            raise ValueError('Invalid stop for incoming ADA')
+        result.update(phase='long',opened=market['now'],stop=str(bid-2*atr),target=str(bid+4*atr))
+    result['marked_equity_usdt']=str(free['USDT']+free['ADA']*bid)
+    result['marked_pnl_from_activation_usdt']=str(dec(result['marked_equity_usdt'])
+        -dec(result['initial_mark_usdt'])-dec(result['external_capital_inflows_usdt']))
+    evidence=dict(kind='external_balance_increase_not_trade_profit',ada_delta=str(deltas['ADA']),
+                  usdt_delta=str(deltas['USDT']),value_usdt=str(added),reference_bid=str(bid),
+                  observed_at=market['now'],capital_epoch=s.get('capital_epoch',0))
+    with db:
+        db.execute('CREATE TABLE IF NOT EXISTS capital_flows(id INTEGER PRIMARY KEY,previous_state TEXT,evidence TEXT)')
+        cursor=db.execute('INSERT INTO capital_flows(previous_state,evidence) VALUES (?,?)',(json.dumps(s),json.dumps(evidence)))
+        result['last_capital_flow']=dict(evidence,id=cursor.lastrowid)
+        write(db,result)
+    return result
+
+
 @contextmanager
 def singleton(path):
     import msvcrt
@@ -666,7 +720,7 @@ def singleton(path):
 
 
 def main():
-    global MODEL_DECISIONS, USE_ALL_ALLOCATED_FUNDS
+    global MODEL_DECISIONS, USE_ALL_ALLOCATED_FUNDS, AUTO_ALLOCATE_SPOT
     parser=argparse.ArgumentParser()
     parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent','adopt-spot-balance'])
     parser.add_argument('--live',action='store_true')
@@ -675,10 +729,14 @@ def main():
     parser.add_argument('--migrate-interval',action='store_true')
     parser.add_argument('--model-decisions',action='store_true')
     parser.add_argument('--use-all-allocated-funds',action='store_true')
+    parser.add_argument('--auto-allocate-spot',action='store_true')
     args=parser.parse_args()
     configure_interval(args.interval)
     MODEL_DECISIONS = args.model_decisions
     USE_ALL_ALLOCATED_FUNDS = args.use_all_allocated_funds
+    AUTO_ALLOCATE_SPOT = args.auto_allocate_spot
+    if AUTO_ALLOCATE_SPOT and (not USE_ALL_ALLOCATED_FUNDS or args.action!='run'):
+        raise ValueError('Auto allocation requires run --use-all-allocated-funds')
     if MODEL_DECISIONS and (args.interval!='15m' or args.action!='run'):
         raise ValueError('Experimental model decisions require run --interval 15m')
     if args.migrate_interval and (args.action!='run' or args.new_key):

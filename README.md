@@ -40,6 +40,10 @@ Model karar seçeneği kârlılık kapısını geçtiği anlamına gelmez: kulla
 
 294 ADA tahsisi; yalnız bu varlığın satış gelirinden yeniden alım; başka hesap USDT'si kullanılmaz. Günlük zarar/hacim kesicisi yoktur. Stop/hedef sunucuya bırakılmış emirler değil, yerel uygulama kontrolleridir. PC, internet ve PowerShell açık; uyku/hibernasyon kapalı olmalıdır. Piyasa değerindeki değişim gerçekleşmiş işlem kârı değildir.
 
+## İsteğe bağlı otomatik sermaye tahsisi
+
+`-AutoAllocateSpot -UseAllAllocatedFunds` ile mevcut ve sonradan gelen serbest ADA/USDT artışları bütçeye eklenebilir. Eklemeler ayrı sermaye girişidir, işlem kârı sayılmaz. Varsayılan kapalıdır; kullanıcı yeniden başlatır. Ayrıntılar ve onay cümlesi [ADA kılavuzunda](reports/ada-live-user-guide.md).
+
 ## Tarihsel Bollinger / paper kılavuzu
 
 Aşağıdaki bölüm 14–17 Eylül paper hattını belgeler. Buradaki aktif politika, gölge durum ve emir yetkisi ifadeleri yalnız o hatta aittir; ADA mainnet için geçerli değildir.
