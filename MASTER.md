@@ -1074,3 +1074,12 @@ Onay: `TUM SPOT ADA USDT VE YENI YATIRIMLARLA BASLAT`.
 Gerçek alım/satım etkinleşir; yeni yatırımlar sonraki döngülerde bütçeye alınır.
 Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam eder.
 48 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.
+
+## 2026-09-22 — ADA uzun geçmiş / hedef-stop araştırması
+
+- `ada_archive.py`: 24 aylık ADAUSDT 15m arşivi, SHA-256 ve kesintisiz mum doğrulaması; 70.080 mum indirildi.
+- `ada_barrier_training.py`: sonraki açılıştan giriş, 1,5 ATR stop / 3 ATR hedef, 1/2/4 saat; üç giriş filtresiyle dokuz çevrimdışı aday.
+- Zaman sıralı %60 eğitim / iki %10 geliştirme / %20 son değerlendirme. Hiçbir aday geliştirme koşullarını geçmedi.
+- Araştırma referansı 1 saat trend: son bölümde temel maliyetle 4 işlem, -%0,701; kârlılık kanıtı yok.
+- 14 test geçti. Canlı model veya emir durumu değiştirilmedi; arka plan eğitimi eklenmedi.
+- Ayrıntılar: [ADA uzun geçmiş eğitimi](reports/ada-long-history-training.md). Veri ve model dosyaları yerelde tutulur.
