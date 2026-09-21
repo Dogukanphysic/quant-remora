@@ -65,7 +65,7 @@ def estimates(x, labels, start, end, kind):
                                    for name in ('up','down','range')})
 
 
-def simulate(rows, labels, predictions, horizon, start, end, cost):
+def simulate(rows, labels, predictions, horizon, start, end, cost, trade_records=None):
     equity = peak = 1.
     dd = 0.
     available = start
@@ -88,6 +88,9 @@ def simulate(rows, labels, predictions, horizon, start, end, cost):
         peak = max(peak,equity)
         dd = max(dd,1-equity/peak)
         trades.append(net)
+        if trade_records is not None:
+            trade_records.append(dict(index=i,exit_index=j,gross_return=gross,
+                                      net_return=net,reason=reason,prediction=predictions[i]))
         by_reason[reason] += 1
         available = j+1
     profit = sum(t for t in trades if t>0)

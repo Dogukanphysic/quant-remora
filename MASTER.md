@@ -1091,3 +1091,10 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - Hiçbir aday üç dönemin stres-maliyet koşullarını geçmedi. Bazı ağaç adaylarında az sayıda pozitif işlem var; yeterli ve tutarlı kanıt yok.
 - 18 test geçti. Canlı model/defter değişmedi; yeni sürekli servis başlatılmadı.
 - Ayrıntılar: [ADA rejim eğitimi](reports/ada-regime-training.md).
+
+## 2026-09-22 — ADA maliyet ve hata ayrıştırması
+
+- `ada_edge_diagnostics.py`: salt okunur yerel komisyon denetimi, anahtarsız kısa spread ölçümü ve dokuz adayın işlem katkıları.
+- İki satışta %0,10 tek yön komisyon; 15 halka açık örnekte medyan yaklaşık %0,041 spread. Geçmiş dolum maliyeti değildir.
+- 2 saat ağaç adayında bazı pozitif dönemler tek büyük kazanca bağımlı. %0,125 tek yön maliyet duyarlılığında dokuz adayın tamamı ikinci dönemde zarar etti.
+- 21 test geçti; canlı model/defter değiştirilmedi. [Maliyet ve kazanç analizi](reports/ada-edge-diagnostics.md).
