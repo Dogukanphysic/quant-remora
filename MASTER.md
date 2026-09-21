@@ -1083,3 +1083,11 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - Araştırma referansı 1 saat trend: son bölümde temel maliyetle 4 işlem, -%0,701; kârlılık kanıtı yok.
 - 14 test geçti. Canlı model veya emir durumu değiştirilmedi; arka plan eğitimi eklenmedi.
 - Ayrıntılar: [ADA uzun geçmiş eğitimi](reports/ada-long-history-training.md). Veri ve model dosyaları yerelde tutulur.
+
+## 2026-09-22 — Rejim ve doğrusal olmayan ADA adayları
+
+- `ada_regime_training.py`: 180 günlük geçmişle üç ayrı dönemde ridge, ExtraTrees ve rejime özel ExtraTrees; 1/2/4 saat hedefleriyle dokuz aday.
+- Önceki son %20 kullanılmadı; 56.064 mumla yalnız geliştirme araştırması yapıldı. Yeni bağımsız başarı kanıtı sayılmaz.
+- Hiçbir aday üç dönemin stres-maliyet koşullarını geçmedi. Bazı ağaç adaylarında az sayıda pozitif işlem var; yeterli ve tutarlı kanıt yok.
+- 18 test geçti. Canlı model/defter değişmedi; yeni sürekli servis başlatılmadı.
+- Ayrıntılar: [ADA rejim eğitimi](reports/ada-regime-training.md).
