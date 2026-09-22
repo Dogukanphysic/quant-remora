@@ -3,7 +3,8 @@ param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
       [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
       [switch]$RecoverUnsentOnly, [switch]$UseAllAllocatedFunds,
-      [switch]$AdoptSpotBalanceOnly, [switch]$AutoAllocateSpot, [switch]$RecoverAuthorizationOnly)
+      [switch]$AdoptSpotBalanceOnly, [switch]$AutoAllocateSpot, [switch]$RecoverAuthorizationOnly,
+      [switch]$RecoverConnectionOnly)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -12,6 +13,8 @@ $secretSecure = $null
 $apiPointer = [IntPtr]::Zero
 $secretPointer = [IntPtr]::Zero
 $previousEncoding = $env:PYTHONIOENCODING
+if ($RecoverConnectionOnly -and $RecoverAuthorizationOnly) { throw 'Yalniz bir kurtarma turu secin.' }
+if ($RecoverConnectionOnly) { $RecoverAuthorizationOnly = $true }
 if ($RecoverAuthorizationOnly -and ($CheckOnly -or $NewKey -or $MigrateInterval -or $ModelDecisions -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly -or $AdoptSpotBalanceOnly -or $AutoAllocateSpot -or $UseAllAllocatedFunds)) {
     throw 'RecoverAuthorizationOnly yalniz Interval/PythonPath ile kullanilir; emir/worker baslatmaz.'
 }
@@ -50,7 +53,7 @@ try {
     }
     elseif ($CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly -or $RecoverAuthorizationOnly) {
         Write-Host 'EMIR GONDERILMEZ; durmus agent yeniden baslatilmaz.'
-        if ($RecoverAuthorizationOnly) { Write-Host 'Hesap, bakiye ve order/test basariliysa yalniz -2015 durusu arsivlenip kaldirilir. Worker kapali kalir.' }
+        if ($RecoverAuthorizationOnly) { Write-Host 'Hesap, bakiye ve order/test basariliysa secilen yetki/baglanti durusu arsivlenip kaldirilir. Worker kapali kalir.' }
         if ($RecoverUnsentOnly) { Write-Host 'Ilk HTTP 401 emrinin yoklugu ve dolum olmamasi dogrulanirsa kayit arsivlenir; yeni baslatma ayridir.' }
         if ($OrderCheckOnly) { Write-Host 'Binance order/test: islem yetkisi ve parametre kontrolu; gercek emir/defter degisikligi yok.' }
         if ($ReconcileOnly) { Write-Host 'Bekleyen emir borsadan sorgulanir; bulunan dolumlar yerel defterle uzlastirilir. Halt kaldirilmaz.' }
@@ -86,7 +89,8 @@ try {
     $env:ADA_LIVE_AUTHORIZATION = $confirmation
     $env:PYTHONIOENCODING = 'utf-8'
     if ($RecoverAuthorizationOnly) {
-        & $PythonPath (Join-Path $projectRoot 'ada_live.py') recover-authorization --live --interval $Interval
+        $recoveryAction = if ($RecoverConnectionOnly) { 'recover-connection' } else { 'recover-authorization' }
+        & $PythonPath (Join-Path $projectRoot 'ada_live.py') $recoveryAction --live --interval $Interval
     }
     elseif ($CheckOnly) {
         & $PythonPath (Join-Path $projectRoot 'ada_live.py') diagnose --live --interval $Interval

@@ -200,3 +200,7 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 Run `scripts/start-ada-live.ps1 -RecoverAuthorizationOnly -Interval 15m` locally after correcting API/IP/Spot permissions. This command performs fresh account, free/locked balance, open-order, market, commission and order/test checks. It rejects pending or unapplied orders and other halt types. Successful recovery archives the prior state in `authorization_recoveries`, clears only the authorization halt and leaves `stopped=true`. It preserves allocation, trading history and model settings. No real order or worker start occurs.
 
 A separate user-operated normal launch is required afterward. Do not use `RecoverUnsentOnly` for this case; that path is limited to the original unfilled initial order. Recovery is protected by the existing singleton lock.
+
+## Transport halt recovery
+
+`-RecoverConnectionOnly -Interval 15m` is a separate user-run action for the exact transport/response RuntimeError. It refuses pending or unapplied orders, repeats account/balance/open-order/commission/market/order-test checks, audits the old state and leaves the worker stopped. It does not retry an order or start trading. Normal startup remains a separate local user action. Connection alerts are configured in Codex every five minutes; they do not repair or trade automatically.

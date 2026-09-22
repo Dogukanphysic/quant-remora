@@ -330,12 +330,15 @@ def check_trade_permission(client, path=DB):
     return report
 
 
-def recover_authorization(db, client):
+def recover_authorization(db, client, *, connection=False):
     """User-run recovery of a resolved -2015 halt; no orders or worker start."""
     s = read(db)
     if not s or s['identity']!=client.identity or s['contract']!=CONTRACT:
         raise ValueError('Account/strategy binding mismatch')
-    if s.get('halted')!='ApiError' or not s.get('halt_reason','').startswith('API HTTP 401; Binance code -2015;'):
+    if connection:
+        if s.get('halted')!='RuntimeError' or s.get('halt_reason')!='API transport/response failure; order outcome may be unknown':
+            raise ValueError('Connection recovery requires the exact transport halt')
+    elif s.get('halted')!='ApiError' or not s.get('halt_reason','').startswith('API HTTP 401; Binance code -2015;'):
         raise ValueError('Only a resolved HTTP 401 / -2015 halt can use authorization recovery')
     if s.get('pending') or db.execute('SELECT COUNT(*) FROM orders WHERE applied=0').fetchone()[0]:
         raise ValueError('Unresolved order requires reconciliation; recovery refused')
@@ -360,7 +363,7 @@ def recover_authorization(db, client):
     if first!=snapshot():
         raise ValueError('Balance changed during recovery checks')
     previous = json.dumps(s)
-    proof = dict(kind='resolved_authorization_halt',checked_at=market['now'],
+    proof = dict(kind='resolved_connection_halt' if connection else 'resolved_authorization_halt',checked_at=market['now'],
                  test_endpoint='/api/v3/order/test',side=side,orders_submitted=0,worker_started=False)
     with db:
         if read(db)!=s or db.execute('SELECT COUNT(*) FROM orders WHERE applied=0').fetchone()[0]:
@@ -765,7 +768,7 @@ def singleton(path):
 def main():
     global MODEL_DECISIONS, USE_ALL_ALLOCATED_FUNDS, AUTO_ALLOCATE_SPOT
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent','recover-authorization','adopt-spot-balance'])
+    parser.add_argument('action',choices=['status','run','reconcile','diagnose','order-check','recover-unsent','recover-authorization','recover-connection','adopt-spot-balance'])
     parser.add_argument('--live',action='store_true')
     parser.add_argument('--new-key',action='store_true')
     parser.add_argument('--interval',choices=['4h','15m'],default='4h')
@@ -806,6 +809,8 @@ def main():
     with singleton(DB.with_suffix('.lock')):
         db=connect()
         try:
+            if args.action=='recover-connection':
+                print(json.dumps(recover_authorization(db,client,connection=True),indent=2)); return
             if args.action=='recover-authorization':
                 print(json.dumps(recover_authorization(db,client),indent=2)); return
             if args.action=='adopt-spot-balance':

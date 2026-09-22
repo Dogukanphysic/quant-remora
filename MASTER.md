@@ -1128,3 +1128,10 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - Negatif momentumda giriş, tekrarlı emri önleme ve sonraki mumda çıkış entegrasyon testinde doğrulandı. Mainnet'e bağlanamaz; mevcut mainnet dosyası değiştirilmedi.
 - Testnet anahtarları oturumda yok; gerçek Testnet başlatması yapılmadı. Kullanıcı yerel başlatıcıya Testnet anahtarlarını girmeli.
 - Öğrenici mum getirisi proxy etiketi kullanmaya devam eder; işlem PnL'sinden doğrudan öğrenme iddiası yoktur.
+
+## 2026-09-22 — Ağ duruşu kurtarma ve bağlantı alarmı
+
+- Mainnet API transport/response failure duruşu; bekleyen/işlenmemiş emir yok. Anahtarsız Binance /time isteği başarılı; hesap anahtarları bu Codex oturumunda yok.
+- `-RecoverConnectionOnly` eklendi: yalnız tam eşleşen ağ hatası, bekleyen emirsiz defter, taze hesap/bakiye/açık emir/order-test kontrolleri sonrası duruşu arşivler; worker başlatmaz. Kullanıcı yerelde çalıştırır.
+- 51 ilgili test ve PowerShell parse kontrolü geçti. Gerçek deftere kurtarma uygulanmadı.
+- Aktif Codex heartbeat: `i-lem-agentlar-ba-lant-alarm`, 5 dakikalık salt okunur mainnet/Testnet durum kontrolü. Yeni hata/duruş ve düzelme bildirilir; değişmeyen durum sessizdir. Otomatik emir/yeniden başlatma yok.

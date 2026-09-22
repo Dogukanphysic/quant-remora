@@ -7,6 +7,28 @@ from test_ada_live import Fake
 
 
 class AuthorizationRecoveryTests(unittest.TestCase):
+    def connection_halt(self):
+        s = a.read(self.db)
+        s.update(halted='RuntimeError',halt_reason='API transport/response failure; order outcome may be unknown')
+        with self.db: a.write(self.db,s)
+        return s
+
+    def test_connection_recovery_does_not_start_or_trade(self):
+        self.connection_halt()
+        result = a.recover_authorization(self.db,self.client,connection=True)
+        self.assertFalse(result['worker_started'])
+        self.assertEqual(self.client.posts,[])
+        self.assertTrue(a.read(self.db)['stopped'])
+        self.assertEqual(a.read(self.db)['last_authorization_recovery']['kind'],'resolved_connection_halt')
+
+    def test_connection_pending_and_other_error_never_cleared(self):
+        with self.assertRaises(ValueError): a.recover_authorization(self.db,self.client,connection=True)
+        s = self.connection_halt()
+        s['pending']='unknown'
+        with self.db: a.write(self.db,s)
+        with self.assertRaises(ValueError): a.recover_authorization(self.db,self.client,connection=True)
+        self.assertEqual(a.read(self.db),s)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = a.connect(Path(self.temp.name)/'test.db')
