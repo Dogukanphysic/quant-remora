@@ -10,6 +10,29 @@ from test_binance_testnet_worker import FakeClient, daily_closes, ENABLED_ENV, N
 
 
 class HourlyTests(unittest.TestCase):
+    def test_exploration_buys_negative_momentum_once_then_exits(self):
+        step=900000
+        class Market:
+            count=100
+            def klines(self,interval,limit,symbol):
+                return [[i*step,'100','120','80',str(110-i*.1),'1',(i+1)*step-1]
+                        for i in range(self.count)][-limit:]
+        market=Market()
+        env=dict(ENABLED_ENV,BINANCE_TESTNET_EXPLORATION='true',BINANCE_TESTNET_AUTO_MODEL='false')
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ,env), \
+             patch.multiple(w,HOURLY_MODE=True,INTERVAL='15m',LOOKBACK_DAYS=96,DAY_MS=step,
+                            MAX_CANDLE_AGE_MS=1500000,MOMENTUM_THRESHOLD=w.Decimal('.002')), \
+             patch.object(w,'_now_ms',side_effect=lambda:market.count*step+100):
+            path=Path(folder)/'worker.db'
+            client=FakeClient([])
+            self.assertFalse(w._signal(market)['target_long'])
+            w.run_once(db_path=path,client=client,market_data_client=market)
+            w.run_once(db_path=path,client=client,market_data_client=market)
+            self.assertEqual(len(client.buy_calls),1)
+            market.count=101
+            w.run_once(db_path=path,client=client,market_data_client=market)
+            self.assertEqual(len(client.sell_calls),1)
+
     def test_15m_keeps_24h_lookback_and_deduplicates(self):
         step = 900000
         rows = [[i*step,'100','120','99',str(100+i*.1),'1',(i+1)*step-1] for i in range(97)]

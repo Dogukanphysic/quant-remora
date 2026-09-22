@@ -2120,6 +2120,13 @@ def run_once(
                     signal = hourly_model_authority.apply(signal)
                 except Exception:
                     signal['features']['model_authority_error'] = 'fallback_to_momentum'
+        if os.getenv('BINANCE_TESTNET_EXPLORATION') == 'true' and not exit_only:
+            if not HOURLY_MODE or INTERVAL != '15m' or ENTRY_QUOTE_USDT > Decimal('15'):
+                raise WorkerHalt('Exploration requires 15m Testnet and at most 15 USDT entries')
+            if last is None or int(last) < int(signal['candle_close_ms']):
+                import testnet_exploration
+                signal = testnet_exploration.apply(signal,environment='binance_spot_testnet',
+                                                   interval=INTERVAL,now_ms=_now_ms())
         if exit_only:
             signal = dict(signal, target_long=False, operator_exit=True,
                           candle_close_ms=max(_now_ms(), int(last or 0)+1),

@@ -1120,3 +1120,11 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - `recover-authorization` / `-RecoverAuthorizationOnly` eklendi: taze doğrulamalardan sonra yalnız bekleyen emirsiz 401/-2015 duruşunu arşivleyerek kaldırır; worker kapalı kalır.
 - Tahsis ve işlem kayıtları korunur. Gerçek deftere kurtarma uygulanmadı, worker başlatılmadı.
 - 49 ilgili test ve PowerShell sözdizimi kontrolü geçti.
+
+## 2026-09-22 — Sık işlem için Testnet keşif modu
+
+- Kullanıcı deneyi Testnet'te istedi; ADA mainnet çalışmaya devam etsin talebi korundu. Son salt okunur mainnet kontrolü hatasız ve günceldi.
+- Mevcut BTCUSDT Testnet hattına opt-in `testnet_exploration.py` ve `scripts/start-testnet-exploration.ps1` eklendi: 15 sanal USDT, saatlik keşif, 15m karar, 15–30m hedef tutma.
+- Negatif momentumda giriş, tekrarlı emri önleme ve sonraki mumda çıkış entegrasyon testinde doğrulandı. Mainnet'e bağlanamaz; mevcut mainnet dosyası değiştirilmedi.
+- Testnet anahtarları oturumda yok; gerçek Testnet başlatması yapılmadı. Kullanıcı yerel başlatıcıya Testnet anahtarlarını girmeli.
+- Öğrenici mum getirisi proxy etiketi kullanmaya devam eder; işlem PnL'sinden doğrudan öğrenme iddiası yoktur.

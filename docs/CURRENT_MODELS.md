@@ -107,3 +107,13 @@ Onay: `TUM SPOT ADA USDT VE YENI YATIRIMLARLA BASLAT`.
 Gerçek alım/satım etkinleşir; yeni yatırımlar sonraki döngülerde bütçeye alınır.
 Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam eder.
 48 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.
+
+## Opt-in BTCUSDT 15m Testnet exploration (2026-09-22)
+
+User launcher: `scripts/start-testnet-exploration.ps1`. Reuses the existing Testnet account/ledger and restarts only that worker; ADA mainnet is not imported or controlled. Entry size is 15 virtual USDT (worker rejects exploration above 15). It requires the hourly policy path with a 15m decision interval.
+
+`BINANCE_TESTNET_EXPLORATION=true` enables a scheduled probe at the hourly boundary, even without positive momentum or a profitable prediction. On the next 15m slot a valid model prediction above -0.25% may keep a long target; otherwise cash is targeted. The final two slots always target cash. This targets 15–30 minute holding, subject to connectivity, fills and reconciliation. No guarantee of an hourly fill; fresh candle window is five minutes. A stale candle cannot open a probe. Normal pending-order, account binding, sizing and deduplication checks remain active.
+
+The model hold estimate is supplied only if the existing validation-gated overlay provided one. Without it, the probe exits on the next candle. This is intentionally experimental action collection, not proof of profitable model authority. Existing learner labels remain next-candle return proxies; realized Testnet fills/PnL are separate records. Mainnet learning and decisions are untouched.
+
+Start locally with Testnet keys only. The usual confirmation is `BINANCE TESTNET AGENTI BASLAT`. Credentials are not stored by the launcher. The child inherits the exploration flag; restarting through the normal launcher without that flag disables the experiment. This work prepared and tested the mode; no Testnet worker was started by Codex because Testnet credentials were absent.
