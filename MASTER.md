@@ -1113,3 +1113,10 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - 2/4 saat ADA-only ve ADA+BTC adaylarının hiçbiri geliştirme koşullarını geçmedi; 27 test geçti.
 - Kullanıcı canlı sürecin sürmesini istedi. Salt okunur kontrolde HTTP 401 / -2015 nedeniyle ApiError halt bulundu; model45, 44 ileri zaman sonucu, bekleyen emir yok.
 - Canlı süreç/ayarlar değiştirilmedi. API/IP/Spot yetkisi erişimi doğrulanmadan çalışıyor denemez. [Ayrıntılar](reports/ada-market-context.md).
+
+## 2026-09-22 — Yetki duruşundan kullanıcı kontrollü kurtarma
+
+- Kullanıcı order/test sonucunu paylaştı: ok=true, BUY testi, gerçek emir yok.
+- `recover-authorization` / `-RecoverAuthorizationOnly` eklendi: taze doğrulamalardan sonra yalnız bekleyen emirsiz 401/-2015 duruşunu arşivleyerek kaldırır; worker kapalı kalır.
+- Tahsis ve işlem kayıtları korunur. Gerçek deftere kurtarma uygulanmadı, worker başlatılmadı.
+- 49 ilgili test ve PowerShell sözdizimi kontrolü geçti.

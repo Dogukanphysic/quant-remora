@@ -194,3 +194,9 @@ Onay: `TUM SPOT ADA USDT VE YENI YATIRIMLARLA BASLAT`.
 Gerçek alım/satım etkinleşir; yeni yatırımlar sonraki döngülerde bütçeye alınır.
 Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam eder.
 48 ilgili çevrimdışı test ve PowerShell sözdizimi kontrolü geçti.
+
+## Resolved HTTP 401 / -2015 halt (2026-09-22)
+
+Run `scripts/start-ada-live.ps1 -RecoverAuthorizationOnly -Interval 15m` locally after correcting API/IP/Spot permissions. This command performs fresh account, free/locked balance, open-order, market, commission and order/test checks. It rejects pending or unapplied orders and other halt types. Successful recovery archives the prior state in `authorization_recoveries`, clears only the authorization halt and leaves `stopped=true`. It preserves allocation, trading history and model settings. No real order or worker start occurs.
+
+A separate user-operated normal launch is required afterward. Do not use `RecoverUnsentOnly` for this case; that path is limited to the original unfilled initial order. Recovery is protected by the existing singleton lock.
