@@ -28,5 +28,9 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_archive(self.blob('2025-01',True,True),'2025-01')
 
+    def test_btc_source_label(self):
+        rows = parse_archive(self.blob('2025-01',True),'2025-01','BTCUSDT')
+        self.assertEqual(rows[0]['symbol'],'BTCUSDT')
+
 
 if __name__ == '__main__': unittest.main()

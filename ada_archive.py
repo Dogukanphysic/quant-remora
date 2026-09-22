@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 STEP = 900000
 
 
-def parse_archive(blob, month):
+def parse_archive(blob, month, symbol='ADAUSDT'):
     year, number = map(int, month.split('-'))
     start = int(datetime(year, number, 1, tzinfo=timezone.utc).timestamp()*1000)
     expected = calendar.monthrange(year, number)[1]*96
@@ -35,13 +35,15 @@ def parse_archive(blob, month):
         if ts != start+len(rows)*STEP:
             raise ValueError('Missing, duplicate or out-of-order candle')
         rows.append(dict(ts=ts, open=o, high=h, low=l, close=c, volume=v,
-                         exchange='binance_spot', symbol='ADAUSDT'))
+                         exchange='binance_spot', symbol=symbol))
     if len(rows) != expected:
         raise ValueError('Incomplete month')
     return rows
 
 
-def download(start, end, output):
+def download(start, end, output, symbol='ADAUSDT'):
+    if symbol not in ('ADAUSDT','BTCUSDT'):
+        raise ValueError('Unsupported research symbol')
     first = datetime.strptime(start, '%Y-%m')
     last = datetime.strptime(end, '%Y-%m')
     if first > last or last.strftime('%Y-%m') >= datetime.now(timezone.utc).strftime('%Y-%m'):
@@ -50,7 +52,7 @@ def download(start, end, output):
     current = first
     while current <= last:
         month = current.strftime('%Y-%m')
-        url = f'https://data.binance.vision/data/spot/monthly/klines/ADAUSDT/15m/ADAUSDT-15m-{month}.zip'
+        url = f'https://data.binance.vision/data/spot/monthly/klines/{symbol}/15m/{symbol}-15m-{month}.zip'
         with urllib.request.urlopen(url+'.CHECKSUM', timeout=30) as response:
             expected = response.read().decode('ascii').split()[0]
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -58,7 +60,7 @@ def download(start, end, output):
         digest = hashlib.sha256(blob).hexdigest()
         if digest != expected:
             raise ValueError('Checksum mismatch')
-        rows.extend(parse_archive(blob, month))
+        rows.extend(parse_archive(blob, month, symbol))
         sources.append(dict(url=url, sha256=digest))
         print(f'{month}: verified', flush=True)
         current = datetime(current.year+(current.month==12), current.month%12+1, 1)
@@ -80,5 +82,8 @@ if __name__ == '__main__':
     parser.add_argument('--start', default='2024-09')
     parser.add_argument('--end', default='2026-08')
     parser.add_argument('--output', type=Path, default=ROOT/'data/adausdt-15m-long.csv')
+    parser.add_argument('--symbol', choices=['ADAUSDT','BTCUSDT'], default='ADAUSDT')
     args = parser.parse_args()
-    download(args.start, args.end, args.output)
+    if args.symbol != 'ADAUSDT' and args.output == ROOT/'data/adausdt-15m-long.csv':
+        args.output = ROOT/'data/btcusdt-15m-long.csv'
+    download(args.start, args.end, args.output, args.symbol)

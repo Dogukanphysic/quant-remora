@@ -1106,3 +1106,10 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - Risk ölçekleme örnek dönem zararını %7,278'den %1,596'ya azalttı; kârlılık kanıtı çıkmadı. ATR birimli 4 saat modelinde yalnız yedi işlem var.
 - 24 test geçti. Canlı model ve kullanıcının sermaye ayarları değiştirilmedi.
 - Ayrıntılar: [Dayanıklı hedef ve risk deneyi](reports/ada-robust-training.md).
+
+## 2026-09-22 — BTC piyasa bağlamı ve canlı erişim duruşu
+
+- BTC için 24 aylık / 70.080 mumluk ayrı doğrulanmış arşiv indirildi. `ada_market_context.py` BTC yönü, göreli getiri, korelasyon ve oynaklık özelliklerini ekledi.
+- 2/4 saat ADA-only ve ADA+BTC adaylarının hiçbiri geliştirme koşullarını geçmedi; 27 test geçti.
+- Kullanıcı canlı sürecin sürmesini istedi. Salt okunur kontrolde HTTP 401 / -2015 nedeniyle ApiError halt bulundu; model45, 44 ileri zaman sonucu, bekleyen emir yok.
+- Canlı süreç/ayarlar değiştirilmedi. API/IP/Spot yetkisi erişimi doğrulanmadan çalışıyor denemez. [Ayrıntılar](reports/ada-market-context.md).
