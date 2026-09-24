@@ -5,7 +5,7 @@ $root = Split-Path -Parent $PSScriptRoot
 New-Item -ItemType Directory -Force (Join-Path $root "state") | Out-Null
 if ($ModelDecisions) { $env:REMORA_MODEL_DECISIONS = "true" }
 try {
-    $p = Start-Process -FilePath $PythonPath -ArgumentList @("-m", "remora_bot", "run", "--mode", "paper") `
+    $p = Start-Process -FilePath $PythonPath -ArgumentList @("-u", "-m", "remora_bot", "run", "--mode", "paper") `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $root "state\remora-bot-paper.out.log") `
         -RedirectStandardError (Join-Path $root "state\remora-bot-paper.err.log")

@@ -29,7 +29,7 @@ try {
     $answer = (Read-Host "Onay icin tam olarak yazin (Turkce karakter yok, BASLAT): $confirm").Trim()
     if ($answer -ne $confirm) { throw "Onay cumlesi eslesmedi (girilen: '$answer'); bot baslatilmadi." }
     $env:REMORA_TESTNET_CONFIRM = $confirm
-    $p = Start-Process -FilePath $PythonPath -ArgumentList @("-m", "remora_bot", "run", "--mode", "testnet") `
+    $p = Start-Process -FilePath $PythonPath -ArgumentList @("-u", "-m", "remora_bot", "run", "--mode", "testnet") `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $root "state\remora-bot-testnet.out.log") `
         -RedirectStandardError (Join-Path $root "state\remora-bot-testnet.err.log")
