@@ -1,6 +1,70 @@
 # Yerel Kripto Trader Agent — Ana Proje Belgesi
 
+**25 Eylül 2026 yayın kontrolü:** Tüm proje testleri **766/766** geçti;
+değişen beş PowerShell başlatıcısı sözdizimi kontrolünden geçti. BTC Futures,
+BTC Spot, ETH Spot Testnet, öğrenme modülleri ve deneysel `-ModelDecisions`
+seçeneği GitHub paketine dahil edildi. Kaynak/test/belge taramasında sabit API
+anahtarı veya özel anahtar bulunmadı. Hesap veritabanları, anahtarlar, günlükler,
+indirilen veri setleri ve üretilmiş model dosyaları Git dışında tutulur.
+Özel hesap raporlarının asılları yerel `state/private-reports/` altında saklandı;
+yayımlanan kopyalardan gerçek hesap tutarları çıkarıldı.
+Öğrenme izleyicisi yeni uyumluluk bilgisiyle sağlıklı (PID `32860`, 10 saniye).
+Canlı emir süreci bu yayın sırasında yeniden başlatılmadı; model karar seçeneği
+kullanıcının `-ModelDecisions` ile başlatmasını bekler.
+
+**25 Eylül 2026 deneysel model karar seçeneği:** Kullanıcının talebiyle
+`-ModelDecisions` hazırlandı. Güncel kodla kullanıcı yeniden başlatırsa öğrenilmiş
+skor, temel stratejinin uygun bulduğu yeni girişleri kabul edebilir veya
+erteleyebilir; yüksek skorlu adayların yaklaşık üçte birinde keşif sürer.
+Bu hazırlık canlı worker'ı başlatmadı. Tam komut [README](README.md) içindedir;
+teknik ve ekonomik sınırlar aşağıdaki son kayıtta açıklanır.
+
+**25 Eylül 2026 doğrulanan durum:** Kullanıcının başlatmasının ardından mainnet
+defteri `leverage=10`, `phase=long`, `quantity=0.007`, `halted=null` gösterdi.
+Emir yetkisi olmayan öğrenme izleyicisi PID `33096` ile 10 saniyelik yerel
+kontrolde sağlıklı; erken değerlendirme **5 kapanmış / 1 açık** işlemi izliyor.
+
+**25 Eylül 2026 az örnekle erken değerlendirme:** Futures öğrenicisi
+ilk sıfırdan farklı kapanış proxy'siyle zaten eğitilir; her yeni geçerli kapanışta
+yenilenir. Yüzlerce işlem bekleme koşulu yoktur. Etkin `early_learning`
+raporu ilk gözlemden itibaren sayıları, belirsizliği ve incelenecek tekrarları
+gösterir; canlı emir yetkisi vermez. Ayrıntılar belgenin sonundaki kayıttadır.
+
+**25 Eylül 2026 10x hazırlığı ve işlem günlüğü:** BTC Futures için açıkça seçilen
+`-Leverage 10` desteği eklendi; varsayılan 4x kalır. Bu hazırlık canlı worker'ı
+yeniden başlatmadı veya borsadaki kaldıracı değiştirmedi. Açık pozisyon ve 4x giriş
+özellikleri korunur. Öğrenici artık açık/bekleyen/kapanmış/pozisyonsuz sonlanmış
+döngüleri ve emir durumu gözlemlerini ayrı günlüğünde görünür tutar; eski beş
+kapanış halen doğrulanmamış cüzdan farkı proxy'sidir ve modelin emir yetkisi yoktur.
+Ayrıntılar son 25 Eylül kaydı ile [README](README.md) içindedir.
+
+**24 Eylül 2026 mainnet işlem öğrenmesi düzeltmesi:** BTC Futures ana worker'ı
+önceden kapanmış işlemlerinden model eğitmiyordu; bildirilen aktif öğrenme
+sayaçları ETH Spot Testnet'in 15m mum öğrenmesine aitti. `btc_futures_learning.py`
+artık mainnet olay defterini salt okunur okuyup ayrı bir öğrenme defterinde işlem
+sonucu adayı eğitir. Etiket hesap cüzdan değişimi vekilidir; doğrulanmış net işlem
+PnL'si değildir. Adayın karar yetkisi yoktur; çalışan mainnet Bollinger süreci
+değişmez. Ayrıntılar bu belgenin sonundaki 24 Eylül işlem öğrenmesi kaydındadır.
+
+**22 Eylül 2026 daha sık Bollinger deneyi:** Alt %10/%20/%35 bant bölgesi ve üst bant kırılımı fikirleri normal/tend filtreli ADA 15m tarihsel yürütmede sınandı. Girişler sıklaştı, fakat masraf sonrası dört dönemin tamamında sonuç negatiftir. Canlı ADA kuralı değiştirilmedi. [Bant bölgesi](reports/ada-bollinger-zone-research.md) ve [üst bant devamı](reports/ada-bollinger-breakout-research.md).
+
+**22 Eylül 2026 ADA kârlılık kapısı:** `ada_candidate_gate.py` 10 sabit Bollinger adayını dört kronolojik bölümde normal/stres maliyeti, azami düşüş ve ADA elde tutma kıyasıyla tarar. On adayın tamamı reddedildi. Arşiv daha önce incelendiğinden sonuç bağımsız ileri doğrulama değildir; otomatik canlı terfi yok. [Kural ve sonuçlar](reports/ada-candidate-gate.md).
+
+**22 Eylül 2026 dış bot taraması:** Yayınlanmış Spot geçmiş test, futures yazar beyanı, ileri paper ve simüle LSTM çıktıları kanıt düzeyine göre ayrıldı. Bu tarama canlı/Testnet stratejileri değiştirmedi. [Kaynaklar ve araştırma adayları](reports/published-trading-bot-scan-20260922.md).
+
+**22 Eylül 2026 üç koşullu uyarlama:** GeneticEngineV1'in göstergelerden birleşik kural üretme fikri `genetic_confluence_research.py` ile 27 sabit ADA/BTC Spot adayına uyarlandı. ADA eğitimde seçilen kural doğrulamada −%44,11, son bölümde −%26,95 verdi; BTC'de iki eğitim bölümünde birlikte pozitif aday çıkmadı. Canlı/Testnet kararları değişmedi. [Deney ve sınırlar](reports/genetic-confluence-research.md).
+
+**22 Eylül 2026 nakit kapısı deneyi:** Üç koşullu kuralın gölge net sermayesi son 7/30/60 günde artıyorsa işlem açan nedensel filtre sınandı. ADA 30 günlük kapı son iki bölüm zararını −%5,93/−%5,13'e düşürdü, ancak ilk iki kârlı bölümü de negatife çevirdi. Pozitif, istikrarlı aday yok; canlı/Testnet'e geçirilmedi. [Dönem sonuçları](reports/regime-gate-research.md).
+
+**22 Eylül 2026 ADA eksi teşhisi:** Sermaye başlangıcına göre yaklaşık −0,013 USDT'lik işaretli fark, Bollinger işlem serisinden değil; Bollinger geçişinden önceki 296,6 ADA satışının net ücreti/fiyat farkı ve kalan 0,309 ADA'nın anlık değerinden geliyor. Geçişten sonra dolmuş emir yok. 2 ATR stop/4 ATR hedefe yakın tarihsel simülasyonda alt banda alım ve sabit filtrelerin hepsi negatif; canlıya yeni kural terfi ettirilmedi. [Tanı ve sınırlar](reports/ada-negative-pnl-review.md).
+
 ## Güncel özet — 19 Eylül 2026
+
+**22 Eylül 2026 ölçüm ve strateji ayrımı:** `testnet_performance_audit.py` kapanmış BTC Testnet turlarını giriş kararına ve dolmuş emirlere bağlayıp net PnL'yi worker defteriyle uzlaştırır. Her turun aynı süreli BTC tutma fiyat vekili ve işlem yapmama sıfırı karşılaştırılır; `reports/testnet-performance-audit.md` anlık rapordur. 15m Bollinger çalışması önce araştırma/paper hattında kuruldu; ADA mainnet entegrasyonu ise EMA/ATR ile, sonradan deneysel ridge kararlarıyla yazıldı. Kullanıcı isteği üzerine ADA için `-BollingerTouch` seçeneği eklendi. Önceki 20 kapanmış mumun Bollinger(20,2) bandı kullanılır; en son kapanmış mum alt banda değmişse al, üst banda değmişse sat. Geçiş denetim kaydına yazılır ve ilk döngü emir üretmez. Stop/hedef, komisyon, miktar ve defter korumaları sürer. Çalışan eski süreç kendiliğinden geçmez; kullanıcı yeniden başlatmalıdır. Son eski model kararı `target_long=false` idi. Bu gözlem gelecekteki kârlılığı garanti etmez.
+
+**22 Eylül 2026 Bollinger öğrenmesi:** `ada_bollinger_learning.py` 15m alt bant olaylarından %B, bant genişliği, penetrasyon, üst banda mesafe, kısa getiriler ve bant eğimi çıkarır. İlk üst bant çıkışı veya 192 saat sonu için sonraki açılış fiyatlarıyla ücret sonrası sanal işlem etiketi oluşturur. `state/ada-bollinger-15m-learning.sqlite3` eski ridge ve gerçek emir defterinden ayrıdır. Tarihsel arşivle başlatıldı; çalışan Bollinger worker'ın her kontrolde dinamik yüklediği öğrenme modülü yeni kapanmış mumları bu deftere aktarıyor. Ayrılmış son bölüm sonucu hâlâ negatiftir; model emir kararına otomatik bağlanmaz. [Ölçüm](reports/ada-bollinger-learning.md).
+
+**22 Eylül 2026 çapraz piyasa deneyi:** `dual_market_strategy_audit.py` ADA ve BTC'nin aynı 24 aylık Spot verisinde beş sabit kuralı dört kronolojik dönem ve yön başına %0,15 maliyetle karşılaştırdı. Bant teması, trendle filtrelenmiş bant, 4h trend ve 30g momentumun hiçbiri her iki piyasada da tutarlı pozitif sonuç vermedi; son altı ay tüm adaylarda negatifti. Çalışan canlı/Testnet kuralı veya model yetkisi değiştirilmedi. [Sonuçlar](reports/dual-market-strategy-audit.md).
 
 ADA mainnet yerelde 15m karar süresine geçirildi; kullanıcı `-ModelDecisions` ile deneysel ridge karar yetkisini açtı. 4h ve 15m öğrenme defterleri ayrı. Emir defteri, 294 ADA tahsisi ve mevcut pozisyonun stop/hedefi korunur. Model yetkisi kârlılık kanıtı değildir; geçersiz/güncel olmayan tahminde EMA/ATR karar yolu kullanılır. Son zaman damgası düzeltmesi 26 çevrimdışı testten geçti; bu testler canlı dolum veya kârlılık kanıtı değildir.
 
@@ -1135,3 +1199,312 @@ Bu seçenek zorunlu alım üretmez; model kararları ve teknik korumalar devam e
 - `-RecoverConnectionOnly` eklendi: yalnız tam eşleşen ağ hatası, bekleyen emirsiz defter, taze hesap/bakiye/açık emir/order-test kontrolleri sonrası duruşu arşivler; worker başlatmaz. Kullanıcı yerelde çalıştırır.
 - 51 ilgili test ve PowerShell parse kontrolü geçti. Gerçek deftere kurtarma uygulanmadı.
 - Aktif Codex heartbeat: `i-lem-agentlar-ba-lant-alarm`, 5 dakikalık salt okunur mainnet/Testnet durum kontrolü. Yeni hata/duruş ve düzelme bildirilir; değişmeyen durum sessizdir. Otomatik emir/yeniden başlatma yok.
+
+## 2026-09-22 — ADA'dan BTCUSDT Bollinger yorumlayıcısına geçiş
+
+- Cointelegraph/TradingView, Pratik Teknik Analiz Bölüm 1–2 ve TradingView Bollinger script kataloğu kurallara çevrildi; sürümlü kayıt `config/bollinger-interpreter-v1.json`.
+- Yeni canlı yürütücü `btc_live.py`; ayrı `state/btc-live.sqlite3`, `BTCUSDT`, 15m kapalı mum ve tüm tahsisli BTC/USDT.
+- Giriş tek bant temasına dayanmaz: alt bölge geri kazanımı + toparlanma veya sıkışma üst kırılması + hacim/momentum olmak üzere en az iki kanıt kullanır.
+- 365 günlük, 15 pariteli, dört dönemli araştırmada hiçbir yorum bütün dönemlerde maliyet sonrası pozitif olmadı. Model `not_profit_validated`; BTC likidite nedeniyle seçildi.
+- ADA defteri nakit, bekleyen emirsiz durumda `OperatorSwitchToBTC` ile durduruldu. BTC yalnız kullanıcı anahtarları yerelde girip `scripts/start-btc-live.ps1` çalıştırınca başlar.
+- 3 BTC odaklı test, 31 mevcut ADA regresyon testi ve Python/PowerShell sözdizimi kontrolleri geçti.
+
+## 2026-09-23 — Testnet BTC'den stake edilebilir ETH'ye geçiş
+
+- Binance Spot Testnet exchangeInfo üzerinde ETHUSDT, SOLUSDT, ADAUSDT ve BNBUSDT işlem açık olarak doğrulandı; likidite ve stake edilebilirlik nedeniyle ETHUSDT seçildi.
+- BTC Testnet ajanı nakit, bekleyen emirsiz ve 25 kapalı turdayken durduruldu. BTC defteri ve +0,601141 sanal USDT geçmişi korunur.
+- `eth_testnet_worker.py` ve `eth_testnet_learning_store.py` ayrı ETH işlem/öğrenme defterleri kullanır; BTC kayıtları ETH performansına taşınmaz.
+- ETH politikası 15m karar, 24 saat momentum, %0,2 eşik ve işlem başına 15 sanal USDT kullanır. Gerçek para yetkileri kapalıdır.
+- `scripts/start-eth-testnet-agent.ps1` anahtarları yalnız süreç belleğinde alır. Dört ETH politika/defter testi ile Python ve PowerShell sözdizimi kontrolleri geçti.
+
+## 2026-09-23 — BTCUSDT USDⓈ-M isolated 2x mainnet ajanı
+
+- `btc_futures_live.py` ve `scripts/start-btc-futures-live.ps1` eklendi; çalışan BTC
+  Spot ajanı ve `state/btc-live.sqlite3` değiştirilmedi.
+- Futures ajanı Binance USDⓈ-M mainnet kapanmış 15m mumlarını ve mevcut gevşek
+  Bollinger yorumunu kullanır. Yalnız long, tam 2x ve isolated margin desteklenir.
+- Tahsis varsayılan olarak `-MarginUsdt` ile sınırlıdır. Kullanıcı isteğiyle eklenen
+  `-UseAllAvailableBalance`, her nakit girişinde kullanılabilir Futures USDT bakiyesini
+  yeniden ölçer; pozisyon hesabı ücret/fiyat tamponu olarak %2 bırakır. Pozisyon için
+  borsa tarafında MARK_PRICE ile tetiklenen `reduceOnly` stop ve hedef emirlerinin ikisi
+  de doğrulanır.
+- `Status`, `Diagnose` ve `OrderCheck` gerçek emir göndermez. `Configure` hesap
+  sözleşmesini isolated 2x olarak ayarlar; `Run` gerçek kaldıraçlı emir verebilir.
+- Açık pozisyon ve emir yokken `Configure`/ilk `Run`, Multi-Assets hesabını Binance
+  API üzerinden Single-Asset moda geçirir ve değişikliği yeniden okuyarak doğrular.
+- Binance'in koşullu emirleri normal `/order` kanalından ayırması nedeniyle stop ve
+  hedefler `/fapi/v1/algoOrder`; sorgulama ve iptal de Algo Order uç noktaları üzerinden
+  yürütülür. `-4120` sonrasında açık pozisyon kurtarma akışı bu kanala taşındı.
+- Kullanıcının kontrollü risk artışı talebiyle `Moderate` profil yeni pozisyonlarda
+  2,5 ATR stop / 5 ATR hedef kullanır. Kaldıraç 2x, isolated margin, borsa tarafı
+  korumalar ve %5 dönem zarar kesicisi korunur. `Standard` profil 2 ATR / 4 ATR'dir;
+  geçiş açık pozisyonun mevcut korumalarını değiştirmez.
+- 6 odaklı çevrimdışı test, Python derleme kontrolü ve mevcut Spot regresyonlarıyla
+  doğrulama yapıldı. Hazırlık sırasında Futures hesabına bağlanılmadı ve emir verilmedi.
+
+## 2026-09-23 — BTCUSDT USDⓈ-M isolated 2x testnet öğrenme ajanı
+
+- `btc_futures_testnet.py` ve `scripts/start-btc-futures-testnet.ps1` eklendi.
+- Mainnet'ten ayrı `state/btc-futures-testnet.sqlite3` yürütme ve
+  `state/btc-futures-testnet-learning.sqlite3` öğrenme defteri kullanılır.
+- Kapanan sanal turlar giriş rejimi, RSI ve net cüzdan değişimiyle etiketlenir. Üç
+  kapalı rejim örneğinden sonra ortalama sonuç karar filtresine katılır; negatif rejimde
+  beşte bir kontrollü keşif fırsatı açık kalır.
+- Testnet ve demo URL'leri sabit izin listelidir; anahtarlar yalnız süreç belleğinde
+  tutulur. Mainnet defteri ve çalışan mainnet worker değiştirilmez.
+
+## 2026-09-23 — Mainnet Futures zarar incelemesi ve giriş doğrulama kapısı
+
+- İlk dört kapanmış mainnet turunun cüzdan etkisi sırasıyla `-1,65759397`,
+  `-1,64210745`, `-1,88101920` ve `-3,15862379 USDT`; gerçekleşmiş toplam
+  `-8,33934441 USDT`.
+- Kök neden, `close > previous close OR RSI <= 45` koşulunun gerçek fiyat dönüşü
+  olmadan düşen piyasada long açabilmesiydi. RSI artık dönüş kanıtı sayılmıyor.
+- Beş yıllık BTCUSDT USD-M 15m veri geliştirme ve dokunulmamış son bir yıllık
+  doğrulama olarak ayrıldı. Alt bant, trend kırılımı ve trend içi geri çekilme
+  varyantlarından hiçbiri tahmini maliyet sonrası iki dönemde birlikte pozitif kalmadı.
+- Bu nedenle yeni mainnet girişleri `blocked_no_robust_out_of_sample_edge` kapısıyla
+  engellendi. Açık pozisyonun mevcut borsa stop/hedefleri değiştirilmez ve yönetilmeye
+  devam eder. Kapanıştan sonra dört mum bekleme uygulanır.
+- Ayrıntılı kanıt: `reports/btc-futures-loss-review-20260923.md`.
+
+## 2026-09-23 — Mainnet Futures 4x kontrollü exploratory modu
+
+- Sabit isolated kaldıraç 4x'e çıkarıldı. Emir miktarı, ayrılan marginin %98'i ve
+  4x kaldıraç üzerinden hesaplanır.
+- Eski 2x defter, worker yeniden başlatıldığında Binance kaldıraç cevabı ve
+  ayrı pozisyon sorgusundaki 4x ayarı doğrulandıktan sonra 4x sözleşmeye taşınır. Açık pozisyon miktarı ve mevcut
+  stop/hedef emirleri bu geçişte değiştirilmez.
+- `Aggressive` profil 3 ATR stop / 6 ATR hedef kullanır.
+- `Exploratory` modu kapanmış 15 dakikalık ham Bollinger sinyalinde girişe izin
+  verir; dört mum cooldown, isolated margin ve iki borsa tarafı koruma emri
+  zorunlu kalır. Dönem zarar sınırı bu modda %10'dur.
+- Varsayılan `Validated` mod, bağımsız OOS kârlılık kanıtı bulunmadığı sürece yeni
+  girişleri engeller.
+
+## 2026-09-24 — Futures yeniden başlatma ve 4x uzlaştırma düzeltmesi
+
+- Kullanıcı yeniden başlatmada `-4067` hatası bildirdi. Binance belgesindeki anlamı,
+  açık emirler varken pozisyon modu değişikliğinin reddidir. Eski hata mesajı
+  endpoint içermediğinden hatayı hangi çağrının ürettiği kesinleştirilemedi.
+- Kodda ayrı bir hata bulundu: 2x→4x geçişi, açık pozisyonda bile önce
+  `/fapi/v1/marginType` çağırıyordu. Geçiş artık yalnız `/fapi/v1/leverage`
+  çağırır; ilk, emirsiz ve pozisyonsuz yapılandırma ayrı tutulur.
+- Hesap kimliği, tahsis, halt, hesap modu, pozisyon ve korumalar değişiklikten
+  önce doğrulanır. 4x pozisyon sorgusuyla doğrulanmadan sözleşme kaydı taşınmaz.
+  Yanıtı kaybolmuş fakat borsada uygulanmış 4x ayarı yeni POST olmadan uzlaştırılır.
+- API/taşıma hataları statik HTTP yöntemi ve endpoint yolu içerir. Anahtar,
+  imza, sorgu parametreleri ve uzak hata gövdesi yayımlanmaz.
+- Bu düzeltme kod ve sahte hesap testleriyle hazırlanmıştır; canlı kaldıraç
+  değişikliğinin tamamlandığına dair kanıt değildir. Başlatma kullanıcı terminalinden yapılır.
+
+## 2026-09-24 — Futures GET zaman damgası ve kapanma tanısı
+
+- Kullanıcının terminal kaydı: `GET /fapi/v1/openOrders` HTTP 400, Binance `-1021`.
+  Bu hata eski worker'ı sonlandırıyor, terminal dışında neden kaydı bırakmıyordu.
+- Sunucu saatini doğrudan imzaya koymak yerine, düşük gecikmeli saat yanıtı
+  monotonik saate eşlenir ve her gönderimde güncel zaman damgası hesaplanır.
+  Eşleme ömrü 60 saniye, kabul edilen gidiş-dönüş süresi en fazla 1000 ms,
+  saat örnekleme deneme sayısı en fazla üçtür. Yerel duvar saati değişimleri
+  imzalı isteğin zamanını etkilemez; `recvWindow=5000` korunur.
+- Yalnız imzalı GET `-1021` hatasında bir kez yeni saat ve imzayla tekrarlanır.
+  İkinci ret worker'ı kapatmaz: tanı kaydedilir ve normal kontrol aralığı beklenir.
+  Başarısız tur `last_poll` zamanını ilerletmez. POST/DELETE tek deneme olarak kalır.
+- Run sırasında diğer sonlandırıcı hatalar, yalnız hesap kimliği eşleşen deftere
+  sabit hata türü/HTTP kodu/Binance kodu/API yolu şeklinde kaydedilir. Anahtar,
+  imza veya uzak hata metni yazılmaz. Pending, halt ve mali kayıtlar korunur.
+- Binance'ın [zaman doğrulama koşulları](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/general-info#timing-security)
+  referans alındı. Yama ve testler gerçek emir göndermeden hazırlanır;
+  canlı worker yeniden başlatması kullanıcı terminalinden yapılır.
+- Doğrulama: `python -B -m unittest test_btc_futures_clock.py test_btc_futures_live.py test_btc_live.py test_btc_futures_testnet.py`
+  ile 60 test geçti. Bunun 15'i zamanlama, tekrar sınırları ve kalıcı hata tanısı
+  için yeni regresyon testidir; canlı borsa doğrulaması değildir.
+
+## 2026-09-24 — Ağ/IP kesintisi ve öğrenme durumunun doğruluğu
+
+- Futures son kaydında `GET /fapi/v1/positionSide/dual`, HTTP 401 / `-2015`
+  nedeniyle worker kapanması doğrulandı. Genel Futures ve Spot Testnet saat
+  uçları HTTP 200 verirken bilgisayarın dış IP'si önceki başarılı bağlantıdan
+  farklıydı. İzin listesi görülmediği için IP uyuşmazlığı olası neden olarak
+  değerlendirildi; anahtar veya borsa hesabı ayarı değiştirilmedi.
+- `NetworkCheck` / `network-check` eklendi. Anahtar istemeden yalnız sabit üç
+  herkese açık GET adresinden Futures erişimi ve iki servisle dış IP kontrolü
+  yapar. IP uyuşmazlığında ortak IP sonucu üretmez. Hesap yetkilendirmesi
+  yapmaz; emir, worker başlatma ve defter değişikliği içermez.
+- `-2015` hata tanısı artık `authentication` kategorisini ve aynı API anahtarının
+  IP/Futures izinlerini kontrol etme yönlendirmesini içerir. Başlatıcı yalnız
+  mevcut Run denemesine ait hata için bu yönlendirmeyi gösterir.
+- POST/DELETE hazırlanırken sunucu saati okuması başarısızsa imzalı istek henüz
+  gönderilmediği açıkça kaydedilir. Bu iç GET hatası, bütün emir döngüsünü
+  otomatik yeniden çalıştırmak için güvenli sayılmaz. Yetki hatası sonlandırıcı
+  kalır; strateji ve canlı emir yetkisi bu yamada değiştirilmedi.
+- ETH Testnet geçici okuma hatasından kendiliğinden toparlandı. Öğrenici hata
+  JSON'unda olmayan sayaçların sıfır gösterilmesi düzeltildi. Aktif sayaçlar
+  kalıcı öğrenme defterinden tek salt okunur SQLite işlemiyle alınır. Kaynak ve
+  ölçüm zamanı eklenir; eksik/bozuk defter `null`, gerçek boş defter `0` verir.
+  Son yenileme hatası görünür kalır; eğitim veya strateji seçimi değiştirilmez.
+- Doğrulama: mevcut 60 Futures/Spot testi, 10 yeni bağlantı tanısı testi ve 9
+  ETH durum testi geçti. PowerShell başlatıcı sözdizimi kontrolü geçti.
+  Canlı worker başlatma ve imzalı hesap doğrulaması kullanıcı terminalindedir.
+
+## 2026-09-24 — Mainnet Futures kapanmış işlem öğrenmesi
+
+- Eksik açıkça düzeltildi: mainnet Futures kapanmış işlemleri daha önce eğitim
+  girdisi değildi. ETH Testnet eğitim sayaçları mainnet işlem öğrenmesi olarak
+  yorumlanamaz. ETH'nin mum getirisi hedefi ile bu hattın işlem sonucu hedefi ayrı
+  kaynaklara ve defterlere aittir.
+- `btc_futures_learning.py`, `state/btc-futures-live.sqlite3` dosyasını salt okunur
+  açar; ayrı `state/btc-futures-mainnet-learning.sqlite3` dosyasına yazar.
+  `sync`, `status`, `watch` CLI komutları ile PowerShell `LearningSync`,
+  `LearningStatus`, `LearningWatch` eylemleri anahtar istemez, ağ çağrısı veya
+  gerçek emir yapmaz. Ana worker `Status` çıktısı ayrı `learning` alanını sunar.
+- Mevcut geçmişte görülen beş kapanmış gerçek tur `legacy` bağlamıyla
+  aktarılabilir. Eğitim etiketi giriş/kapanış çevresindeki hesap cüzdan farkıdır:
+  para transferi, funding ve elle yapılan işlem farkı etkileyebilir. Dolum ve
+  gider kayıtlarıyla doğrulanmadığı için **proxy** olarak işaretlenir;
+  `verified_count=0` bu ayrımı görünür tutar. Beş örnek kârlılık kanıtı değildir.
+- Eğitim kronolojik sırada yalnız önceki sonuçları kullanır; sonuca bakarak
+  geçmiş tahmin yazılmaz. Geçmiş üzerinde kronolojik tekrar değerlendirmesi,
+  gerçek zamanda toplanmış ileri performans diye sunulmaz. Model ve eğitim
+  sayacı, etiket türleri, değerlendirme ve yenileme zamanı kalıcı tutulur.
+- Öğrenme izleyicisi mevcut trading worker'a dokunmadan şimdi çalışabilir.
+  Zengin giriş mum/karar özellikleri güncellenmiş ana worker'ın kullanıcı
+  tarafından daha sonra yeniden başlatılmasının ardından yeni girişlerde
+  kaydedilir. Eski olaylarda bulunmayan göstergeler uydurulmaz; süreç otomatik
+  yeniden başlatılmaz.
+- `trained_proxy_insufficient_evidence` eğitilmiş fakat kanıtı yetersiz aday
+  anlamına gelir. Otomatik aktivasyon, emir karar yetkisi veya Bollinger kuralına
+  otomatik filtre ekleme yoktur. Bu değişiklik adayın kârlı olduğunu ya da her
+  zararı önleyeceğini göstermez. Komutlar [README.md](README.md), veri akışı
+  [ARCHITECTURE.md](ARCHITECTURE.md) içindedir.
+- Doğrulanan ilk aktarım: beş kapanmış turdan beş öğrenme örneği; tamamı negatif
+  cüzdan farkı proxy sınıfında. `verified_count=0`, karantina sayısı `0`,
+  `training_runs=1`, model `shadow-671690ff3d2dd6143c15`.
+  Kaynağı salt okunur izleyen ayrı öğrenme süreci gizli pencerede PID `33408`
+  ile 30 saniyelik aralıkta başlatıldı; canlı ve sağlıklı olduğu gözlendi.
+  Mainnet trading worker yeniden başlatılmadı, politikası değiştirilmedi.
+  Yeni giriş bağlamı kaydı kullanıcının sonraki yeniden başlatmasında uygulanır.
+  Negatif örneklerdeki ortak özellikler nedensellik veya otomatik canlı filtre
+  kanıtı değildir. Son tam çevrimdışı paket **98 test** ile geçti;
+  PowerShell sözdizimi kontrolü başarılı.
+
+## 2026-09-24 — Responsive sinyali ve giriş öncesi gölge tahmin
+
+- `SignalProfile` seçenekleri `Trend` (varsayılan) ve `Responsive` olarak ayrıldı.
+  Responsive, `lower_zone_reached`, `recovery_confirmed`, `histogram_rising`
+  değerlerinin üçü de kesin `true` olduğunda EMA50/EMA200 trend teyidini
+  beklemeyen alt bant toparlanma girişine izin verir. 4x isolated, stop/hedef,
+  miktar ve cooldown kuralları değişmez. Bu seçenek daha erken sinyal sağlar;
+  kârlılık doğrulaması veya öğrenilmiş otomatik filtre değildir.
+- Çalışan mainnet worker bu değişiklik için yeniden başlatılmadı ve mevcut
+  `Trend` profili sürer. Kullanıcı yeni profili seçmek isterse mevcut Futures
+  terminalinde `Ctrl+C` ile süreci sonlandırdıktan sonra `Run` komutuna
+  `-SignalProfile Responsive` ekler; ikinci canlı kopya açılmaz. Tam komut
+  [README.md](README.md) içinde `Moderate` / `Exploratory` seçenekleriyle bulunur.
+  Öğrenici helper'ın yeni kod için yeniden başlatılması ana trading sürecini
+  veya sinyal profilini değiştirmez.
+- Ayrı `pre_entry_v1` model yalnız zengin giriş bağlamı bulunan kapanmış
+  örneklerle eğitilir; eski beş `legacy` işlem bu uyumlu modelin yerine geçmez.
+  Ana worker salt okunur `predict_entry` çağrısını kalıcı emir niyeti ve emir
+  gönderiminden önce yapar; tahmini mevcut niyet kaydına yazar. Sidecar işlem
+  kapandıktan sonra önceden kaydedilmiş tahminle sonucu eşleştirir.
+- Gerçek ileri proxy/doğrulanmış sayaçları başlangıçta `0`'dır. Geçmiş beş tur
+  ileri kanıt yapılamaz; kullanıcı güncel ana worker'ı başlattıktan sonra uyumlu
+  modelle önceden tahmin kaydedilen yeni işlemler kapanmalıdır. Gölge tahminin
+  bulunamaması veya öğrenicinin teknik olarak hazır olması emir yetkisi vermez.
+- `readiness` keyfî bir örnek sayısından sonra hazır olma sözü yerine yapısal
+  eksikleri listeler. Kesin dolum makbuzu, maliyet/funding ve işlem bazında net
+  PnL uzlaştırma yolu halen eksiktir; ayrıca dondurulmuş politika ile ileri
+  değerlendirme gerekir. Daha çok proxy örneği tek başına ekonomik kanıt
+  değildir. `automatic_activation=false` kalır; yeni model kârlı veya her kaybı
+  önleyebilir olarak sunulmaz.
+- Doğrulama: **128 offline test** ve PowerShell sözdizimi kontrolü geçti.
+  Yalnız öğrenici helper yeni kodla yenilendi (PID `30896`, 30 saniye);
+  ileri tahmin tabloları oluşturuldu, 5 eski örnek korundu ve hata kaydı boş.
+  Mainnet Futures bu sırada ağ/IP değişimi nedeniyle `-2015` ile kendisi durdu;
+  canlı işlem süreci araçlarla yeniden başlatılmadı. İki genel IP kaynağından
+  `57.129.2.51` doğrulandı ve kullanıcı izin listesine eklediğini bildirdi.
+  Yeni `Responsive` profili ile canlı başlangıç kullanıcı terminalinde yapılacak;
+  imzalı erişimin düzelmesi henüz bu oturumdan doğrulanmış değildir.
+
+## 2026-09-25 — Açık seçimle 10x ve bütün işlem döngülerinin kaydı
+
+- Kullanıcının isteği üzerine başlatıcıya `-Leverage 10` eklendi; varsayılan
+  `4` kalır. Python `BTC_FUTURES_LEVERAGE` yalnız 4/10 kabul eder. 10x sözleşmesi
+  `btc-usdm-isolated-10x-bollinger-long-v3`, kullanıcı onayı
+  `10X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT` olur. Onay cümlesi başlatıcı
+  sorusuna girilir; bağımsız PowerShell komutu değildir.
+- Geçiş kaynak 2x/4x sözleşmesini ve hesap bağını, pending/halt durumunu,
+  hesap kaldıraç/notional dilimini, takip edilen miktar/girişi ve korumaları
+  denetler. Yalnız kaldıraç ayarı gönderilir; borsadan tekrar okunup
+  doğrulanmadan defter taşınmaz. 10x geçişinde stop/hedef tetikleri defterle
+  eşleşmeli; bilinen pozitif liquidation fiyatı stopun altında kalmalıdır.
+- Açık 4x pozisyonun miktarı, giriş fiyatı, stop/hedef emirleri ve değişmez
+  `learning_entry` bağlamı korunur. Pozisyon büyütülmez; 10x miktar hesabı
+  sonraki yeni girişlerde uygulanır. Kullanıcı sonraki başlatmalarda da açıkça
+  `-Leverage 10` seçer. ETH Spot Testnet hattı değiştirilmez.
+- Ayrı öğrenme defterine `trade_journal` ve `order_observations` eklendi.
+  Bekleyen, açık, kapanmış ve pozisyon oluşmadan sonlanmış döngüler; giriş/
+  koruma emri gözlemleri, kaynak olay kimlikleri ve değerlendirme gerekçeleri
+  kaydedilir. `journal.current_trade`, son döngüler ve durum sayaçları
+  kapanmamış işlemi de görünür kılar. Ana worker `order_observation` olayları
+  üretir; öğrenici yalnız kaydedilmiş veriyi salt okunur aktarır.
+- Açık işlem kapanmış etiket sayılmaz. Mevcut beş eski kapanış cüzdan farkı
+  proxy'sidir; tam dolum/ücret/funding uzlaştırması halen tamamlanmamıştır.
+  Giriş öncesi özellikler ve ileri tahmin zaman sınırları korunur; modelin
+  otomatik aktivasyonu ve emir karar yetkisi açılmadı.
+- Hazırlık sırasında mainnet süreci yeniden başlatılmadı, gerçek emir veya
+  kaldıraç ayarı gönderilmedi. Canlı 10x başlangıcı kullanıcı terminalinde
+  yapılır; çalışan ayar sonradan taze durum kaydıyla doğrulanmalıdır.
+  Son tam çevrimdışı paket **164 test** ile geçti. Ayrı, emir yetkisi olmayan
+  öğrenme izleyicisi yeni kodla yenilendi (PID `37528`); işlem günlüğü
+  `valid=true`, **5 kapanmış / 1 açık döngü** gösterdi. Bu gözlem canlı 10x
+  aktivasyonu ya da kârlılık kanıtı değildir.
+
+## 2026-09-25 — Az örnekle erken değerlendirme
+
+- Mevcut eğitim alt sınırı **bir geçerli, sıfırdan farklı kapanış cüzdan
+  proxy'sidir**. Her yeni örnekte yeniden eğitim yapılır; aynı kayıt tekrar
+  okununca örnek veya eğitim sayısı artmaz. Uyumlu giriş öncesi model için
+  özelliklerin işlem açılmadan kaydedilmiş olması gerekir.
+- Etkin `early_learning` raporu ilk gözlemden itibaren örnek sayılarını,
+  sonuç dağılımını ve belirsizliği sunar. Aynı kayıtlı koşulda üç negatif
+  proxy görülmesi yalnız **inceleme önerisi** üretir; otomatik işlem engeli,
+  canlı strateji değişikliği veya kârlılık kanıtı oluşturmaz.
+- Eski işlemlerde eksik özellikler `unknown` kalır; güncel göstergelerle
+  doldurulmaz. Açık, reddedilmiş veya belirsiz işlemler kapanmış eğitim etiketi
+  değildir. Cüzdan farkı, dolum/komisyon/funding ile doğrulanmış net PnL değildir.
+- Öğrenme izleyicisi `--poll-seconds 10` ile yenilendi (PID `33096`): yalnız
+  yerel kayıtları okur. `health=healthy`, `early_learning.valid=true` ve
+  `usable_for_review=true` doğrulandı. Beş negatif eski proxy'nin giriş koşulu
+  eksik olduğundan koşula özgü çıkarım üretilmedi; açık işlem etiketlenmedi.
+  Canlı karar ve otomatik aktivasyon yetkisi kapalı. İlgili **87 test** geçti.
+- Betimleyici belirsizlik için [NIST Wilson aralığı](https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm)
+  ve ayrı Beta(2,2) yumuşatılmış oran kullanılır. Bunlar bir sonraki işlemin
+  olasılık tahmini değildir; bağımsız ve durağan gözlem varsayımı piyasada
+  doğrulanmamıştır. Mevcut model skorları/ileri tahmin geçmişi değiştirilmedi.
+
+## 2026-09-25 — Kullanıcı seçimiyle deneysel model giriş yetkisi
+
+- `-ModelDecisions` varsayılan kapalıdır. Açıkken yalnız Bollinger ve mevcut
+  risk kontrollerinden geçen yeni girişlerde model kabul/erteleme yapar.
+  Kalibre edilmemiş kayıp skorunda `0,70` deneysel eşiği kullanılır; yüksek
+  skorluların yaklaşık üçte biri deterministik keşifle kabul edilir. Eşik
+  optimize edilmedi; sonuçların kârlı olacağı veya kayıpların tekrarlanmayacağı
+  kanıtlanmadı.
+- Aynı kaldıraç, risk ve sinyal profilinden en az bir kapanmış uyumlu örnek,
+  taze tahmin ve geçerli kaynak/model bağı gerekir. Yoksa temel strateji sürer.
+  Mevcut beş legacy örnek ile özgün 4x bağlamlı açık işlem, 10x için bu kanıtı
+  sağlamaz. Açık işlemi erken etiketlemek veya geçmiş özellikleri değiştirmek yoktur.
+- Adapter kaldıraç, tahsis, miktar, stop/hedef, çıkış ve zarar sınırını değiştirmez.
+  Ertelenen girişler `model_entry_decision` olarak kaydedilir; gerçekleşmiş işlem,
+  eğitim etiketi veya tasarruf edilmiş kâr sayılmaz. Gerçek giriş tahmini değişmez
+  bağlamıyla korunur ve kapanıştan sonra ileri proxy sonucuyla değerlendirilir.
+- `model_decisions_enabled` çalışma seçimi, `model_control_latest.authority_applied`
+  son adayda model etkisidir. Ayrı öğrenicinin/modelin `decision_authority=false`
+  alanı bu yürütücü seçimiyle çelişmez. Doğrulanmış net PnL ve ekonomik
+  `readiness` şartları karşılanmış sayılmaz; bu, açıkça seçilen bir deneydir.
+- Canlı worker kullanıcı tarafından `Ctrl+C` sonrası tam 10x/Responsive komutuna
+  `-ModelDecisions` eklenerek yeniden başlatılır. Onay cümlesi aynı
+  `10X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT` olur ve başlatıcı sorunca
+  girilir. Hazırlıkta gerçek emir, hesap değişikliği veya canlı başlatma yapılmadı.

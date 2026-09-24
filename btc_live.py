@@ -1,4 +1,4 @@
-"""User-operated ADA Spot integration. Import/status/tests never send live orders.
+"""User-operated BTC Spot integration. Import/status/tests never send live orders.
 
 Live requires the local launcher, credentials, and explicit --live flag.
 No withdrawal, leverage, short, or use of unallocated quote balance.
@@ -22,19 +22,19 @@ import uuid
 from strategy_research import features, signals
 
 ROOT = Path(__file__).resolve().parent
-DB = ROOT/'state/ada-live.sqlite3'
-SYMBOL = 'ADAUSDT'
-CAP = Decimal('294')
-CONTRACT = 'ada-4h-ema20-50-200-stop2atr-target4atr-ioc-v1'
-CONFIRM = '294 ADA ILE GERCEK ISLEM BASLAT'
+DB = ROOT/'state/btc-live.sqlite3'
+SYMBOL = 'BTCUSDT'
+CAP = Decimal('0')
+CONTRACT = 'btc-15m-relaxed-bollinger-interpreter-v1'
+CONFIRM = 'TUM TAHSISLI USDT ILE BTC GERCEK ISLEM BASLAT'
 INTERVAL = '4h'
 STEP_SECONDS = 14400
 MODEL_DECISIONS = False
 USE_ALL_ALLOCATED_FUNDS = False
 AUTO_ALLOCATE_SPOT = False
 BOLLINGER_TOUCH = False
-BB_STRATEGY = 'bollinger_lower_zone10_15m_v2'
-BB_ENTRY_ZONE_FRACTION = 0.10
+BB_STRATEGY = 'validated_bollinger_trend_reclaim_or_squeeze_15m_v2'
+BB_ENTRY_ZONE_FRACTION = 0.20
 
 
 class ApiError(RuntimeError):
@@ -47,10 +47,11 @@ class ApiError(RuntimeError):
 def configure_interval(interval):
     global INTERVAL, STEP_SECONDS, CONTRACT
     if interval not in ('4h', '15m'):
-        raise ValueError('Unsupported ADA interval')
+        raise ValueError('Unsupported BTC interval')
     INTERVAL = interval
     STEP_SECONDS = {'4h':14400, '15m':900}[interval]
-    CONTRACT = f'ada-{interval}-ema20-50-200-stop2atr-target4atr-ioc-v1'
+    CONTRACT = ('btc-15m-relaxed-bollinger-interpreter-v1' if interval == '15m'
+                else 'btc-4h-ema20-50-200-stop2atr-target4atr-ioc-v1')
 
 
 def migrate_interval(db, client):
@@ -58,12 +59,12 @@ def migrate_interval(db, client):
     s = read(db)
     if not s or s['contract'] == CONTRACT:
         return
-    if INTERVAL != '15m' or s['contract'] != 'ada-4h-ema20-50-200-stop2atr-target4atr-ioc-v1':
+    if INTERVAL != '15m' or s['contract'] != 'btc-4h-ema20-50-200-stop2atr-target4atr-ioc-v1':
         raise ValueError('Unsupported interval migration')
     if s['identity'] != client.identity or s['pending'] or s['halted'] or client.open_orders():
         raise ValueError('Migration requires matching key, healthy ledger and no pending/open orders')
     free = balances(client.account())
-    if any(free.get(asset, Decimal(0)) < dec(s[field]) for asset, field in [('ADA','ada'),('USDT','usdt')]):
+    if any(free.get(asset, Decimal(0)) < dec(s[field]) for asset, field in [('BTC','btc'),('USDT','usdt')]):
         raise ValueError('Allocated capital unavailable during migration')
     fee_rates(client.commission())
     previous = json.dumps(s)
@@ -76,10 +77,10 @@ def migrate_interval(db, client):
         write(db,s)
 
 
-def ada_learner():
+def btc_learner():
     # Private module instance: never change the Testnet/paper learner globals.
     import importlib.util
-    spec = importlib.util.spec_from_file_location('ada_interval_learner', ROOT/'trend4h_learning.py')
+    spec = importlib.util.spec_from_file_location('btc_interval_learner', ROOT/'trend4h_learning.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.FRAME = INTERVAL
@@ -95,21 +96,80 @@ def dec(value):
     return number
 
 
+def _ema(values, period):
+    alpha = 2 / (period + 1)
+    result = [values[0]]
+    for value in values[1:]:
+        result.append(alpha * value + (1 - alpha) * result[-1])
+    return result
+
+
+def _rsi(values, period=14):
+    gains, losses = [], []
+    for previous, current in zip(values, values[1:]):
+        delta = current - previous
+        gains.append(max(delta, 0)); losses.append(max(-delta, 0))
+    avg_gain = statistics.fmean(gains[-period:])
+    avg_loss = statistics.fmean(losses[-period:])
+    return 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+
+
 def bollinger_touch(rows):
-    """Prior 20 closed candles define a narrow lower entry zone for the next bar."""
-    if len(rows) < 21:
-        raise ValueError('Need 21 closed candles for Bollinger touch')
-    history = [float(row['close']) for row in rows[-21:-1]]
+    """Interpret closed 15m bars without treating oversold as a reversal.
+
+    A lower-band touch is only a candidate.  A long entry additionally needs
+    an actual bullish close, improving MACD histogram and a positive 50/200
+    EMA regime.  This avoids the old ``RSI <= 45`` shortcut that could buy a
+    falling market before price had recovered.
+    """
+    if len(rows) < 205:
+        raise ValueError('Need 205 closed candles for Bollinger interpretation')
+    closes = [float(row['close']) for row in rows]
+    volumes = [float(row['volume']) for row in rows]
+    history = closes[-21:-1]
     middle = statistics.fmean(history)
     deviation = statistics.pstdev(history)
     lower, upper = middle - 2 * deviation, middle + 2 * deviation
-    entry_limit = lower + BB_ENTRY_ZONE_FRACTION * (upper - lower)
-    latest = rows[-1]
-    return dict(lower=lower, middle=middle, upper=upper,
-                entry_limit=entry_limit,
-                lower_zone_reached=latest['low'] <= entry_limit,
-                lower_touched=latest['low'] <= lower,
-                upper_touched=latest['high'] >= upper)
+    width = max(upper - lower, 1e-12)
+    entry_limit = lower + BB_ENTRY_ZONE_FRACTION * width
+    latest, previous = rows[-1], rows[-2]
+    rsi = _rsi(closes[:-1])
+    ema12, ema26 = _ema(closes, 12), _ema(closes, 26)
+    ema50, ema200 = _ema(closes, 50), _ema(closes, 200)
+    macd = [fast - slow for fast, slow in zip(ema12, ema26)]
+    signal = _ema(macd, 9)
+    histogram_rising = macd[-1] - signal[-1] > macd[-2] - signal[-2]
+    volume_average = statistics.fmean(volumes[-21:-1])
+    volume_confirmed = volumes[-1] >= volume_average * .90
+    lower_reclaim = latest['low'] <= entry_limit and latest['close'] > lower
+    recovery_confirmed = (latest['close'] > previous['close'] and
+                          latest['close'] > latest['open'])
+    trend_confirmed = (latest['close'] > ema200[-1] and
+                       ema50[-1] > ema200[-1])
+
+    # BB inside a 20-period Keltner channel approximates the published squeeze setup.
+    true_ranges = [max(row['high'] - row['low'], abs(row['high'] - rows[i-1]['close']),
+                       abs(row['low'] - rows[i-1]['close']))
+                   for i, row in enumerate(rows[-21:-1], start=len(rows)-21)]
+    atr20 = statistics.fmean(true_ranges)
+    squeeze = lower > middle - 1.5 * atr20 and upper < middle + 1.5 * atr20
+    breakout = latest['close'] > upper and squeeze
+    breakout_confirmed = volume_confirmed and histogram_rising and trend_confirmed
+    reclaim_confirmed = (lower_reclaim and recovery_confirmed and
+                         histogram_rising and trend_confirmed)
+    entry_regime = ('trend_reclaim' if reclaim_confirmed else
+                    'trend_squeeze_breakout' if breakout and breakout_confirmed else None)
+    return dict(lower=lower, middle=middle, upper=upper, entry_limit=entry_limit,
+                lower_zone_reached=lower_reclaim, lower_touched=latest['low'] <= lower,
+                upper_touched=latest['high'] >= upper, rsi=rsi,
+                volume_confirmed=volume_confirmed, histogram_rising=histogram_rising,
+                recovery_confirmed=recovery_confirmed,
+                trend_confirmed=trend_confirmed,
+                ema50=ema50[-1], ema200=ema200[-1],
+                squeeze=squeeze, breakout=breakout, entry_regime=entry_regime,
+                enter=entry_regime is not None,
+                reclaim_exit=latest['high'] >= upper,
+                breakout_exit=latest['close'] < middle)
 
 
 def grid(value, step, up=False):
@@ -123,10 +183,10 @@ class NoRedirect(HTTPRedirectHandler):
 
 class Client:
     def __init__(self, *, live=False):
-        if not live or os.getenv('ADA_LIVE_AUTHORIZATION') != CONFIRM:
+        if not live or os.getenv('BTC_LIVE_AUTHORIZATION') != CONFIRM:
             raise ValueError('Local explicit live authorization required')
-        self.key = os.environ.get('ADA_MAINNET_API_KEY','')
-        self.secret = os.environ.get('ADA_MAINNET_SECRET_KEY','')
+        self.key = os.environ.get('BTC_MAINNET_API_KEY','')
+        self.secret = os.environ.get('BTC_MAINNET_SECRET_KEY','')
         if not self.key or not self.secret:
             raise ValueError('Missing local mainnet credentials')
         self.identity = hashlib.sha256(self.key.encode()).hexdigest()
@@ -188,7 +248,7 @@ class Client:
         info = self.request('GET','exchangeInfo',{'symbol':SYMBOL})
         symbol = next(s for s in info['symbols'] if s['symbol']==SYMBOL)
         if symbol['status']!='TRADING' or not symbol.get('isSpotTradingAllowed',False) or 'LIMIT' not in symbol['orderTypes']:
-            raise ValueError('ADA Spot limit trading unavailable')
+            raise ValueError('BTC Spot limit trading unavailable')
         book = self.request('GET','ticker/bookTicker',{'symbol':SYMBOL})
         bid,ask = dec(book['bidPrice']),dec(book['askPrice'])
         if not 0 < bid <= ask:
@@ -289,7 +349,7 @@ def allocation_snapshot(client, path=None):
     if s and s['identity']!=client.identity:
         raise ValueError('Account binding mismatch')
     rows = {}
-    for asset,field in [('ADA','ada'),('USDT','usdt')]:
+    for asset,field in [('BTC','btc'),('USDT','usdt')]:
         available = free.get(asset,Decimal(0))
         tracked = dec(s[field]) if s else Decimal(0)
         rows[asset] = dict(free=str(available),locked=str(dec(items.get(asset,{}).get('locked','0'))),
@@ -333,10 +393,10 @@ def check_trade_permission(client, path=DB):
         market = client.market()
         rates = fee_rates(client.commission())
         free = balances(client.account())
-        if free.get('ADA',Decimal(0)) < dec(s['ada']) or free.get('USDT',Decimal(0)) < dec(s['usdt']):
+        if free.get('BTC',Decimal(0)) < dec(s['btc']) or free.get('USDT',Decimal(0)) < dec(s['usdt']):
             raise ValueError('Allocated balance changed; reconcile first')
         if client.open_orders():
-            raise ValueError('Open ADA orders require reconciliation first')
+            raise ValueError('Open BTC orders require reconciliation first')
         side = 'SELL' if s['phase']=='long' else 'BUY'
         intent = size(s,market,side,rates[side])
         if intent is None:
@@ -368,13 +428,13 @@ def recover_authorization(db, client, *, connection=False):
         account = client.account()
         free = balances(account)
         for row in account['balances']:
-            if row['asset'] in ('ADA','USDT') and dec(row.get('locked','0')):
+            if row['asset'] in ('BTC','USDT') and dec(row.get('locked','0')):
                 raise ValueError('Locked allocation requires reconciliation')
-        if any(free.get(asset,Decimal(0)) < dec(s[field]) for asset,field in [('ADA','ada'),('USDT','usdt')]):
+        if any(free.get(asset,Decimal(0)) < dec(s[field]) for asset,field in [('BTC','btc'),('USDT','usdt')]):
             raise ValueError('Allocated balance unavailable; reconcile first')
         if client.open_orders():
-            raise ValueError('Open ADA orders require reconciliation')
-        return {asset:free.get(asset,Decimal(0)) for asset in ('ADA','USDT')}
+            raise ValueError('Open BTC orders require reconciliation')
+        return {asset:free.get(asset,Decimal(0)) for asset in ('BTC','USDT')}
     first = snapshot()
     market = client.market()
     rates = fee_rates(client.commission())
@@ -404,7 +464,7 @@ def recover_unsent(db, client):
     if not s or s['identity']!=client.identity or s['contract']!=CONTRACT:
         raise ValueError('Account/strategy binding mismatch')
     if (not s['pending'] or not s['halted'] or s['filled_orders'] or
-            dec(s['ada'])!=CAP or dec(s['usdt'])!=0 or s['phase']!='long' or
+            dec(s['btc'])!=CAP or dec(s['usdt'])!=0 or s['phase']!='long' or
             not s.get('halt_reason','').startswith('API HTTP 401;')):
         raise ValueError('Recovery is limited to the initial unfilled sell rejected with HTTP 401')
     records = db.execute('SELECT request,response,applied FROM orders').fetchall()
@@ -427,14 +487,14 @@ def recover_unsent(db, client):
         raise ValueError('Order exists; use ReconcileOnly')
     require_absent()
     if client.open_orders():
-        raise ValueError('Open ADA orders prevent recovery')
+        raise ValueError('Open BTC orders prevent recovery')
     for endpoint in ('allOrders','myTrades'):
         history = client.request('GET',endpoint,dict(symbol=SYMBOL,startTime=start,endTime=now,limit=1000),True)
         if not isinstance(history,list) or history:
-            raise ValueError('Nonempty or invalid ADA history requires manual reconciliation')
+            raise ValueError('Nonempty or invalid BTC history requires manual reconciliation')
     free = balances(client.account())
-    if free.get('ADA',Decimal(0)) < CAP:
-        raise ValueError('Initial ADA allocation is unavailable')
+    if free.get('BTC',Decimal(0)) < CAP:
+        raise ValueError('Initial BTC allocation is unavailable')
     require_absent()
     proof = dict(kind='verified_absent_initial_401',checked_ms=now,
                  history_start_ms=start,order_queries_absent=2,
@@ -465,41 +525,41 @@ def adopt_spot_balance(db, client):
     if s.get('halt_reason')!='Allocated capital unavailable; external account change':
         raise ValueError('Capital rebase is only for the external balance-change halt')
     if client.open_orders():
-        raise ValueError('Open ADA orders prevent capital rebase')
+        raise ValueError('Open BTC orders prevent capital rebase')
     market = client.market()
     fee_rates(client.commission())
     account = client.account()
     free = balances(account)
     for row in account['balances']:
-        if row['asset'] in ('ADA','USDT') and dec(row.get('locked','0')):
-            raise ValueError('Locked ADA/USDT prevents capital rebase')
-    ada,usdt = free.get('ADA',Decimal(0)),free.get('USDT',Decimal(0))
+        if row['asset'] in ('BTC','USDT') and dec(row.get('locked','0')):
+            raise ValueError('Locked BTC/USDT prevents capital rebase')
+    btc,usdt = free.get('BTC',Decimal(0)),free.get('USDT',Decimal(0))
     bid,atr = dec(market['bid']),dec(market['atr'])
-    if bid<=0 or atr<=0 or (ada>0 and bid<=2*atr) or ada*bid+usdt<=0:
+    if bid<=0 or atr<=0 or (btc>0 and bid<=2*atr) or btc*bid+usdt<=0:
         raise ValueError('Invalid balance or market for capital rebase')
     # Catch balance changes during the checks; never silently import locked funds.
     second = client.account()
     second_free = balances(second)
-    if any(second_free.get(asset,Decimal(0))!=value for asset,value in [('ADA',ada),('USDT',usdt)]):
+    if any(second_free.get(asset,Decimal(0))!=value for asset,value in [('BTC',btc),('USDT',usdt)]):
         raise ValueError('Balance changed during verification; retry diagnosis')
-    if any(row['asset'] in ('ADA','USDT') and dec(row.get('locked','0')) for row in second['balances']):
+    if any(row['asset'] in ('BTC','USDT') and dec(row.get('locked','0')) for row in second['balances']):
         raise ValueError('Funds became locked during verification')
     if client.open_orders():
         raise ValueError('Order appeared during verification')
     previous = json.dumps(s)
-    baseline = ada*bid+usdt
-    s.update(ada=str(ada),usdt=str(usdt),initial_mark_usdt=str(baseline),
+    baseline = btc*bid+usdt
+    s.update(btc=str(btc),usdt=str(usdt),initial_mark_usdt=str(baseline),
              pnl_basis='external_rebase_mark_not_trade_profit',
              marked_equity_usdt=str(baseline),marked_pnl_from_activation_usdt='0',
              external_capital_inflows_usdt='0',
-             phase='long' if ada>0 else 'cash',stop=str(max(Decimal(0),bid-2*atr)),
+             phase='long' if btc>0 else 'cash',stop=str(max(Decimal(0),bid-2*atr)),
              target=str(bid+4*atr),opened=market['now'],last_bar=None,last_poll=None,
              halted=None,stopped=True,exit_requested=False,use_all_allocated_funds=True)
     s.pop('halt_reason',None)
     s.pop('decision',None)
     s.pop('latest_candle_decision',None)
     s.setdefault('learning',{})['decision_authority']=False
-    record = dict(kind='user_authorized_external_spot_rebase',ada=str(ada),usdt=str(usdt),
+    record = dict(kind='user_authorized_external_spot_rebase',btc=str(btc),usdt=str(usdt),
                   reference_bid=str(bid),baseline_usdt=str(baseline),
                   checked_at=market['now'],not_agent_profit=True)
     with db:
@@ -508,7 +568,7 @@ def adopt_spot_balance(db, client):
         s['capital_epoch']=cur.lastrowid
         s['last_capital_rebase']=record
         write(db,s)
-    return dict(ok=True,orders_submitted=0,worker_started=False,ada=str(ada),usdt=str(usdt),
+    return dict(ok=True,orders_submitted=0,worker_started=False,btc=str(btc),usdt=str(usdt),
                 new_epoch_baseline_usdt=str(baseline),use_all_allocated_funds=True)
 
 
@@ -519,16 +579,23 @@ def initialize(db, client, market):
             raise ValueError('Account/strategy does not match this ledger')
         return s
     free = balances(client.account())
-    if free.get('ADA',Decimal(0)) < CAP or client.open_orders():
-        raise ValueError('Need 294 free ADA and no existing ADAUSDT orders')
+    btc, usdt = free.get('BTC',Decimal(0)), free.get('USDT',Decimal(0))
+    if client.open_orders():
+        raise ValueError('Existing BTCUSDT orders require reconciliation')
+    if btc * dec(market['bid']) + usdt <= 0:
+        raise ValueError('No free BTC/USDT balance to allocate')
     reference,atr = dec(market['bid']),dec(market['atr'])
     if atr <= 0 or reference <= atr*2:
         raise ValueError('Invalid initial ATR')
-    s = dict(contract=CONTRACT,interval=INTERVAL,identity=client.identity,ada=str(CAP),usdt='0',
-             initial_mark_usdt=str(CAP*reference),pnl_basis='initial_mark_not_original_purchase_cost',
-             phase='long',stop=str(reference-2*atr),target=str(reference+4*atr),
+    baseline = btc * reference + usdt
+    s = dict(contract=CONTRACT,interval=INTERVAL,identity=client.identity,btc=str(btc),usdt=str(usdt),
+             initial_mark_usdt=str(baseline),pnl_basis='initial_spot_mark_not_original_purchase_cost',
+             phase='long' if btc * reference >= Decimal('5') else 'cash',
+             stop=str(reference-2*atr),target=str(reference+4*atr),
              opened=market['now'],last_bar=None,pending=None,halted=None,
-             exit_requested=False,filled_orders=0,last_poll=None,stopped=False)
+             exit_requested=False,filled_orders=0,last_poll=None,stopped=False,
+             use_all_allocated_funds=True,auto_allocate_spot=False,
+             strategy_mode=BB_STRATEGY,entry_regime='external' if btc else None)
     with db:
         write(db,s)
     return s
@@ -538,17 +605,17 @@ def prepare_new_key(db,client):
     """User-requested rebind is supported only before any order intent exists."""
     s=read(db)
     if s and (s['contract']!=CONTRACT or s['pending'] or s['filled_orders'] or
-              dec(s['ada'])!=CAP or dec(s['usdt'])!=0 or s['last_bar'] is not None):
-        raise ValueError('New-key shortcut requires an untouched 294 ADA allocation')
+              dec(s['btc'])!=CAP or dec(s['usdt'])!=0 or s['last_bar'] is not None):
+        raise ValueError('New-key shortcut requires an untouched 294 BTC allocation')
     if db.execute('SELECT COUNT(*) FROM orders').fetchone()[0]:
         raise ValueError('Existing order history requires separate account reconciliation')
     report=diagnose(client,check_allocation=False)
-    (ROOT/'reports/ada-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+    (ROOT/'reports/btc-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     if not all(check['ok'] for check in report['checks'].values()):
         reasons=[name+': '+check.get('reason','check failed') for name,check in report['checks'].items() if not check['ok']]
         raise ValueError('; '.join(reasons))
-    if balances(client.account()).get('ADA',Decimal(0)) < CAP:
-        raise ValueError('New key must expose at least 294 free ADA')
+    if balances(client.account()).get('BTC',Decimal(0)) < CAP:
+        raise ValueError('New key must expose at least 294 free BTC')
     if s:
         previous=dict(s)
         s.update(identity=client.identity,halted=None)
@@ -571,9 +638,9 @@ def size(s,market,side,rate):
     if side=='BUY':
         available = dec(s['usdt'])/(price*(1+rate))
         if not USE_ALL_ALLOCATED_FUNDS:
-            available = min(CAP-dec(s['ada']),available)
+            available = min(CAP-dec(s['btc']),available)
     else:
-        available = dec(s['ada'])/(1+rate)
+        available = dec(s['btc'])/(1+rate)
     qty = grid(min(available,dec(lot['maxQty'])),step)
     if price <= 0 or qty <= 0 or qty < dec(lot['minQty']):
         return None
@@ -616,26 +683,26 @@ def settle(db,client):
         raise ValueError('Incomplete fill evidence')
     if abs(sum((dec(f['qty'])*dec(f['price']) for f in fills),Decimal(0))-quote) > Decimal('.00000001'):
         raise ValueError('Quote/fill mismatch')
-    fees = {'ADA':Decimal(0),'USDT':Decimal(0)}
+    fees = {'BTC':Decimal(0),'USDT':Decimal(0)}
     for fill in fills:
         if fill['commissionAsset'] not in fees and dec(fill['commission']) != 0:
             raise ValueError('Unallocated commission asset; reconciliation required')
         if fill['commissionAsset'] in fees:
             fees[fill['commissionAsset']] += dec(fill['commission'])
-    ada,usdt = dec(s['ada']),dec(s['usdt'])
+    btc,usdt = dec(s['btc']),dec(s['usdt'])
     if intent['side']=='BUY':
         if quote > qty*dec(intent['price'])+Decimal('.00000001'):
             raise ValueError('Buy execution exceeds limit')
-        ada += qty-fees['ADA']; usdt -= quote+fees['USDT']
+        btc += qty-fees['BTC']; usdt -= quote+fees['USDT']
         if qty:
             s.update(phase='long',opened=intent['created'],stop=intent['stop'],target=intent['target'])
     else:
         if quote+Decimal('.00000001') < qty*dec(intent['price']):
             raise ValueError('Sell execution below limit')
-        ada -= qty+fees['ADA']; usdt += quote-fees['USDT']
-    if ada < 0 or usdt < 0 or (not USE_ALL_ALLOCATED_FUNDS and ada > CAP):
+        btc -= qty+fees['BTC']; usdt += quote-fees['USDT']
+    if btc < 0 or usdt < 0 or (not USE_ALL_ALLOCATED_FUNDS and btc > CAP):
         raise ValueError('Fill violates allocated capital')
-    s.update(ada=str(ada),usdt=str(usdt),pending=None,filled_orders=s['filled_orders']+int(qty>0))
+    s.update(btc=str(btc),usdt=str(usdt),pending=None,filled_orders=s['filled_orders']+int(qty>0))
     with db:
         db.execute('UPDATE orders SET applied=1,response=? WHERE client_id=?',(json.dumps(order),intent['client_id']))
         write(db,s)
@@ -664,10 +731,10 @@ def tick(db,client):
     decision_clock = lambda: market['now'] + time.monotonic() - observed_at
     s = initialize(db,client,market)
     free = balances(client.account())
-    if free.get('ADA',Decimal(0)) < dec(s['ada']) or free.get('USDT',Decimal(0)) < dec(s['usdt']):
+    if free.get('BTC',Decimal(0)) < dec(s['btc']) or free.get('USDT',Decimal(0)) < dec(s['usdt']):
         raise ValueError('Allocated capital unavailable; external account change')
     if client.open_orders():
-        raise ValueError('Untracked ADAUSDT orders exist')
+        raise ValueError('Untracked BTCUSDT orders exist')
     rates = fee_rates(client.commission())
     if BOLLINGER_TOUCH and s.get('strategy_mode') != BB_STRATEGY:
         previous = json.dumps(s,allow_nan=False)
@@ -683,8 +750,8 @@ def tick(db,client):
         s = allocate_spot_increases(db,client,s,market)
     if 'learning_rows' in market:
         try:
-            learner = ada_learner()
-            learning_path = ROOT/('state/ada-live-learning.sqlite3' if INTERVAL=='4h' else 'state/ada-live-15m-learning.sqlite3')
+            learner = btc_learner()
+            learning_path = ROOT/('state/btc-live-learning.sqlite3' if INTERVAL=='4h' else 'state/btc-live-15m-learning.sqlite3')
             learned = learner.update(market['learning_rows'],market['now'],path=learning_path,clock=decision_clock)
             s['learning'] = {k:learned[k] for k in ('status','model_id','label_counts','forward_scored_predictions')}
             s['learning'].update(symbol=SYMBOL,interval=INTERVAL,decision_authority=False)
@@ -697,18 +764,25 @@ def tick(db,client):
         band = market.get('bollinger_touch')
         if not band:
             raise ValueError('Missing 15m Bollinger evidence')
-        market = dict(market,enter=bool(band['lower_zone_reached']),leave=bool(band['upper_touched']))
+        active_regime = s.get('entry_regime')
+        leave = (band['breakout_exit'] if active_regime == 'squeeze_breakout'
+                 else band['reclaim_exit'])
+        market = dict(market,enter=bool(band['enter']),leave=bool(leave))
         s['decision'] = dict(owner=BB_STRATEGY,lower=band['lower'],upper=band['upper'],
                              entry_limit=band['entry_limit'],
-                             lower_zone_reached=market['enter'],
-                             lower_touched=band['lower_touched'],upper_touched=market['leave'],
-                             based_on='prior_20_closed_candles',bar=market['bar'])
+                             lower_zone_reached=band['lower_zone_reached'],
+                             lower_touched=band['lower_touched'],upper_touched=band['upper_touched'],
+                             rsi=band['rsi'],volume_confirmed=band['volume_confirmed'],
+                             histogram_rising=band['histogram_rising'],squeeze=band['squeeze'],
+                             breakout=band['breakout'],entry_regime=band['entry_regime'],
+                             enter=market['enter'],leave=market['leave'],
+                             based_on='closed_15m_bollinger_interpreter_v1',bar=market['bar'])
     elif MODEL_DECISIONS and INTERVAL == '15m' and fresh:
-        from ada_model_decisions import decision
+        from btc_model_decisions import decision
         if s.get('learning',{}).get('status') == 'error':
             s['decision']['reason'] = 'learning_refresh_failed'
         else:
-            s['decision'] = decision(ROOT/'state/ada-live-15m-learning.sqlite3',market['bar'],decision_clock())
+            s['decision'] = decision(ROOT/'state/btc-live-15m-learning.sqlite3',market['bar'],decision_clock())
         if s['decision']['owner'] == 'learned_model':
             market = dict(market,enter=s['decision']['target_long'],leave=not s['decision']['target_long'])
     s.setdefault('learning',{})['decision_authority'] = s['decision']['owner'] == 'learned_model'
@@ -725,15 +799,17 @@ def tick(db,client):
             side='SELL'; s['exit_requested']=True
     elif fresh and market['enter'] and 0 <= market['now']-market['bar']/1000-STEP_SECONDS <= 300:
         side='BUY'
+        if BOLLINGER_TOUCH:
+            s['entry_regime'] = market['bollinger_touch']['entry_regime']
     s.update(last_bar=market['bar'],last_poll=market['now'],stopped=False,
              use_all_allocated_funds=USE_ALL_ALLOCATED_FUNDS,
              auto_allocate_spot=AUTO_ALLOCATE_SPOT,
-             marked_equity_usdt=str(dec(s['usdt'])+dec(s['ada'])*bid))
+             marked_equity_usdt=str(dec(s['usdt'])+dec(s['btc'])*bid))
     s['marked_pnl_from_activation_usdt'] = str(dec(s['marked_equity_usdt'])-dec(s['initial_mark_usdt'])
                                              -dec(s.get('external_capital_inflows_usdt','0')))
     intent = size(s,market,side,rates[side]) if side else None
     if side=='SELL' and intent is None:
-        # Residual untradeable ADA remains owned/accounted; no external top-up.
+        # Residual untradeable BTC remains owned/accounted; no external top-up.
         s.update(phase='cash',exit_requested=False)
     if not intent:
         with db:
@@ -741,7 +817,8 @@ def tick(db,client):
         return s
     if side=='BUY' and dec(intent['price']) <= 2*atr:
         raise ValueError('Invalid entry stop')
-    intent.update(client_id='qra-'+uuid.uuid4().hex[:28],created=market['now'],
+    intent.update(client_id='qrb-'+uuid.uuid4().hex[:28],created=market['now'],
+                  signal_bar=market['bar'],entry_regime=s.get('entry_regime'),
                   stop=str(dec(intent['price'])-2*atr),target=str(dec(intent['price'])+4*atr))
     s['pending']=intent['client_id']
     with db:
@@ -762,11 +839,11 @@ def allocate_spot_increases(db,client,s,market):
     def snapshot():
         account=client.account()
         free=balances(account)
-        if any(r['asset'] in ('ADA','USDT') and dec(r.get('locked','0')) for r in account['balances']):
-            raise ValueError('Locked ADA/USDT requires reconciliation')
-        return {asset:free.get(asset,Decimal(0)) for asset in ('ADA','USDT')}
+        if any(r['asset'] in ('BTC','USDT') and dec(r.get('locked','0')) for r in account['balances']):
+            raise ValueError('Locked BTC/USDT requires reconciliation')
+        return {asset:free.get(asset,Decimal(0)) for asset in ('BTC','USDT')}
     free=snapshot()
-    deltas={asset:free[asset]-dec(s[field]) for asset,field in [('ADA','ada'),('USDT','usdt')]}
+    deltas={asset:free[asset]-dec(s[field]) for asset,field in [('BTC','btc'),('USDT','usdt')]}
     if any(v<0 for v in deltas.values()):
         raise ValueError('Allocated capital unavailable; external account change')
     if not any(deltas.values()):
@@ -776,19 +853,19 @@ def allocate_spot_increases(db,client,s,market):
     bid,atr=dec(market['bid']),dec(market['atr'])
     if bid<=0 or atr<=0:
         raise ValueError('Invalid allocation market')
-    added=deltas['USDT']+deltas['ADA']*bid
+    added=deltas['USDT']+deltas['BTC']*bid
     result=dict(s)
-    result.update(ada=str(free['ADA']),usdt=str(free['USDT']),
+    result.update(btc=str(free['BTC']),usdt=str(free['USDT']),
                   external_capital_inflows_usdt=str(dec(s.get('external_capital_inflows_usdt','0'))+added),
                   use_all_allocated_funds=True,auto_allocate_spot=True)
-    if deltas['ADA']>0 and s['phase']=='cash' and size(result,market,'SELL',Decimal(0)) is not None:
+    if deltas['BTC']>0 and s['phase']=='cash' and size(result,market,'SELL',Decimal(0)) is not None:
         if bid<=2*atr:
-            raise ValueError('Invalid stop for incoming ADA')
+            raise ValueError('Invalid stop for incoming BTC')
         result.update(phase='long',opened=market['now'],stop=str(bid-2*atr),target=str(bid+4*atr))
-    result['marked_equity_usdt']=str(free['USDT']+free['ADA']*bid)
+    result['marked_equity_usdt']=str(free['USDT']+free['BTC']*bid)
     result['marked_pnl_from_activation_usdt']=str(dec(result['marked_equity_usdt'])
         -dec(result['initial_mark_usdt'])-dec(result['external_capital_inflows_usdt']))
-    evidence=dict(kind='external_balance_increase_not_trade_profit',ada_delta=str(deltas['ADA']),
+    evidence=dict(kind='external_balance_increase_not_trade_profit',btc_delta=str(deltas['BTC']),
                   usdt_delta=str(deltas['USDT']),value_usdt=str(added),reference_bid=str(bid),
                   observed_at=market['now'],capital_epoch=s.get('capital_epoch',0))
     with db:
@@ -855,7 +932,7 @@ def main():
         return 0 if report['ok'] else 1
     if args.action=='diagnose':
         report=diagnose(client)
-        (ROOT/'reports/ada-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+        (ROOT/'reports/btc-live-diagnosis.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
         print(json.dumps(report,indent=2))
         return
     DB.parent.mkdir(parents=True,exist_ok=True)

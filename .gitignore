@@ -26,6 +26,10 @@ state/
 data/*.csv
 data/*.manifest.json
 reports/*.json
+data/**/*.csv
+data/**/*.manifest.json
+reports/**/*.json
+reports/*-console.txt
 
 # Local editor / operating system
 .idea/

@@ -1,0 +1,5 @@
+# Bollinger üst bant devamı deneyi
+
+22 Eylül 2026. Alt bant beklemek yerine üst bandın üzerinde kapanan 15 dakikalık ADAUSDT mumundan sonra alım yapan dört sabit giriş; orta bandın altına kapanış veya alt banda temasla çıkışla sınandı. İlk üst bant kırılımı ve 4 saatlik trend filtresi ayrı seçeneklerdir. Dolum sonraki mum açılışında, yön başına %0,15 maliyetle ve mevcut 2 ATR stop / 4 ATR hedef / 192 saat azami tutma varsayımıyla simüle edildi.
+
+Sekiz seçeneğin **tamamı dört tarihsel bölümün tamamında negatiftir**. En az kötü son bölüm seçeneği, üst banda ilk taşan kapanış + 4h trend + alt bant çıkışı için −%21,50 oldu; ikinci bölümde −%47,00 kaybetti. Üst bantta devam fikri de bu yürütme biçimiyle canlı ADA için kanıtlanmış avantaj sağlamıyor. Tam sonuçlar `reports/ada-bollinger-breakout-research.json` dosyasındadır. Araştırma gerçek emir veya canlı strateji değişikliği yapmadı. Kullanılan arşiv önceden incelenmiş olduğundan bağımsız ileri doğrulama değildir; gerçek IOC dolumu ve değişken spread simüle edilmez.

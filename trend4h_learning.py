@@ -1,5 +1,6 @@
 """Fast 4h return challenger. Proxy labels never count as executed trades."""
 import hashlib
+from contextlib import closing
 import json
 import sqlite3
 import time
@@ -96,6 +97,16 @@ def train(db, clock=None):
 
 def update(rows, now=None, seed=False, path=PATH, clock=None):
     now = time.time() if now is None else now
+    # The running ADA worker loads this module afresh on every poll. Route only
+    # its opted-in Bollinger ledger to the separate event learner; BTC/4h stay put.
+    if not seed and os.path.abspath(path) == os.path.abspath(ROOT/'state/ada-live-15m-learning.sqlite3'):
+        live_path = ROOT/'state/ada-live.sqlite3'
+        if live_path.exists():
+            with closing(sqlite3.connect(live_path.resolve().as_uri()+'?mode=ro',uri=True)) as live_db:
+                live_row = live_db.execute('SELECT value FROM state WHERE id=1').fetchone()
+            if live_row and json.loads(live_row[0]).get('strategy_mode') == 'bollinger_touch_15m_v1':
+                from ada_bollinger_learning import update_live
+                return update_live(rows, now)
     db = connect(path)
     try:
         with db:

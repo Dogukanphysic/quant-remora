@@ -160,6 +160,61 @@ class LiveTests(unittest.TestCase):
         a.tick(self.db,self.client)
         self.assertEqual(self.client.posts[-1]['side'],'BUY')
         self.assertEqual(a.read(self.db)['contract'],a.CONTRACT)
+    def test_bollinger_touch_uses_prior_band_and_closed_candle_extremes(self):
+        rows=[dict(close=1.0,low=1.0,high=1.0) for _ in range(20)]
+        rows.append(dict(close=1.01,low=.99,high=1.01))
+        result=a.bollinger_touch(rows)
+        self.assertEqual((result['lower'],result['upper']),(1.0,1.0))
+        self.assertTrue(result['lower_zone_reached'])
+        self.assertTrue(result['lower_touched'])
+        self.assertTrue(result['upper_touched'])
+    def test_bollinger_near_lower_zone_is_narrow_and_not_a_touch(self):
+        rows=[dict(close=float(i % 2),low=0.0,high=1.0) for i in range(20)]
+        band=a.bollinger_touch(rows+[dict(close=.5,low=-.4,high=.5)])
+        self.assertAlmostEqual(band['lower'],-.5)
+        self.assertAlmostEqual(band['entry_limit'],-.3)
+        self.assertTrue(band['lower_zone_reached'])
+        self.assertFalse(band['lower_touched'])
+        outside=a.bollinger_touch(rows+[dict(close=.5,low=-.29,high=.5)])
+        self.assertFalse(outside['lower_zone_reached'])
+    def test_bollinger_switch_audited_and_next_candles_trade(self):
+        a.configure_interval('15m')
+        self.client.book.update(bar=100*900000,now=101*900+30,
+                                bollinger_touch=dict(lower=.49,upper=.52,entry_limit=.493,
+                                                     lower_zone_reached=True,lower_touched=False,upper_touched=False))
+        s=a.initialize(self.db,self.client,self.client.market())
+        s.update(ada='0',usdt='100',phase='cash')
+        with self.db: a.write(self.db,s)
+        with patch.object(a,'BOLLINGER_TOUCH',True):
+            a.tick(self.db,self.client)
+            self.assertEqual(self.client.posts,[])
+            self.assertEqual(a.read(self.db)['strategy_mode'],a.BB_STRATEGY)
+            self.assertEqual(self.db.execute('SELECT COUNT(*) FROM strategy_changes').fetchone()[0],1)
+            self.client.book.update(bar=101*900000,now=102*900+30)
+            a.tick(self.db,self.client)
+            self.assertEqual(self.client.posts[-1]['side'],'BUY')
+            self.client.book.update(bar=102*900000,now=103*900+30,
+                                    bollinger_touch=dict(lower=.49,upper=.52,entry_limit=.493,
+                                                         lower_zone_reached=False,lower_touched=False,upper_touched=True))
+            a.tick(self.db,self.client)
+            self.assertEqual(self.client.posts[-1]['side'],'SELL')
+        with self.assertRaisesRegex(ValueError,'--bollinger-touch'):
+            a.tick(self.db,self.client)
+    def test_existing_bollinger_touch_v1_migrates_without_first_candle_order(self):
+        a.configure_interval('15m')
+        self.client.book.update(bar=100*900000,now=101*900+30,
+                                bollinger_touch=dict(lower=.49,upper=.52,entry_limit=.493,
+                                                     lower_zone_reached=True,lower_touched=False,upper_touched=False))
+        s=a.initialize(self.db,self.client,self.client.market())
+        s.update(ada='0',usdt='100',phase='cash',strategy_mode='bollinger_touch_15m_v1')
+        with self.db: a.write(self.db,s)
+        with patch.object(a,'BOLLINGER_TOUCH',True):
+            a.tick(self.db,self.client)
+        migrated=a.read(self.db)
+        self.assertEqual(migrated['strategy_mode'],a.BB_STRATEGY)
+        self.assertEqual(migrated['last_bar'],100*900000)
+        self.assertEqual(self.client.posts,[])
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM strategy_changes').fetchone()[0],1)
     def test_15m_learner_does_not_change_shared_learner(self):
         import trend4h_learning as shared
         before = (shared.STEP,shared.FRAME,shared.VERSION)

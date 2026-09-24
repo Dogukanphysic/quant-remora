@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "bollinger_interpreter_15m_v1",
+  "symbol": "BTCUSDT",
+  "interval": "15m",
+  "decision_authority": "live_with_local_user_start",
+  "sources": [
+    "https://tr.tradingview.com/news/cointelegraph:16125c3b2d9e8:0/",
+    "https://pratikteknikanaliz.com/2021/07/16/bollinger-bantlari-1/",
+    "https://pratikteknikanaliz.com/2021/08/29/bollinger-bantlari-2-indikatorlerle-birlikte-kullanimi/",
+    "https://ar.tradingview.com/scripts/bollinger-bands/"
+  ],
+  "principles": {
+    "closed_candles_only": true,
+    "band_touch_alone_is_not_a_signal": true,
+    "squeeze_direction_requires_confirmation": true,
+    "outside_close_can_mean_continuation": true,
+    "risk_controls_override_entries": true
+  },
+  "live_rule": {
+    "name": "relaxed_bollinger_reclaim_or_squeeze_15m_v1",
+    "entry_any": [
+      "lower_zone_reclaim_with_rsi_recovery",
+      "upper_breakout_after_squeeze_with_volume_or_momentum"
+    ],
+    "exit_any": [
+      "upper_band_touch",
+      "middle_band_loss_after_breakout",
+      "two_atr_stop",
+      "four_atr_target",
+      "192_hour_timeout"
+    ],
+    "minimum_independent_confirmations": 2,
+    "cooldown_closed_bars": 4,
+    "capital": "all_allocated_BTC_and_USDT"
+  },
+  "evidence": {
+    "status": "not_profit_validated",
+    "warning": "365-day chronological tests found no rule profitable in every fold after 0.15% per-side costs; live activation remains a user-operated risk decision."
+  }
+}

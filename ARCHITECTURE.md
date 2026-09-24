@@ -1,8 +1,156 @@
 # Quant Remora — sistem mimarisi
 
-**Güncelleme: 19 Eylül 2026.** Güncel model sözleşmeleri [CURRENT_MODELS.md](docs/CURRENT_MODELS.md) içinde; aşağıdaki yeni mimari bölümü, devamındaki tarihsel V2 açıklamalarından ayrıdır. Güncel uygulama ve test kodları depoya dahildir; anahtarlar ve yerel durum dosyaları hariçtir.
+**Güncelleme: 25 Eylül 2026.** Aktif mainnet hattı BTC Futures, aktif test hattı ETH Spot Testnet'tir. BTC mainnet işlem öğrenmesi aşağıda; diğer model sözleşmeleri [CURRENT_MODELS.md](docs/CURRENT_MODELS.md) içinde açıklanır. Güncel uygulama ve test kodları depoya dahildir; anahtarlar ve yerel durum dosyaları hariçtir.
 
-## Güncel ADA 15m veri ve emir yolu
+## 25 Eylül: açık seçimle 10x sözleşme geçişi
+
+`BTC_FUTURES_LEVERAGE` yalnız `4` veya `10` kabul eder; varsayılan `4` kalır.
+PowerShell başlatıcısındaki `-Leverage 10`, bu seçimi çocuk sürece taşır ve
+`10X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT` onayı ister. Sözleşmeler
+4x için `btc-usdm-isolated-4x-bollinger-long-v2`, 10x için
+`btc-usdm-isolated-10x-bollinger-long-v3` olur. Kodun dağıtılması veya durum
+okunması aktif süreci/borsa ayarını değiştirmez; bu sürüm hazırlanırken canlı
+geçiş yapılmamıştır.
+
+`tick` kaynak sözleşmesi, hesap bağı, allocation, pending ve halt koşullarını
+doğrular. Eski 2x/4x defterden yükseltme, pozisyon miktarı ve giriş fiyatı
+eşleşmesi, hesaba özgü notional/kaldıraç dilimi ve mevcut korumalar denetlendikten
+sonra yalnız `POST /fapi/v1/leverage` gönderir. 10x açık pozisyon geçişinde iki
+korumanın tetik fiyatları defterle eşleşir; bilinen pozitif long liquidation
+fiyatı stopun altında olmalıdır. POST yanıtının symbol/leverage/cap alanları ve
+ardından ayrı pozisyon sorgusu doğrulanmadan defterin sözleşmesi taşınmaz.
+Önceki belirsiz isteğin borsada zaten uygulandığı durum yeniden POST edilmeden
+uzlaştırılır. Marjin modu, pozisyon modu ve koruma emirleri değiştirilmez.
+
+Açık pozisyon büyütülmez; yalnız sonraki giriş miktarı
+`margin × 0,98 × seçili_kaldıraç / ask` üzerinden borsa adımına yuvarlanır.
+Yeni girişler de hesaba özgü notional/kaldıraç dilimini geçmelidir. Kaynak olaylar,
+başlangıç cüzdanı ve öğrenme kimliği korunur. 4x açılan pozisyonun değişmez
+`learning_entry` özellikleri 4x kalır; yeni girişler seçili 10x'i kaydeder.
+ETH Spot Testnet ve eski Spot defterleri bu geçişin parçası değildir.
+
+## BTC mainnet Futures işlem öğrenmesi
+
+### 25 Eylül: kullanıcı seçimiyle deneysel giriş yetkisi
+
+`-ModelDecisions`, ana worker'a `BTC_FUTURES_MODEL_DECISIONS=1` taşır;
+varsayılan kapalıdır. `tick`, halt, pozisyon/koruma uzlaştırması, cooldown,
+temel giriş kuralı, tahsis/zarar sınırı ve miktar kontrollerinden sonra
+giriş öncesi bağlamı oluşturur. `predict_entry` bir kez salt okunur çağrılır;
+`btc_futures_model_policy.decide` emir niyetinden önce kabul/erteleme üretir.
+Karar `model_entry_decision` olayına ve `model_control_latest` alanına yazılır.
+Erteleme mumu tüketir; emir niyeti veya sonuç etiketi oluşturmaz.
+
+Adapter kalibre edilmemiş proxy skorunda `0,70` eşiğini kullanır. Yüksek skorlu
+adayların yaklaşık üçte biri hesap/dönem/mum ve adapter sürümüne bağlı hash ile
+keşif için kabul edilir. Model yenilenmesi veya yeniden kontrol bu seçimi
+değiştirmez. Eşik deneysel, ekonomik olarak optimize edilmemiştir. Adapter'ın
+kaldıraç, pozisyon büyüklüğü, çıkış veya mevcut koruma emirlerini değiştiren yolu
+yoktur; model temel stratejinin reddettiği bir adayı açamaz.
+
+Etki için taze ve doğrulanmış model/özellik/kaynak bağı yanında aynı kaldıraç,
+risk profili ve sinyal profilinden en az bir kapanmış eğitim örneği gerekir.
+Bu kanıt yoksa, eskiyse veya bozuksa temel giriş kararı kullanılır. 4x giriş
+özellikleri 10x'e dönüştürülmez. `learning_entry` skordan sonra değiştirilmez;
+yalnız `shadow_prediction` eklenir, çalışma anındaki adapter kararı ayrı tutulur.
+Böylece gerçekleşen işlemin gerçek ileri tahmini kapanışla uzlaştırılabilir.
+
+`model_decisions_enabled` seçeneği ile `model_control_latest.authority_applied`
+ayrı anlam taşır. Öğrenici sürecinin ve değişmez modelin `AUTHORITY=false`
+alanları korunur. Ekonomik doğrulama/otomatik terfi kapıları bu deneyle geçilmiş
+sayılmaz. Kullanıcı kendi terminalinde yeniden başlatır; tam komut
+[README](README.md#deneysel-futures-model-kararlarını-açma) içindedir.
+
+```mermaid
+flowchart LR
+    W[btc_futures_live.py: Bollinger kararı] --> E[Binance USD-M mainnet]
+    W --> S[(btc-futures-live.sqlite3)]
+    S -->|Salt okunur yerel olaylar| L[btc_futures_learning.py]
+    L --> D[(btc-futures-mainnet-learning.sqlite3)]
+    D --> M[Proxy sonuç tahmin adayı]
+    D --> R[Yerel öğrenme durumu ve raporu]
+    D -->|Salt okunur pre_entry_v1 tahmini| P[Giriş öncesi gölge skor]
+    P -->|Emir gönderilmeden önce ana worker kaydeder| S
+    P -->|Kullanıcı ModelDecisions seçerse| A[Deneysel giriş kabul veya erteleme]
+    W -->|Yalnız uygun yeni giriş adayı| A
+    A -->|Karar kaydı| S
+```
+
+Öğrenici ayrı bir süreçtir; ağ/anahtar erişimi, canlı deftere yazma veya emir
+yetkisi yoktur. `sync` bir aktarım/eğitim döngüsü, `watch` aralıklı döngü, `status`
+salt okunur durum sağlar. Varsayılan kaynak `state/btc-futures-live.sqlite3`,
+ayrı çıktı `state/btc-futures-mainnet-learning.sqlite3` olur. Tekrar okunan kaynak
+olaylar yeni işlem örneği sayılmaz. Kaynak olayların değişmesi veya kaynak defterin
+sıfırlanması `source_conflict` üretir ve mevcut aday geçersizleşir.
+
+25 Eylül eklemesiyle ayrı `trade_journal` tablosu her kayıtlı işlem döngüsünün
+bekleyen, açık, kapanmış veya pozisyonsuz sonlanmış durumunu ve değerlendirme
+gerekçesini taşır. `order_observation` kaynak olayları `order_observations`
+tablosunda giriş/çıkış emri durumlarıyla eşleşir. `journal.current_trade`,
+`recent_trades` ve sayaçlar, kapanış etiketi olmayan açık veya belirsiz işlemleri
+de görünür tutar. Bunlar eğitim örneği sayacına eklenmez; yalnız eşleştirilebilen
+kapanmış sonuçlar eğitime adaydır. Emir durumu gözlemi tam dolum, ücret ve funding
+uzlaştırmasının yerini almaz; eski beş kapanış doğrulanmamış cüzdan proxy'sidir.
+
+İşlem giriş/kapanış olayları kaynak referanslarıyla eşleştirilir. Öğrenme hedefi
+hesap cüzdan değişimi **proxy** değeridir; dolum, komisyon ve funding kayıtlarıyla
+doğrulanmış kesin net işlem PnL'si değildir. Para transferi, funding veya elle
+işlem bu etiketi etkileyebilir. `proxy_count` ile `verified_count` ayrı raporlanır;
+bu hattın mevcut etiketleri doğrulanmış net PnL olarak sunulmaz.
+
+Eski işlemler kaydedilmiş giriş fiyatı, stop/hedef ve risk bağlamıyla `legacy`
+örnek olur. Yeni girişlerin kapanmış mum/karar özellikleri ana worker tarafından
+giriş anında kaydedilir. Halen çalışan eski worker bu ilave kaydı üretmez;
+özellik kaydı kullanıcının güncel worker'ı kendi terminalinde yeniden başlatmasından
+sonraki girişlerde başlar. Öğrenicinin mevcut geçmişi işlemesi için trading worker
+yeniden başlatılmaz.
+
+Kronolojik prequential değerlendirme önce geçmiş sonuçlarla tahmin, sonra yeni
+sonucu eğitime ekleme sırasını izler. Geçmiş kayıtları tekrar yürütmek, tahminlerin
+o tarihte gerçekten yapılmış olduğunu göstermez. `model_id`, `training_runs`,
+`trained_sample_count`, `validation`, `last_success_at` ve `last_error_at` modeli
+ve güncelliği görünür kılar. Öğrenilmiş kayıp örüntüsü tanısal çıktıdır; otomatik
+filtre veya karar yetkisi değildir.
+
+`legacy` örnekler ile `pre_entry_v1` giriş modeli ayrı tutulur. Uyumlu giriş modeli
+yalnız girişten önce yakalanmış zengin mum/karar bağlamı bulunan kapanmış işlemlerle
+eğitilir. Ana worker'ın `predict_entry` çağrısı öğrenme DB'sini salt okunur açar;
+model, özellik, kaynak ve zaman uyumunu kontrol eder. Tahmin kalıcı emir niyetine
+emir gönderilmeden önce eklenir; sidecar kapanıştan sonra bu kaydı sonuçla
+eşleştirir. Model veya bağlam uygun değilse gölge skor kullanılamaz kalır; legacy
+model onun yerine geçirilmez. Varsayılan gölge modda skor emir kararını
+değiştirmez; açık `-ModelDecisions` seçeneği yukarıdaki adapter'ı kullanır.
+
+`true_forward_proxy_count` geçmiş tekrar değerlendirmesinden ayrıdır;
+`true_forward_verified_count` kesin net PnL kanıtını ayrıca sayar. Yeni kodla
+çalışan ana worker henüz giriş tahmini üretip ilgili turu kapatmadığında gerçek
+ileri sayaçlar `0`'dır. Eski beş işlem ileri tahmine dönüştürülmez. Bu akışın
+başlaması kullanıcının ana worker'ı güncel kodla yeniden başlatmasına bağlıdır;
+yalnız öğrenici helper'ın yeniden başlatılması ana worker'ın kodunu değiştirmez.
+
+`readiness` uyumlu model, kaynak, sınıf çeşitliliği ve ileri tahmin eksiklerini
+listeler; keyfî bir örnek sayısından sonra hazır olma koşulu koymaz. Dolum
+makbuzları, ücretler, funding ve atfedilebilir net işlem PnL'si için doğrulanmış
+veri yolu halen yoktur; dondurulmuş politika ile ileri değerlendirme gerekir.
+Bu nedenle teknik model hazır olsa bile ekonomik kanıt hazır değildir ve
+`ready_for_live=false`, `automatic_activation=false` kalır. Proxy sonuçlar tek
+başına kârlılığı veya her kaybı önlemeyi kanıtlamaz.
+
+### Futures sinyal profilleri
+
+Varsayılan `Trend` mevcut Bollinger trend teyidini korur. Kullanıcının açıkça
+seçtiği `Responsive`, `lower_zone_reached`, `recovery_confirmed` ve
+`histogram_rising` değerlerinin üçünün de kesin `true` olmasını gerektirir;
+bu alt bant toparlanma yolunda EMA50/EMA200 trend teyidi beklenmez. Seçili isolated kaldıraç,
+stop/hedef, miktar ve cooldown hesapları aynı kalır. Bu bir sinyal profili
+seçimidir; öğrenilmiş modelin otomatik aktivasyonu değildir. Profil kullanıcının
+açık başlangıç seçimiyle yüklenir; çalışan profil `Status` kaydından doğrulanır.
+
+Bu modül eklenmeden önce BTC mainnet kapanmış işlemlerinden öğrenmiyordu.
+ETH Spot Testnet'in 15m mum etiketi sayaçları ayrı bir öğrenme hattına aittir.
+İşletim komutları [README.md](README.md) içindedir.
+
+## ADA 15m veri ve emir yolu (tarihsel hat)
 
 ```mermaid
 flowchart TD

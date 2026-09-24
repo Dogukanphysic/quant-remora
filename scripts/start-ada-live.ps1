@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param([string]$PythonPath = 'python', [switch]$CheckOnly, [switch]$NewKey,
       [ValidateSet('4h','15m')][string]$Interval = '4h', [switch]$MigrateInterval,
-      [switch]$ModelDecisions, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
+      [switch]$ModelDecisions, [switch]$BollingerTouch, [switch]$ReconcileOnly, [switch]$OrderCheckOnly,
       [switch]$RecoverUnsentOnly, [switch]$UseAllAllocatedFunds,
       [switch]$AdoptSpotBalanceOnly, [switch]$AutoAllocateSpot, [switch]$RecoverAuthorizationOnly,
       [switch]$RecoverConnectionOnly)
@@ -40,6 +40,12 @@ if ($ModelDecisions) {
     if ($Interval -ne '15m' -or $CheckOnly) { throw 'ModelDecisions yalniz -Interval 15m ile baslatilir.' }
     $modelArgs += '--model-decisions'
 }
+if ($BollingerTouch) {
+    if ($Interval -ne '15m' -or $ModelDecisions -or $CheckOnly -or $ReconcileOnly -or $OrderCheckOnly -or $RecoverUnsentOnly -or $AdoptSpotBalanceOnly -or $RecoverAuthorizationOnly) {
+        throw 'BollingerTouch yalniz -Interval 15m normal baslatmada, ModelDecisions olmadan kullanilir.'
+    }
+    $modelArgs += '--bollinger-touch'
+}
 if ($MigrateInterval -and ($NewKey -or $CheckOnly -or $Interval -ne '15m')) {
     throw 'Gecis icin -Interval 15m -MigrateInterval kullanin; NewKey/CheckOnly eklemeyin.'
 }
@@ -66,6 +72,7 @@ try {
     if ($AutoAllocateSpot) { Write-Host 'OTOMATIK TAHSIS: Mevcut/future Spot ADA ve USDT serbest bakiye artislari butceye eklenir; eklemeler kar sayilmaz. TRY/BNB dahil degildir.' }
     Write-Host "Ilk dongude satis olabilir. $Interval mum stratejisi, 60 saniye kontrol. Kar garantisi yoktur."
     if ($ModelDecisions) { Write-Host 'DENEYSEL MODEL KARARLARI: Karlilik dogrulanmadi. Pozitif tahmin AL/TUT, diger tahmin SAT/NAKIT. Stop/hedef onceliklidir.' }
+    if ($BollingerTouch) { Write-Host 'BOLLINGER 15M v2: Onceki 20 kapanmis mumun 2 standart sapma bandi kullanilir. Mumun dusugu alt bant ile bant genisliginin %10 ustu arasina gelirse AL, ust banda degerse SAT. Stop/hedef onceliklidir; ilk dongu sadece strateji gecisini kaydeder.' }
     if ($MigrateInterval) { Write-Host 'Eski pencereyi Ctrl+C ile durdurun. Bakiye ve mevcut stop/hedef korunarak 15m gecisi yapilir.' }
     Write-Host 'BNB ile komisyon odemesi bu sembolde kapali olmali. Para cekme yetkisi gerekli degildir.'
     Write-Host 'Durdurmak icin Ctrl+C. Durdurma eldeki ADA yi satmaz; bilgisayar kapaliyken stop calismaz.'

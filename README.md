@@ -1,15 +1,17 @@
-# Quant Remora — kripto araştırma, Testnet ve ADA Spot agent'ı
+# Quant Remora — kripto araştırma, Testnet ve BTC işlem ajanları
 
-**Güncelleme: 19 Eylül 2026.** Proje artık birden fazla bağımsız yürütme ve öğrenme hattı içeriyor. Ortamlar, sermaye defterleri ve model yetkileri birbirinden ayrıdır.
+**Güncelleme: 25 Eylül 2026.** Proje artık birden fazla bağımsız yürütme ve öğrenme hattı içeriyor. Ortamlar, sermaye defterleri ve model yetkileri birbirinden ayrıdır. Aktif mainnet hattı BTC Futures, aktif test hattı ETH Spot Testnet'tir. İsteğe bağlı 10x ve deneysel model giriş filtresi desteklenir; kodun güncellenmesi çalışan worker'ı veya borsa ayarını değiştirmez.
 
 | Hat | Veri / karar süresi | Öğrenme ve karar yetkisi | Emir ortamı |
 |---|---|---|---|
-| ADAUSDT | Binance Spot, 15m mum; 60 saniye kontrol | EMA20/50/200 + ATR; kullanıcı açarsa deneysel ridge model kararı | Binance Spot **mainnet / gerçek para** |
-| BTCUSDT Testnet | Binance public Spot, 15m karar; 24 saat momentum bağlamı | Ayrı ridge aday; doğrulama kapılı model yetkisi, aksi hâlde momentum | Binance Spot Testnet |
+| BTCUSDT Spot (durduruldu) | Binance Spot, 15m mum; 60 saniye kontrol | Gevşek iki kanıtlı Bollinger geri kazanım/sıkışma yorumlayıcısı | Eski mainnet defteri; yeniden başlatılmamalı |
+| BTCUSDT Futures | Binance USDⓈ-M, kapanmış 15m mum; 30 saniye kontrol | Bollinger Trend/Responsive; long-only; kullanıcı `-ModelDecisions` ile deneysel giriş seçimini açabilir | Binance USDⓈ-M **mainnet / isolated; varsayılan 4x, açık seçimle 10x** |
+| ADAUSDT (durduruldu) | Binance Spot, 15m mum | Eski Bollinger temas defteri tarihçe için korunur | `OperatorSwitchToBTC` |
+| ETHUSDT Testnet | Binance public Spot, 15m karar; 24 saat momentum bağlamı | Stake edilebilir ETH için ayrı ridge aday; aksi hâlde momentum | Binance Spot Testnet |
 | BTC 4h paper | Binance Spot, 4 saatlik mum | Sabit trend stratejisi; ridge öğrenici yalnız araştırma | Yerel sanal defter |
 | Bollinger V2/V3 ve Remora | Bitstamp/Binance araştırma veri yolları, çoğunlukla 15m | Eski deneyler, gölge modeller ve paper doğrulama | Araştırma / sanal |
 
-**Yayın kapsamı:** ADA 15m, deneysel model kararı, hızlı öğrenme, Testnet geçişi ve çevrimdışı test kodları bu depoya dahildir. Anahtarlar, eğitim verileri ve yerel işlem defterleri dağıtılmaz. Depoyu klonlamak canlı worker başlatmaz.
+**Yayın kapsamı:** BTC 15m canlı yürütücü, eski ADA hattı, Testnet geçişi ve çevrimdışı araştırma kodları bu depoya dahildir. Anahtarlar, eğitim verileri ve yerel işlem defterleri dağıtılmaz. Depoyu klonlamak canlı worker başlatmaz.
 
 ## Güncel belgeler
 
@@ -18,6 +20,295 @@
 - [Mimari ve veri akışı](ARCHITECTURE.md)
 - [Ana proje kaydı ve tarihçe](MASTER.md)
 - [Canlı ortam sınırları ve eski geçiş planı](LIVE_TRADING_PLAN.md)
+- [ADA Bollinger temas kuralının çevrimdışı maliyet kontrolü](reports/ada-bollinger-touch-15m-offline.md)
+- [ADA/BTC sabit adayların dört dönem karşılaştırması](reports/dual-market-strategy-audit.md)
+- [Bollinger kaynak sentezi ve BTC geçişi](reports/bollinger-knowledge-synthesis.md)
+
+## Eski BTCUSDT 15m Spot başlatma (aktif değil)
+
+Önce eski ADA penceresini `Ctrl+C` ile kapatın. Sonra proje klasöründe:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-live.ps1
+```
+
+Onay cümlesi: `TUM TAHSISLI USDT ILE BTC GERCEK ISLEM BASLAT`. Başlatıcı API anahtarlarını güvenli girişle sorar ve dosyaya yazmaz. Ayrı `state/btc-live.sqlite3` defteri oluşturur; serbest BTC ve USDT'nin tamamını bu deftere tahsis eder. Strateji kârlılık doğrulamasını geçmiş değildir.
+
+## BTCUSDT isolated Futures ajanı: varsayılan 4x, isteğe bağlı 10x
+
+`btc_futures_live.py`, Spot yürütücüden ve `state/btc-live.sqlite3` defterinden tamamen
+ayrıdır. Binance USDⓈ-M mainnet verisindeki kapanmış 15 dakikalık mumları kullanır.
+Yalnız long pozisyon açar; `-Leverage 4` varsayılandır, `-Leverage 10` açıkça
+seçilebilir. Borsadaki kaldıraç seçilen değerle aynı, margin tipi isolated olmalıdır.
+Her pozisyonda borsa tarafında `reduceOnly` stop-market ve take-profit-market emri
+güncel `/fapi/v1/algoOrder` kanalı üzerinden doğrulanmadan normal çalışmaya devam etmez.
+Varsayılan olarak `-MarginUsdt` ile ayrılan
+tutarı kullanır. `-UseAllAvailableBalance` verildiğinde her yeni girişte Futures
+cüzdanındaki kullanılabilir USDT yeniden okunur ve miktar bunun üzerinden hesaplanır;
+emir hesabındaki `%2` tampon ücret ve fiyat hareketi için korunur.
+Tahsis tutarının %5'i kadar dönem zararı oluşursa pozisyon kapandıktan sonra yeni
+girişleri durdurur.
+
+Başlatıcının varsayılan `-RiskProfile Moderate` profili yeni pozisyonlarda 2,5 ATR
+stop ve 5 ATR hedef kullanır. `Aggressive` profil 3 ATR stop / 6 ATR hedef kullanır.
+Ödül/risk oranı 2:1 kalır; bu risk profili seçimi kaldıracı ve borsa tarafı korumaları değiştirmez.
+`Validated` giriş modu bağımsız doğrulama kapısını korur. Açıkça seçilen
+`-EntryMode Exploratory` ham kapalı-mum sinyaline izin verir ve dönem zarar sınırını
+%10 yapar. Profil değişikliği açık pozisyonun mevcut
+koruma emirlerini yeniden fiyatlamaz; worker yeniden başlatıldıktan sonraki yeni
+girişte uygulanır.
+
+`-SignalProfile Trend` varsayılandır. İsteğe bağlı `-SignalProfile Responsive`,
+alt bant bölgesine ulaşma, toparlanma teyidi ve yükselen MACD histogramı
+(`lower_zone_reached`, `recovery_confirmed`, `histogram_rising`) değerlerinin
+üçü de tam olarak `true` olduğunda EMA50/EMA200 trend teyidini beklemeden alt
+banttan toparlanma girişine izin verir. Seçili isolated kaldıraç, stop/hedef, pozisyon miktarı
+ve işlemler arasındaki bekleme kuralı bu seçenekle değişmez. Daha erken sinyal
+kârlılık kanıtı değildir. Başlatma seçeneğinin yüklenmesi yeniden başlatma gerektirir;
+çalışan profil ve kaldıraç taze `Status` çıktısından doğrulanır.
+
+Responsive profilini kullanıcı kendi terminalinde seçer. İkinci bir canlı kopya
+açmamak için önce mevcut Futures worker terminalinde `Ctrl+C` ile durdurun ve
+komutun sonlandığını görün; ardından proje klasöründe çalıştırın:
+
+```powershell
+# GERÇEK kaldıraçlı işlem: kullanıcı kontrollü Responsive başlangıcı
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Run -UseAllAvailableBalance -RiskProfile Moderate -EntryMode Exploratory -SignalProfile Responsive
+```
+
+**25 Eylül — kullanıcı kontrollü 10x başlangıcı:** Mevcut worker sonlandıktan sonra
+aynı terminalde aşağıdaki komut kullanılabilir. Başlatıcı istediğinde
+`10X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT` yazılır; bu cümle tek başına
+PowerShell komutu değildir.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Run -Leverage 10 -UseAllAvailableBalance -RiskProfile Moderate -EntryMode Exploratory -SignalProfile Responsive
+```
+
+10x sözleşmesi `btc-usdm-isolated-10x-bollinger-long-v3` olur. Açık 4x pozisyonun
+miktarı, giriş fiyatı ve stop/hedef emirleri korunur; otomatik ek alım yapılmaz.
+Girişte kaydedilen öğrenme özellikleri de 4x olarak kalır. 10x miktar hesabı sonraki
+yeni girişlerde uygulanır; aynı margin ile nominal büyüklük yuvarlama öncesinde
+4x'e göre 2,5 kat olur. Sonraki başlatmalarda da `-Leverage 10` açıkça verilmelidir;
+varsayılan 4x komutu 10x defteri otomatik geri düşürmez. Bu değişiklik hazırlanırken
+canlı worker yeniden başlatılmadı ve borsanın kaldıraç ayarı değiştirilmedi.
+
+```powershell
+# Anahtarsız, salt okunur yerel durum
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Status
+
+# Anahtarsız genel bağlantı ve dış IP kontrolü; hesap yetkisini doğrulamaz
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action NetworkCheck
+
+# Hesap/veri kontrolü; gerçek emir göndermez
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Diagnose -MarginUsdt 50
+
+# Binance /fapi/v1/order/test kontrolü; gerçek emir göndermez
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action OrderCheck -MarginUsdt 50
+
+# İsteğe bağlı: isolated 4x sözleşmesini ve ayrı defteri önceden hazırlar
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Configure -MarginUsdt 50
+
+# GERÇEK kaldıraçlı emir verebilir; ilk çalıştırmada yapılandırmayı otomatik yapar
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Run -MarginUsdt 50 -RiskProfile Moderate
+
+# GERÇEK kaldıraçlı emir verebilir; kullanılabilir Futures USDT'nin tamamını dinamik tahsis eder
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action Run -UseAllAvailableBalance -RiskProfile Aggressive -EntryMode Exploratory
+```
+
+Varsayılan 4x için onay cümlesi: `4X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT`. Futures API izni,
+tek yönlü pozisyon modu ve single-asset modu gerekir. Strateji kârlılık doğrulamasını
+geçmemiştir; kaldıraçlı büyüklük hem kârı hem zararı büyütür. `Configure` ve ilk `Run`, hesap
+flat ve emirsizse Multi-Assets modunu Binance API üzerinden Single-Asset moda çevirir.
+
+Eski 2x/4x defterden daha yüksek seçili kaldıraca yeniden başlatma, hesap modu ve mevcut stop/hedef emirleri
+doğrulandıktan sonra yalnız kaldıraç ayarını gönderir; marjin veya pozisyon modunu
+değiştirmez. Hesaba özgü kaldıraç/notional dilimi denetlenir; 10x açık pozisyon
+geçişinde koruma tetikleri defterle eşleşmeli ve pozitif liquidation fiyatı
+stopun altında kalmalıdır. Ayrı pozisyon sorgusunda seçili kaldıraç doğrulanmadan
+defter taşınmaz. Önceki istek borsada uygulanmışsa mevcut ayar tekrar POST edilmeden
+okunarak uzlaştırılır. `-4067` gibi
+API hatalarında başarısız yöntemin ve yolun adı gösterilir; sorgu parametreleri
+ve anahtarlar gösterilmez. Sırf geçişi tamamlamak için koruma emirlerini silmeyin.
+
+İmzalı isteklerde zaman damgası, Binance sunucu saatiyle eşlenen monotonik
+saatten gönderim anında üretilir. Eşleme 60 saniyede yenilenir; 1 saniyeden uzun
+gidiş-dönüş süresi olan saat örnekleri en fazla üç denemeyle elenir. `recvWindow`
+5000 ms kalır. İmzalı GET isteğinde `-1021` gelirse saat yeniden eşlenip okuma
+bir kez tekrarlanır; tekrar reddedilirse worker sonraki kontrol döngüsünde yeniden
+dener ve son başarılı kontrol zamanını ilerletmez. POST/DELETE tekrarlanmaz.
+Terminalde kapanmaya yol açan hatalar, bağlı deftere `last_error_detail` ve
+`worker_stopped_at` alanlarıyla kaydedilir; başarılı yeniden uzlaştırma bunları temizler.
+
+VPN veya ağ değişikliğinden sonra `401 / -2015` gelirse `NetworkCheck` ile dış
+IP'yi kontrol edin. İki IP servisinin sonucu uyuşmuyorsa tek bir adres doğrulanmış
+sayılmaz; bölünmüş VPN yönlendirmesinde Binance farklı bir çıkış kullanabilir.
+HTTP 200 yalnız genel erişimi gösterir. Mevcut API anahtarının izinli IP listesi
+ve `Enable Futures` yetkisi ayrıca doğrulanmalıdır. Anahtarı değiştirmek mevcut
+defterin kimlik bağına uymaz. Düzeltmeden sonra `-Action Diagnose
+-UseAllAvailableBalance` ile imzalı salt okunur kontrol yapın; ardından mevcut
+ayarlarla `Run` kullanın. `NetworkCheck` anahtar okumaz, defter yazmaz, worker
+başlatmaz. Yetkilendirme reddi otomatik emir tekrarıyla aşılmaya çalışılmaz.
+
+ETH Testnet durumundaki aktif eğitim sayaçları kalıcı öğrenme SQLite defterinden
+tek salt okunur görüntüyle okunur. Yenileme hatası JSON'u artık eksik örnek
+sayısını sıfıra çevirmez. `active_metrics_available`, `active_metrics_source`,
+`active_metrics_observed_ms` ve `active_last_label_end_ms` kaynağı ve zamanı
+gösterir; defter okunamıyorsa sayaçlar `null`, gerçekten boşsa `0` olur.
+
+### Deneysel Futures model kararlarını açma
+
+`-ModelDecisions` varsayılan olarak kapalıdır. Açıldığında
+`btc_futures_model_policy.py`, yalnız mevcut Bollinger kuralının ve risk
+kontrollerinin izin verdiği **yeni girişleri** kabul edebilir veya erteleyebilir.
+Kalibre edilmemiş kayıp skoru `0,70` altında girişe izin verir; `0,70` ve üstünde
+adayların yaklaşık üçte birinde deterministik keşif uygular, diğerlerini erteler.
+Bu eşik deneysel bir tercihtir; optimize edilmiş kârlılık veya gerçek kayıp
+olasılığı değildir. Aynı hesap/dönem/mum için tekrar kontrol, keşif seçimini
+yeniden çekmez. Kaldıraç, miktar, çıkış, stop/hedef ve zarar sınırı bu seçenekle
+değişmez; sinyal yokken zorunlu emir oluşturulmaz.
+
+Skorun kaynak, zaman ve model bütünlüğü doğrulanmalıdır. Eğitimde güncel
+**kaldıraç + risk profili + sinyal profili** ile eşleşen en az bir kapanmış örnek
+yoksa veya tahmin eski/geçersizse temel strateji devam eder. Eski beş işlemin
+eksik giriş özellikleri tamamlanmış sayılmaz; 4x açılmış mevcut işlemin bağlamı
+10x'e çevrilmez. Bu kayıtlar tek başına 10x model yetkisi için uygun örnek değildir.
+
+Önce mevcut Futures worker'ın terminalinde `Ctrl+C`, ardından kullanıcı şu
+komutu çalıştırır; gerçek emir verebilir:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Doğukan\Documents\Codex\2026-09-12\yerasdasd\outputs\okx-agent\scripts\start-btc-futures-live.ps1" -Action Run -Leverage 10 -UseAllAvailableBalance -RiskProfile Moderate -EntryMode Exploratory -SignalProfile Responsive -ModelDecisions
+```
+
+Başlatıcı sorduğunda `10X ISOLATED BTC FUTURES MAINNET AJANINI BASLAT` yazılır;
+bu cümle bağımsız PowerShell komutu değildir. Anahtarlar yalnız terminale girilir.
+Bu kod hazırlığı sırasında canlı worker başlatılmadı.
+
+`model_decisions_enabled` kullanıcı seçimini, `model_control_latest.authority_applied`
+son adayda geçerli modelin gerçekten kullanıldığını gösterir. Ayrı öğrenici ve
+değişmez model kayıtlarındaki `decision_authority=false` korunur; yetki kullanıcı
+seçimiyle ana yürütücüde uygulanır. Ekonomik doğrulama ve `ready_for_live` hâlâ
+başarısız olabilir; deneysel seçeneğin açılması bu kapıları geçmiş sayılmaz.
+Ertelenen girişler eğitim etiketi veya kazanılmış/korunmuş kâr olarak kaydedilmez.
+
+### Mainnet Futures kapanan işlemlerden öğrenme
+
+BTC mainnet Futures ajanı bu eklemeden önce kapanmış işlemlerinin sonuçlarından
+model eğitmiyordu. Daha önce bildirilen aktif öğrenme sayaçları ETH Spot Testnet'in
+15m mum öğrenmesine aitti; BTC mainnet işlem öğrenmesi veya kârlılığı kanıtı değildi.
+Yeni `btc_futures_learning.py`, `state/btc-futures-live.sqlite3` defterini salt okunur
+açar; kapanan turları ayrı `state/btc-futures-mainnet-learning.sqlite3` öğrenme
+defterine aktarır ve geçici bir sonuç tahmin adayı eğitir.
+
+**25 Eylül — her işlem döngüsünün görünürlüğü:** Ayrı öğrenme defterindeki
+`trade_journal`, bekleyen, açık, kapanmış ve pozisyon oluşmadan sonlanmış döngüleri
+bir arada saklar. `journal.current_trade`, `recent_trades`, döngü sayaçları ve
+değerlendirme gerekçesi, eğitim örneği oluşmayan işlemlerin de neden beklediğini
+gösterir. Ana worker'ın `order_observation` olayları giriş ve koruma emri
+durumlarını kaynaklarıyla kaydeder; öğrenici bunları `order_observations` tablosuna
+aktarır. Emir durum kaydı, bütün dolumların/ücretlerin/funding'in doğrulandığı
+anlamına gelmez. Açık işlem eğitime kapanmış sonuç gibi eklenmez. Geçmiş beş
+kapanışın etiketi hâlâ doğrulanmamış cüzdan farkı proxy'sidir; otomatik model
+aktivasyonu ve emir yetkisi kapalı kalır.
+
+Etiket, giriş ile kapanış çevresindeki **hesap cüzdan değişimi vekilidir (proxy)**.
+Kesin, emir dolumlarıyla doğrulanmış net işlem PnL'si değildir; para yatırma/çekme,
+funding ve elle yapılan başka işlemler bu farkı etkileyebilir. Geçmiş olaylar
+`legacy` bağlamıyla alınır; eksik giriş göstergeleri sonradan biliniyormuş gibi
+üretilmez. Kronolojik değerlendirmede her örnek yalnız önceki sonuçlarla eğitilmiş
+modelle sınanır. Geçmişin bu şekilde tekrar yürütülmesi gerçek zamanda yapılmış
+ileri tahmin sayılmaz. Az sayıdaki kapanmış tur kârlılık kanıtı değildir.
+
+Proje klasöründe, ayrı bir terminalde:
+
+```powershell
+# Yalnız yerel öğrenme durumunu okur
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action LearningStatus
+
+# Mevcut kapanmış turları bir kez aktarır ve öğrenme adayını yeniler
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action LearningSync
+
+# Yeni kapanışları izler; bu terminalde Ctrl+C yalnız öğrenme izleyicisini durdurur
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-live.ps1 -Action LearningWatch -PollSeconds 30
+
+# Dosya yollarını açıkça seçmek için doğrudan CLI
+python -B btc_futures_learning.py sync --source state/btc-futures-live.sqlite3 --db state/btc-futures-mainnet-learning.sqlite3
+python -B btc_futures_learning.py status --source state/btc-futures-live.sqlite3 --db state/btc-futures-mainnet-learning.sqlite3
+python -B btc_futures_learning.py watch --source state/btc-futures-live.sqlite3 --db state/btc-futures-mainnet-learning.sqlite3 --poll-seconds 30
+```
+
+Bu üç öğrenme eylemi API anahtarı istemez, ağa bağlanmaz ve gerçek emir göndermez.
+`sync`/`watch` ayrı öğrenme defterini ve raporunu günceller; canlı işlem defterine
+yazmaz. Öğrenme izleyicisi çalışan trading worker yeniden başlatılmadan kullanılabilir.
+Giriş anının zengin mum/karar özellikleri ise kullanıcı güncellenmiş ana worker'ı
+daha sonra kendi terminalinde yeniden başlattığında kaydedilmeye başlar; halen
+çalışan eski süreç bu kod değişikliğini yüklemez.
+
+`sample_count`, `proxy_count`, `verified_count`, `model_id`, `trained_sample_count`
+ve `last_success_at` öğrenme ilerlemesini gösterir. `verified_count=0`, kesin net
+işlem PnL'sinin doğrulanmadığını belirtir. `trained_proxy_insufficient_evidence`
+durumu eğitilmiş fakat kanıtı yetersiz adaydır. Ana `Status` çıktısının `learning`
+alanı bu hattı gösterir.
+
+`pre_entry_v1` modeli yalnız girişten önce kaydedilmiş zengin bağlamı olan
+kapanmış örneklerle eğitilir; eski beş `legacy` işlemden ayrı tutulur. Güncel ana
+worker, uyumlu model varsa `predict_entry` ile salt okunur gölge tahmin alır;
+tahmini kalıcı emir niyetine, emir gönderilmeden önce yazar. Öğrenme izleyicisi
+işlem kapandığında bu önceden kaydedilmiş tahmini sonuçla eşleştirir. Uyumlu model
+yoksa tahmin kullanılamaz olarak görünür; legacy model giriş tahmini yerine geçmez.
+Bu kayıt akışı kullanıcının güncel ana worker'ı yeniden başlatmasından sonraki
+işlemler için geçerlidir. Gerçek ileri sayaçlar başlangıçta `0`'dır; geçmiş beş
+işlem ileri kanıta dönüşmez. Sayaç ancak uygun bir tahmin önceden kaydedilip ilgili
+işlem kapandıktan sonra artabilir.
+
+`readiness` sabit bir örnek sayısına ulaşma vaadi vermez: uyumlu giriş modeli,
+gerçek ileri tahmin, etiket sınıfları ve kaynak sağlığı gibi eksikleri gösterir.
+Dolum makbuzları, ücretler ve funding ile uzlaştırılmış net işlem PnL'sini üretme
+yolu halen eksiktir; dondurulmuş politika ile ileri değerlendirme de gereklidir.
+Proxy örnek sayısını artırmak bu eksikleri gidermez ve kârlılığı kanıtlamaz.
+Modelin otomatik aktivasyonu ve emir karar yetkisi kapalıdır. Bollinger kararını
+kullanıcının seçtiği sinyal profili verir; gölge tahmin emri filtrelemez. Bu adayın
+kârlı olduğu veya her zararlı işlemi önleyebileceği gösterilmemiştir.
+
+## BTCUSDT isolated 2x Futures testnet öğrenme ajanı
+
+`btc_futures_testnet.py`, mainnet Futures defterinden tamamen ayrı testnet ve öğrenme
+defterleri kullanır. Kapanan her sanal kaldıraçlı tur; giriş rejimi, RSI ve USDT sonucu
+ile etiketlenir. Üç kapalı örnekten sonra negatif ortalamalı rejimler filtrelenir; her
+beş fırsattan biri kontrollü keşif için korunur. Öğrenici yalnız testnet kararlarını
+etkiler.
+
+```powershell
+# Salt okunur yerel durum
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-testnet.ps1 -Action Status
+
+# Hesap/veri kontrolü; test emri göndermez
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-testnet.ps1 -Action Diagnose -Environment testnet -MarginUsdt 1000
+
+# Sanal 2x isolated işlemleri ve öğrenmeyi başlatır
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-btc-futures-testnet.ps1 -Action Run -Environment testnet -MarginUsdt 1000
+```
+
+Testnet anahtarı `testnet.binancefuture.com` ortamından, demo anahtarı ise Binance Demo
+ortamından alınmalıdır; ortam ve anahtar karıştırılmamalıdır. Demo kullanılırsa
+`-Environment demo` seçilir.
+
+## ETHUSDT 15m Testnet başlatma
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-eth-testnet-agent.ps1
+```
+
+Onay cümlesi: `BINANCE ETH TESTNET AGENTI BASLAT`. Başlatıcı yalnız Spot Testnet anahtarlarını kabul eder. İşlem başına 15 sanal USDT kullanılır; staking işlemi yapmaz, stake edilebilir ETH varlığı üzerinde spot alım/satım yapar.
+
+## Testnet gerçekleşmiş performans ölçümü
+
+`python testnet_performance_audit.py` yalnız yerel Testnet defterini okur; anahtar istemez ve emir göndermez. `reports/testnet-performance-audit.md` ile aynı adın `.json` sürümünü yeniler. Kapanmış turları giriş kararına ve dolmuş alım/satım emirlerine bağlar, gerçekleşmiş net PnL'yi defter toplamıyla uzlaştırır, deneysel keşif ve momentum kararlarını ayrı gösterir. Sıfır işlem kıyası ve her turun aynı sürede BTC tutma **fiyat vekili** raporlanır; fiyat vekili gerçek emir ücretini/spread'ini içermez. Açık turlar, dışarıdan gelen sermaye ve eski sahibi kayıtsız kararlar model başarısına katılmaz. Hata listesi boş değilse komut başarısız çıkar.
+
+ADA mainnet'te `-BollingerTouch` seçeneğinin v2 sürümü, **önceki 20 kapanmış mumun** alt/üst bandını hesaplar. Son kapanmış 15m mumun düşüğü alt bandın üzerinde bant genişliğinin en fazla %10'u kadar yakınsa alım, yükseği üst banda değmişse satış hedeflenir; ilk geçiş döngüsü yalnız strateji kaydını açar. `-ModelDecisions` ile birlikte kullanılamaz. Mevcut stop/hedef ve bakiye/emir korumaları sürer. `python ada_live.py status --interval 15m` karar sahibini ve strateji modunu gösterir. Alt %10 bölgenin tarihsel dört bölümünün dördü de ücretler sonrası negatiftir; daha fazla sinyal kârlılık kanıtı değildir. Testnet performansı ADA mainnet kârlılığına aktarılmış bir kanıt değildir.
+
+`python ada_bollinger_learning.py seed` yerel ADA 15m arşivindeki alt bant olaylarından ayrı, emir yetkisi olmayan bir model eğitir. Bollinger modundaki çalışan ADA worker sonraki kontrollerde bu modele yeni kapanmış mumları ekler; karar kuralı değişmez. `python ada_bollinger_learning.py status` örnek sayısını ve kronolojik validation/son bölüm sonuçlarını gösterir. Eski EMA/ATR ridge defteriyle yeni örnekler karıştırılmaz. Ayrıntılar [model sözleşmesinde](docs/CURRENT_MODELS.md).
 
 ## ADA 15m — yerel kullanıcı komutları
 
@@ -32,6 +323,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live
 
 # GERÇEK EMİR: kullanıcı onayı ve yerel anahtar girişi ister
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -ModelDecisions
+
+# Önce eski ADA sürecini Ctrl+C ile durdurun. Yeni Bollinger 15m modu, aynı tahsisli bakiye ile:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -BollingerTouch -UseAllAllocatedFunds -AutoAllocateSpot
 ```
 
 Onay cümlesi: `294 ADA ILE GERCEK ISLEM BASLAT`. Yeniden başlatmadan önce eski ADA penceresini Ctrl+C ile durdurun. `-NewKey` rutin yeniden başlatma seçeneği değildir. 4h defterinden ilk geçiş için kullanıcı kılavuzundaki `-MigrateInterval` adımını izleyin.
@@ -747,3 +1041,13 @@ kullanılır. Challenger oluşturma ve izleme komutları sırasıyla
 Bollinger'ın resmî kuralları, bant temasının tek başına sinyal olmadığını ve güçlü
 trendlerin bant boyunca ilerleyebildiğini vurgular. Bu projedeki aday tanımları,
 maliyetler, risk oranları ve terfi eşikleri araştırma kararlarımızdır.
+
+### Mainnet Futures giriş doğrulama kapısı
+
+`btc_futures_live.py` açık pozisyonları ve borsa tarafı stop/hedef emirlerini
+yönetir. Yeni mainnet girişleri şu anda
+`blocked_no_robust_out_of_sample_edge` durumundadır. Beş yıllık kronolojik
+araştırmada denenen Bollinger dönüşü, trend kırılımı ve geri çekilme varyantları
+geliştirme ve son bir yıllık doğrulama dönemlerinde birlikte masraf sonrası pozitif
+kalmadığı için kapı açılmamıştır. Ayrıntılar
+`reports/btc-futures-loss-review-20260923.md` dosyasındadır.

@@ -16,12 +16,24 @@ Komutları projenin `okx-agent` klasöründe çalıştırın. Windows/Python 3.1
 
 ```powershell
 python ada_live.py status
+python ada_pnl_diagnostic.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -CheckOnly
 ```
 
 `status` yalnız yerel defteri okur. `CheckOnly` anahtar ister ve hesap, komisyon, piyasa, açık emir kontrollerini yapar; worker başlatmaz. `orders_submitted: 0` ve tüm `checks.*.ok: true` beklenir. Başarılı kontrol, kârlılık veya gelecekteki emir dolumu garantisi değildir.
+`ada_pnl_diagnostic.py` de yalnız yerel defteri okur: dışarıdan eklenen sermayeyi, yeniden tahsis sonrası dolmuş emirleri, satış ücretini ve mevcut stratejiye geçildikten sonraki dolmuş emir sayısını ayırır. İşaretli fark gerçek ADA edinim maliyetine göre vergi/hesap kârı değildir.
 
 ## Normal yeniden başlatma: 15m + deneysel model
+
+**Bollinger alt %10 bölge modu (22 Eylül 2026):** Önce eski ADA PowerShell penceresini Ctrl+C ile durdurup tamamen çıktığını doğrulayın. Ardından mevcut tüm tahsisli bakiye kullanımını ve otomatik Spot tahsisini koruyan komut:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-ada-live.ps1 -Interval 15m -BollingerTouch -UseAllAllocatedFunds -AutoAllocateSpot
+```
+
+Bu komut gerçek emir gönderebilir; anahtar ve onay cümlesini yerel terminalde ister. `-ModelDecisions` eklemeyin. İlk döngü strateji geçişini deftere kaydeder ve işlem yapmaz. Sonraki kapanmış 15m mumun düşüğü, önceki 20 kapanmış mumun Bollinger(20,2) alt bandı ile bant genişliğinin %10 üstü arasına gelirse AL; üst banda değerse SAT hedeflenir. Stop/hedef veya 192 saat azami tutma çıkışı daha erken satışa yol açabilir. `strategy_mode: bollinger_lower_zone10_15m_v2`, `latest_candle_decision.entry_limit` ve `lower_zone_reached` alanlarıyla geçiş doğrulanır. Bu kural geçmişte kârlı bulunmadı: dört tarihsel bölümün dördünde de net zarar verdi. Daha sık sinyal kâr garantisi değildir. Yeniden başlatmalarda `-BollingerTouch` kullanın.
+
+### Eski deneysel model yolu
 
 Önce mevcut ADA penceresinde Ctrl+C yapın; eski sürecin çıkmasını bekleyin.
 
@@ -204,3 +216,11 @@ A separate user-operated normal launch is required afterward. Do not use `Recove
 ## Transport halt recovery
 
 `-RecoverConnectionOnly -Interval 15m` is a separate user-run action for the exact transport/response RuntimeError. It refuses pending or unapplied orders, repeats account/balance/open-order/commission/market/order-test checks, audits the old state and leaves the worker stopped. It does not retry an order or start trading. Normal startup remains a separate local user action. Connection alerts are configured in Codex every five minutes; they do not repair or trade automatically.
+
+## ADA adaylarının masraf sonrası kontrolü
+
+`python ada_candidate_gate.py` komutu yalnız yerel tarihsel veriyi okur ve `reports/ada-candidate-gate.json` üretir; API anahtarı veya gerçek emir kullanmaz. Dört tarihsel bölümde normal/stres maliyeti, azami düşüş ve ADA elde tutma kıyasını uygular. Son araştırmada 10 adayın tamamı reddedildi. Bu rapor canlı stratejiyi değiştirmez ve geçmiş arşiv bağımsız ileri doğrulama sayılmaz; ayrıntılar `reports/ada-candidate-gate.md` içindedir.
+
+## Bant teması neden işlem üretmedi?
+
+`python ada_band_diagnostic.py` salt okunur yerel defteri ve Binance'in herkese açık son 15m mumlarını karşılaştırır. Strateji geçişinden sonraki kapanmış mumlarda alt/üst temas sayısını ve son temasları gösterir; API anahtarı veya emir yetkisi istemez. Agent nakitteyken yalnız **alt bant teması** alım adayıdır; üst bant teması yalnız pozisyonda satış sebebidir. Mum kapanışından 5 dakikadan geç görülmüş bir temas yeni alıma dönüşmez. Rapor geçmiş temasları açıklar ama geçmişte emrin hangi nedenle gönderilmediğini tek başına kanıtlamaz; dolum için yerel emir defteri ayrıca incelenmelidir.
