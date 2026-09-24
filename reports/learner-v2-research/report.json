@@ -1,0 +1,47 @@
+{
+  "contract_sha256": "bbeadf4500f2639421dc06c711aca8ba80634ab790f1aac5192c0ad78ea95e31",
+  "development": {
+    "ridge": {
+      "n": 4392,
+      "n_nonoverlap": 732,
+      "mse_skill": 0.007241042098814043,
+      "ic": 0.05819933258483969,
+      "ic_t": 1.5751292478116465,
+      "accepted": 1158,
+      "accepted_mean": 0.0024108360787844854,
+      "rejected_mean": 5.2429795008956584e-05,
+      "base_mean": 0.0006742500310317393
+    },
+    "hgb": {
+      "n": 4392,
+      "n_nonoverlap": 732,
+      "mse_skill": -0.10350006818803625,
+      "ic": 0.015219761909077971,
+      "ic_t": 0.41126295787012934,
+      "accepted": 2134,
+      "accepted_mean": 0.0008066815688762423,
+      "rejected_mean": 0.0005490910842823287,
+      "base_mean": 0.0006742500310317393
+    }
+  },
+  "chosen": "ridge",
+  "gate_window": {
+    "n": 8748,
+    "n_nonoverlap": 1458,
+    "mse_skill": -0.01107639519377801,
+    "ic": 0.00989371409607971,
+    "ic_t": 0.3775385471962446,
+    "accepted": 4405,
+    "accepted_mean": -0.000808667420707034,
+    "rejected_mean": -0.0007098130170215654,
+    "base_mean": -0.0007595905259646943
+  },
+  "veto_effect": {
+    "entries": 140,
+    "mean_all": 0.001899055309597042,
+    "kept": 105,
+    "mean_kept": 0.0011668771108459294
+  },
+  "authority": false,
+  "reason": "walk_forward_gate_failed"
+}

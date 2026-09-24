@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from remora_bot import bot, exchange, learner, strategy
+from remora_bot import bot, exchange, learner, model_v2, strategy
 from remora_bot.exchange import ApiError, TransportError
 import unified_futures_research as research
 
@@ -65,6 +65,23 @@ class LearnerCausality(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             db = learner.connect(Path(d) / "a.db")
             self.assertFalse(learner.gate(db)["authority"])
+
+    def test_live_gate_alone_cannot_grant_authority(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            db = learner.connect(Path(d) / "a.db")
+            passing = dict(authority=True, reason="forward_gate_passed", forward_scored=100)
+            original = learner._live_gate
+            learner._live_gate = lambda _db: dict(passing)
+            try:
+                failed = Path(d) / "wf.json"
+                failed.write_text(json.dumps(dict(authority=False, reason="walk_forward_gate_failed")))
+                self.assertFalse(learner.gate(db, failed)["authority"])
+                self.assertFalse(learner.gate(db, Path(d) / "missing.json")["authority"])
+                ok = Path(d) / "ok.json"
+                ok.write_text(json.dumps(dict(authority=True, reason="walk_forward_gate_passed")))
+                self.assertTrue(learner.gate(db, ok)["authority"])
+            finally:
+                learner._live_gate = original
 
 
 class FakeClient:
@@ -128,6 +145,10 @@ class FakeMarket:
 
     def closed_bars(self, s, limit=1000):
         return self.bars
+
+    def funding(self, s, limit=1000):
+        idx = pd.to_datetime([b.ts for b in self.bars[::2]], unit="ms", utc=True)
+        return pd.Series(0.0001, index=idx)
 
 
 def breakout_bars():
@@ -196,18 +217,111 @@ class BotFlow(unittest.TestCase):
         self.assertTrue(result["BTCUSDT"].startswith("entries_blocked"))
         self.assertEqual(self.client.posts, [])
 
+    def test_rejected_key_does_not_bind_ledger(self):
+        def reject():
+            raise ApiError("HTTP 401", 401, -2015)
+        self.client.one_way_mode = reject
+        with self.assertRaises(ApiError):
+            bot.startup(self.db, self.client)
+        self.assertIsNone(self.db.execute("SELECT identity FROM bot").fetchone()["identity"])
+
     def test_client_ids_are_deterministic_and_short(self):
         a = bot.client_id("BTCUSDT", 1_700_000_000_000, "e")
         self.assertEqual(a, bot.client_id("BTCUSDT", 1_700_000_000_000, "e"))
         self.assertLessEqual(len(a), 36)
 
 
+class ModelMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = bot.connect(Path(self.tmp.name) / "l.db")
+        self.ldb = learner.connect(Path(self.tmp.name) / "learn.db")
+        self.mdb = model_v2.connect(Path(self.tmp.name) / "m.db")
+        self.client = FakeClient()
+        self.bars = make_bars(400, seed=5)            # no Donchian breakout needed in model mode
+        self.now = self.bars[-1].ts + STEP + 60_000
+        self.original = model_v2.update
+        self.pred = {"BTCUSDT": 0.01, "ETHUSDT": -0.01}
+        model_v2.update = lambda *a, **k: dict(self.pred)
+
+    def tearDown(self):
+        model_v2.update = self.original
+        self.tmp.cleanup()
+
+    def tick(self, now):
+        return bot.tick(self.db, self.ldb, self.client, FakeMarket(self.bars), now, model_db=self.mdb)
+
+    def test_positive_prediction_enters_negative_stays_cash(self):
+        result = self.tick(self.now)
+        self.assertEqual(result, {"BTCUSDT": "enter", "ETHUSDT": "model_predicts_non_positive"})
+        pos = self.db.execute("SELECT stop_price, entry_price FROM positions WHERE symbol='BTCUSDT'").fetchone()
+        distance = 1 - Decimal(pos["stop_price"]) / Decimal(pos["entry_price"])
+        self.assertTrue(Decimal("0.03") <= distance <= Decimal("0.15") + Decimal("0.001"))
+        owner = json.loads(self.db.execute("SELECT signal FROM decisions WHERE action='enter'").fetchone()[0])
+        self.assertEqual(owner["decision_owner"], "experimental_model_v2")
+        self.assertFalse(owner["profitability_proven"])
+
+    def test_non_positive_prediction_exits(self):
+        self.tick(self.now)
+        self.bars = self.bars + [strategy.Bar(self.bars[-1].ts + STEP, *([self.bars[-1].close] * 4), 1.0)]
+        self.pred = {"BTCUSDT": -0.001, "ETHUSDT": -0.01}
+        result = self.tick(self.now + STEP)
+        self.assertEqual(result["BTCUSDT"], "exit")
+        self.assertEqual(self.client.qty["BTCUSDT"], 0)
+        self.assertNotIn(True, [v == "BTCUSDT" for v in self.client.stops.values()])
+
+    def test_missing_prediction_never_trades(self):
+        self.pred = {}
+        result = self.tick(self.now)
+        self.assertEqual(set(result.values()), {"no_model_prediction"})
+        self.assertEqual(self.client.posts, [])
+
+
+class ModelV2Features(unittest.TestCase):
+    def test_future_bars_do_not_change_past_features(self):
+        bars = model_v2.bars_frame(make_bars(700, seed=9))
+        other = model_v2.bars_frame(make_bars(700, seed=10))["close"]
+        funding = pd.Series(0.0001, index=bars.index[::2])
+        full = model_v2.feature_frame(bars, other, funding, "BTCUSDT")
+        cut = model_v2.feature_frame(bars.iloc[:600], other.iloc[:600], funding[funding.index < bars.index[600]],
+                                     "BTCUSDT")
+        pd.testing.assert_frame_equal(full.loc[cut.index, model_v2.FEATURES], cut[model_v2.FEATURES])
+        self.assertTrue(np.isnan(cut["y"].iloc[-1]))      # label needs future bars
+
+
+class ModelV2Training(unittest.TestCase):
+    def test_ingest_stores_epoch_ms_and_trains_then_predicts(self):
+        btc, eth = make_bars(1200, seed=11), make_bars(1200, seed=12)
+        now = btc[-1].ts + STEP + 60_000
+        funding = {s: pd.Series(0.0001, index=pd.to_datetime([b.ts for b in btc[::2]], unit="ms", utc=True))
+                   for s in bot.SYMBOLS}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            db = model_v2.connect(Path(d) / "m.db")
+            preds = model_v2.update(db, {"BTCUSDT": btc, "ETHUSDT": eth}, funding, now)
+            ts = db.execute("SELECT MAX(ts) FROM samples").fetchone()[0]
+            self.assertEqual(ts, btc[-1].ts)
+            self.assertIsNotNone(db.execute("SELECT id FROM models").fetchone())
+            self.assertTrue(all(isinstance(v, float) for v in preds.values()))
+
+
 class TestnetOnly(unittest.TestCase):
     def test_no_mainnet_host_for_signed_requests(self):
-        self.assertEqual(exchange.TESTNET_BASE, "https://testnet.binancefuture.com")
+        self.assertEqual(set(exchange.TEST_HOSTS.values()),
+                         {"https://testnet.binancefuture.com", "https://demo-fapi.binance.com"})
+        self.assertNotIn(exchange.PUBLIC_BASE, exchange.TEST_HOSTS.values())
         source = Path(exchange.__file__).read_text(encoding="utf-8")
-        self.assertEqual(source.count("fapi.binance.com"), 1)     # public market data only
+        self.assertEqual(source.count('"https://fapi.binance.com"'), 1)     # public market data only
         self.assertNotIn("ALLOW_MAINNET", source)
+
+    def test_unknown_test_environment_refused(self):
+        import os
+        os.environ.update({exchange.KEY_ENV: "k", exchange.SECRET_ENV: "s", exchange.HOST_ENV: "mainnet"})
+        try:
+            with self.assertRaises(ValueError):
+                exchange.TestnetClient()
+        finally:
+            for k in (exchange.KEY_ENV, exchange.SECRET_ENV, exchange.HOST_ENV):
+                os.environ.pop(k, None)
 
     def test_unlisted_operations_refused(self):
         client = exchange.TestnetClient.__new__(exchange.TestnetClient)

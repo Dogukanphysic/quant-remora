@@ -41,6 +41,7 @@ class Signal:
     breakout: bool
     breakdown: bool
     vol_scale: float
+    vol_annual: float
 
 
 def required_bars() -> int:
@@ -65,7 +66,13 @@ def evaluate(bars: Sequence[Bar]) -> Signal:
     vol = sd * math.sqrt(BARS_PER_YEAR)
     scale = min(1.0, VOL_TARGET / vol) if vol > 0 else 0.0
     return Signal(bar_ts=int(last.ts), close=float(last.close), entry_channel=float(hi), exit_channel=float(lo),
-                  breakout=bool(last.close > hi), breakdown=bool(last.close < lo), vol_scale=float(scale))
+                  breakout=bool(last.close > hi), breakdown=bool(last.close < lo), vol_scale=float(scale),
+                  vol_annual=float(vol))
+
+
+def model_stop_distance(vol_annual: float) -> float:
+    """Experimental model mode: 3x daily volatility, clamped to 3%..15%."""
+    return min(0.15, max(0.03, 3 * vol_annual / math.sqrt(365)))
 
 
 def protective_stop(entry_price: Decimal, exit_channel: float) -> Decimal:

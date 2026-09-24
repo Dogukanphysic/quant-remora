@@ -23,7 +23,10 @@ from .strategy import Bar, INTERVAL
 
 PUBLIC_BASE = "https://fapi.binance.com"
 TESTNET_BASE = "https://testnet.binancefuture.com"
+# Both are virtual-money environments; keys from binance.com "Demo Trading" only work on demo-fapi.
+TEST_HOSTS = {"testnet": TESTNET_BASE, "demo": "https://demo-fapi.binance.com"}
 KEY_ENV, SECRET_ENV = "REMORA_FUTURES_TESTNET_API_KEY", "REMORA_FUTURES_TESTNET_SECRET_KEY"
+HOST_ENV = "REMORA_FUTURES_TEST_ENV"
 
 
 class ApiError(RuntimeError):
@@ -77,6 +80,13 @@ class PublicMarketData:
         return [Bar(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]))
                 for r in raw if int(r[6]) < now]
 
+    def funding(self, symbol: str, limit: int = 1000):
+        import pandas as pd
+        url = f"{self.base}/fapi/v1/fundingRate?" + urlencode(dict(symbol=symbol, limit=limit))
+        rows = _open(self.opener, Request(url))
+        return pd.Series([float(r["fundingRate"]) for r in rows],
+                         index=pd.to_datetime([int(r["fundingTime"]) for r in rows], unit="ms", utc=True))
+
 
 class TestnetClient:
     ALLOWED = {
@@ -87,10 +97,13 @@ class TestnetClient:
         ("POST", "/fapi/v1/marginType"), ("POST", "/fapi/v1/leverage"), ("POST", "/fapi/v1/order"),
         ("POST", "/fapi/v1/algoOrder"), ("DELETE", "/fapi/v1/algoOrder"),
     }
-    environment = "binance_usdm_futures_testnet"
-
     def __init__(self):
-        self.key, self.secret = os.environ.get(KEY_ENV, ""), os.environ.get(SECRET_ENV, "")
+        choice = os.environ.get(HOST_ENV, "testnet")
+        if choice not in TEST_HOSTS:
+            raise ValueError(f"{HOST_ENV} must be one of {sorted(TEST_HOSTS)}")
+        self.base = TEST_HOSTS[choice]
+        self.environment = f"binance_usdm_futures_{choice}"
+        self.key, self.secret = os.environ.get(KEY_ENV, "").strip(), os.environ.get(SECRET_ENV, "").strip()
         if not self.key or not self.secret:
             raise ValueError(f"Missing {KEY_ENV}/{SECRET_ENV} in the process environment")
         self.identity = hashlib.sha256(self.key.encode()).hexdigest()
@@ -118,7 +131,7 @@ class TestnetClient:
         if signed:
             query += "&signature=" + hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
             headers["X-MBX-APIKEY"] = self.key
-        url = TESTNET_BASE + path
+        url = self.base + path
         if method != "POST" and query:
             url += "?" + query
         return _open(self.opener, Request(url, data=query.encode() if method == "POST" else None,

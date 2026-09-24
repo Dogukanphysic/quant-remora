@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 
-from . import learner, strategy
+from . import learner, model_v2, strategy
 from .exchange import ApiError, TransportError, floor_step
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +43,7 @@ def ledger_path(mode):
 
 
 LEARNING_DB = STATE / "remora-bot-learning.sqlite3"
+MODEL_DB = STATE / "remora-bot-model-v2.sqlite3"
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -91,9 +92,10 @@ def bind_account(db, client):
 
 
 def startup(db, client):
-    bind_account(db, client)
+    # First signed call proves the key before the ledger is bound to it.
     if not client.one_way_mode():
         raise Halt("account must be in One-Way position mode")
+    bind_account(db, client)
     for s in SYMBOLS:
         pos = db.execute("SELECT phase FROM positions WHERE symbol=?", (s,)).fetchone()
         qty, _ = client.position(s)
@@ -151,11 +153,15 @@ def reconcile_pending(db, client, pos, now_ms):
 
 def on_entry_fill(db, client, symbol, qty, price):
     pos = db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
-    exit_channel = json.loads(db.execute(
+    signal = json.loads(db.execute(
         "SELECT signal FROM decisions WHERE symbol=? AND action='enter' ORDER BY id DESC LIMIT 1",
-        (symbol,)).fetchone()[0])["exit_channel"]
+        (symbol,)).fetchone()[0])
     rules = client.rules(symbol)
-    stop = floor_step(strategy.protective_stop(price, exit_channel), rules["tick"])
+    if "stop_distance" in signal:
+        raw_stop = price * (1 - Decimal(str(signal["stop_distance"])))
+    else:
+        raw_stop = strategy.protective_stop(price, signal["exit_channel"])
+    stop = floor_step(raw_stop, rules["tick"])
     stop_id = client_id(symbol, pos["last_bar"], "s")
     with db:
         db.execute("UPDATE positions SET phase='long', qty=?, entry_price=?, entry_bar=?, stop_id=?, stop_price=? "
@@ -213,21 +219,42 @@ def learn(ldb, symbol, bars, now_ms):
     return prediction, learner.gate(ldb)
 
 
-def step_symbol(db, ldb, client, market, symbol, now_ms, blocked):
+def decide_model(pos, sig, prediction, blocked):
+    """Experimental (user opt-in) model authority: long iff predicted 24h net return > 0."""
+    if prediction is None:
+        return "hold", "no_model_prediction"
+    if pos["phase"] == "long":
+        return ("exit", "model_predicts_non_positive") if prediction <= 0 else ("hold", "model_hold_long")
+    if prediction <= 0:
+        return "hold", "model_predicts_non_positive"
+    if blocked:
+        return "hold", f"entries_blocked:{blocked}"
+    if sig.vol_scale <= 0:
+        return "hold", "zero_vol_scale"
+    return "enter", "model_predicts_positive"
+
+
+def step_symbol(db, ldb, client, symbol, bars, now_ms, blocked, model_prediction=None, model_mode=False):
     pos = db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
     if pos["pending_id"]:
         reconcile_pending(db, client, pos, now_ms)   # query only; never re-POST
         return "reconciling"
     pos = verify_exchange(db, client, pos, now_ms)
-    bars = [b for b in market.closed_bars(symbol) if b.ts + strategy.STEP_MS <= now_ms]
     prediction, gate = learn(ldb, symbol, bars, now_ms)
     sig = strategy.evaluate(bars)
     if pos["last_bar"] is not None and sig.bar_ts <= pos["last_bar"]:
         return "waiting"
+    record = dict(sig.__dict__, decision_owner="donchian_rule")
     authority = bool(gate["authority"])
     action, reason = "hold", "no_signal"
+    if model_mode:
+        prediction, authority = model_prediction, True
+        record.update(decision_owner="experimental_model_v2", user_opt_in=True, profitability_proven=False,
+                      walk_forward_gate="failed", stop_distance=strategy.model_stop_distance(sig.vol_annual))
     if now_ms - (sig.bar_ts + strategy.STEP_MS) > MAX_SIGNAL_AGE_MS:
         reason = "stale_bar"
+    elif model_mode:
+        action, reason = decide_model(pos, sig, prediction, blocked)
     elif pos["phase"] == "long" and sig.breakdown:
         action, reason = "exit", "close_below_exit_channel"
     elif pos["phase"] == "flat" and sig.breakout:
@@ -251,7 +278,7 @@ def step_symbol(db, ldb, client, market, symbol, now_ms, blocked):
         qty = Decimal(pos["qty"])
     with db:
         db.execute("INSERT INTO decisions(symbol, bar_ts, created_ms, signal, prediction, model_authority, action, "
-                   "reason) VALUES (?,?,?,?,?,?,?,?)", (symbol, sig.bar_ts, now_ms, json.dumps(sig.__dict__),
+                   "reason) VALUES (?,?,?,?,?,?,?,?)", (symbol, sig.bar_ts, now_ms, json.dumps(record),
                                                         prediction, int(authority), action, reason))
         db.execute("UPDATE positions SET last_bar=? WHERE symbol=?", (sig.bar_ts, symbol))
         if cid:
@@ -276,14 +303,22 @@ def step_symbol(db, ldb, client, market, symbol, now_ms, blocked):
     return action
 
 
-def tick(db, ldb, client, market, now_ms=None):
+def tick(db, ldb, client, market, now_ms=None, model_db=None):
+    """model_db given -> experimental model decisions (explicit user opt-in)."""
     now_ms = now_ms or int(time.time() * 1000)
     if db.execute("SELECT halted FROM bot WHERE id=1").fetchone()["halted"]:
         return {"halted": True}
     if hasattr(client, "check_stops"):
         client.check_stops()
     blocked = update_risk(db, client, now_ms)
-    return {s: step_symbol(db, ldb, client, market, s, now_ms, blocked) for s in SYMBOLS}
+    bars = {s: [b for b in market.closed_bars(s) if b.ts + strategy.STEP_MS <= now_ms] for s in SYMBOLS}
+    predictions = {}
+    if model_db is not None:
+        last = dict(db.execute("SELECT symbol, last_bar FROM positions").fetchall())
+        if any(last[s] is None or bars[s][-1].ts > last[s] for s in SYMBOLS):
+            predictions = model_v2.update(model_db, bars, {s: market.funding(s) for s in SYMBOLS}, now_ms)
+    return {s: step_symbol(db, ldb, client, s, bars[s], now_ms, blocked, predictions.get(s), model_db is not None)
+            for s in SYMBOLS}
 
 
 def halt(db, reason):
@@ -313,11 +348,25 @@ def singleton():
 def run(mode, client, market, poll_seconds=30, max_cycles=None):
     with singleton():
         db, ldb = connect(ledger_path(mode)), learner.connect(LEARNING_DB)
-        startup(db, client)
+        try:
+            startup(db, client)
+        except ApiError as exc:
+            hint = (f" -> key rejected by {client.environment}. Demo Trading keys (binance.com) need "
+                    "-Environment demo; testnet.binancefuture.com keys need -Environment testnet. "
+                    "Spot Testnet / real keys do not work. Also check the key's IP restriction."
+                    if exc.code in (-2015, -2014, -1022) else "")
+            print(f"STARTUP FAILED, nothing traded: {exc}{hint}")
+            return 1
+        model_db = None
+        if os.environ.get("REMORA_MODEL_DECISIONS") == "true":
+            model_db = model_v2.connect(MODEL_DB)
+            print("EXPERIMENTAL MODEL DECISIONS ON (user opt-in; walk-forward gate failed; virtual money only)")
+            with db:
+                event(db, "model_decisions_enabled", model=model_v2.VERSION)
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             try:
-                result = tick(db, ldb, client, market)
+                result = tick(db, ldb, client, market, model_db=model_db)
                 write_status(mode, db, ldb, result)
                 if result.get("halted"):
                     print("HALTED - inspect status; no automatic restart.")
@@ -342,13 +391,20 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
 def status(mode):
     db, ldb = connect(ledger_path(mode)), learner.connect(LEARNING_DB)
     bot = dict(db.execute("SELECT halted, environment, entries_blocked, peak_wallet, updated_ms FROM bot").fetchone())
+    decisions = []
+    for r in db.execute("SELECT symbol, bar_ts, action, reason, prediction, model_authority, signal FROM decisions "
+                        "ORDER BY id DESC LIMIT 6"):
+        row = dict(r)
+        row["decision_owner"] = json.loads(row.pop("signal")).get("decision_owner", "donchian_rule")
+        decisions.append(row)
     return dict(mode=mode, strategy=strategy.STRATEGY_ID, bot=bot,
                 positions=[dict(r) for r in db.execute("SELECT symbol, phase, qty, entry_price, stop_price, last_bar, "
                                                        "pending_id FROM positions")],
-                last_decisions=[dict(r) for r in db.execute("SELECT symbol, bar_ts, action, reason, prediction, "
-                                                            "model_authority FROM decisions ORDER BY id DESC LIMIT 6")],
+                last_decisions=decisions,
                 trades=[dict(r) for r in db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 10")],
-                learning=learner.status(ldb), real_money=False)
+                learning=learner.status(ldb),
+                model_v2=model_v2.status(model_v2.connect(MODEL_DB)) if MODEL_DB.exists() else None,
+                real_money=False)
 
 
 def write_status(mode, db, ldb, result):

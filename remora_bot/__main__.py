@@ -34,10 +34,56 @@ def seed():
     print(json.dumps(dict(seeded_bars=report, learning=learner.status(ldb)), indent=2))
 
 
+def seed_v2():
+    """Train the v2 model on the verified 5y BTC+ETH history (same features as the walk-forward study)."""
+    import learner_v2_research as research
+    from . import model_v2
+    data = research.load_history()
+    db = model_v2.connect(bot.MODEL_DB)
+    now_ms = int(time.time() * 1000)
+    with db:
+        for symbol, other in (("BTCUSDT", "ETHUSDT"), ("ETHUSDT", "BTCUSDT")):
+            model_v2.ingest(db, research.build(symbol, other, data), now_ms, "historical")
+        model_v2.train(db, now_ms)
+    print(json.dumps(model_v2.status(db), indent=2))
+
+
+def keycheck():
+    """Read-only: which virtual-money environment accepts the key? Never contacts mainnet, never orders."""
+    import hashlib
+    import hmac
+    from urllib.parse import urlencode
+    from urllib.request import Request, build_opener
+    from .exchange import KEY_ENV, SECRET_ENV, ApiError, _NoRedirect, _open
+    key, secret = os.environ.get(KEY_ENV, "").strip(), os.environ.get(SECRET_ENV, "").strip()
+    if not key or not secret:
+        raise SystemExit("key/secret missing")
+    opener = build_opener(_NoRedirect())
+    targets = {
+        "Futures Demo Trading (demo-fapi.binance.com)": ("https://demo-fapi.binance.com", "/fapi/v1/time", "/fapi/v2/account"),
+        "Futures Testnet (testnet.binancefuture.com)": ("https://testnet.binancefuture.com", "/fapi/v1/time", "/fapi/v2/account"),
+        "Spot Testnet (testnet.binance.vision) - bu botta CALISMAZ": ("https://testnet.binance.vision", "/api/v3/time", "/api/v3/account"),
+    }
+    for name, (base, time_path, account_path) in targets.items():
+        try:
+            server = _open(opener, Request(base + time_path))["serverTime"]
+            query = urlencode(dict(timestamp=server, recvWindow=10000))
+            query += "&signature=" + hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            _open(opener, Request(f"{base}{account_path}?{query}", headers={"X-MBX-APIKEY": key}))
+            result = "KABUL EDILDI"
+        except ApiError as exc:
+            result = f"reddedildi (Binance code {exc.code})"
+        except Exception as exc:
+            result = f"baglanti hatasi ({type(exc).__name__})"
+        print(f"{name}: {result}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="remora_bot")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("seed")
+    sub.add_parser("keycheck")
+    sub.add_parser("seed-v2")
     r = sub.add_parser("run")
     r.add_argument("--mode", choices=("paper", "testnet"), required=True)
     r.add_argument("--poll-seconds", type=float, default=30)
@@ -47,6 +93,10 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == "seed":
         return seed()
+    if args.cmd == "keycheck":
+        return keycheck()
+    if args.cmd == "seed-v2":
+        return seed_v2()
     if args.cmd == "status":
         print(json.dumps(bot.status(args.mode), indent=2, default=str))
         return 0

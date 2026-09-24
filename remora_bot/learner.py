@@ -123,7 +123,31 @@ def register_prediction(db, symbol: str, bar_ts: int, now_ms: int) -> float | No
     return value
 
 
-def gate(db) -> dict:
+WALK_FORWARD_REPORT = Path(__file__).resolve().parents[1] / "reports/learner-v2-research/report.json"
+
+
+def walk_forward_verdict(path: Path = WALK_FORWARD_REPORT) -> dict:
+    """Offline walk-forward result (learner_v2_research.py). Missing/unreadable -> no authority."""
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        return dict(authority=report["authority"] is True, reason=report["reason"],
+                    oos_predictions=report.get("gate_window", {}).get("n"),
+                    oos_mse_skill=report.get("gate_window", {}).get("mse_skill"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(authority=False, reason="walk_forward_report_unavailable")
+
+
+def gate(db, walk_forward_path: Path = WALK_FORWARD_REPORT) -> dict:
+    """Authority needs BOTH the offline walk-forward gate and the live forward gate."""
+    live = _live_gate(db)
+    wf = walk_forward_verdict(walk_forward_path)
+    live["walk_forward"] = wf
+    if live["authority"] and not wf["authority"]:
+        live.update(authority=False, reason="walk_forward_gate_not_passed")
+    return live
+
+
+def _live_gate(db) -> dict:
     rows = db.execute(
         "SELECT p.prediction, s.y, m.value FROM predictions p JOIN samples s ON s.symbol=p.symbol AND s.ts=p.ts "
         "JOIN models m ON m.id=p.model_id WHERE s.y IS NOT NULL AND p.created_ms < s.label_end").fetchall()
