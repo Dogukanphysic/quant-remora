@@ -1,0 +1,219 @@
+import json
+import tempfile
+import unittest
+from decimal import Decimal
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from remora_bot import bot, exchange, learner, strategy
+from remora_bot.exchange import ApiError, TransportError
+import unified_futures_research as research
+
+STEP = strategy.STEP_MS
+
+
+def make_bars(n, seed=1, start=1_600_000_000_000 // STEP * STEP):
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+    return [strategy.Bar(start + i * STEP, c, c * 1.004, c * 0.996, c, 1.0) for i, c in enumerate(close)]
+
+
+class StrategyParity(unittest.TestCase):
+    def test_bot_signal_matches_research_state_machine(self):
+        bars = make_bars(1500)
+        frame = pd.DataFrame([b.__dict__ for b in bars])
+        pos = research.signal(frame, 4, "donchian", dict(mode="long_only", n=100))
+        phase = 0
+        for i in range(strategy.required_bars(), len(bars)):
+            s = strategy.evaluate(bars[: i + 1])
+            if phase == 1 and s.breakdown:
+                phase = 0
+            elif phase == 0 and s.breakout:
+                phase = 1
+            self.assertEqual(phase, pos[i], i)
+
+    def test_rejects_gaps(self):
+        bars = make_bars(300)
+        del bars[150]
+        with self.assertRaises(ValueError):
+            strategy.evaluate(bars)
+
+    def test_stop_never_farther_than_25_percent(self):
+        self.assertEqual(strategy.protective_stop(Decimal("100"), 50.0), Decimal("75.00"))
+        self.assertEqual(strategy.protective_stop(Decimal("100"), 90.0), Decimal("90.0"))
+
+
+class LearnerCausality(unittest.TestCase):
+    def test_future_bars_do_not_change_features_or_prediction(self):
+        bars = make_bars(1200)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            a, b = learner.connect(Path(d) / "a.db"), learner.connect(Path(d) / "b.db")
+            now = bars[900].ts + STEP
+            learner.ingest(a, "BTCUSDT", bars[:901], now, "t")
+            learner.ingest(b, "BTCUSDT", bars, now, "t")      # future rows are ignored by time
+            for db in (a, b):
+                learner.train(db, now)
+            pa = learner.register_prediction(a, "BTCUSDT", bars[900].ts, now)
+            pb = learner.register_prediction(b, "BTCUSDT", bars[900].ts, now)
+            self.assertIsNotNone(pa)
+            self.assertAlmostEqual(pa, pb)
+            self.assertIsNone(a.execute("SELECT y FROM samples WHERE ts=?", (bars[900].ts,)).fetchone()[0])
+
+    def test_gate_requires_forward_evidence(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            db = learner.connect(Path(d) / "a.db")
+            self.assertFalse(learner.gate(db)["authority"])
+
+
+class FakeClient:
+    environment, identity = "fake", "id"
+
+    def __init__(self):
+        self.qty = {s: Decimal(0) for s in bot.SYMBOLS}
+        self.orders, self.stops, self.posts = {}, {}, []
+        self.fail_next_post = None
+
+    def rules(self, s):
+        return dict(step=Decimal("0.001"), min_qty=Decimal("0.001"), tick=Decimal("0.1"), min_notional=Decimal("5"))
+
+    def mark(self, s):
+        return Decimal("100")
+
+    def one_way_mode(self):
+        return True
+
+    def wallet(self):
+        return Decimal("5000"), Decimal("5000")
+
+    def position(self, s):
+        return self.qty[s], Decimal("100")
+
+    def open_orders(self, s):
+        return [cid for cid, sym in self.stops.items() if sym == s]
+
+    def order(self, s, cid):
+        if cid not in self.orders:
+            raise ApiError("not found", 400, -2013)
+        return self.orders[cid]
+
+    def configure(self, s, lev):
+        pass
+
+    def market_order(self, s, side, qty, cid, reduce_only):
+        self.posts.append(cid)
+        if self.fail_next_post:
+            exc, self.fail_next_post = self.fail_next_post, None
+            if isinstance(exc, TransportError):
+                self._fill(s, side, qty, cid)      # accepted by exchange, response lost
+            raise exc
+        return self._fill(s, side, qty, cid)
+
+    def _fill(self, s, side, qty, cid):
+        self.qty[s] += qty if side == "BUY" else -qty
+        self.orders[cid] = dict(status="FILLED", executedQty=str(qty), avgPrice="100")
+        return self.orders[cid]
+
+    def place_stop(self, s, qty, trigger, cid):
+        self.stops[cid] = s
+
+    def cancel_stop(self, cid):
+        self.stops.pop(cid, None)
+
+
+class FakeMarket:
+    def __init__(self, bars):
+        self.bars = bars
+
+    def closed_bars(self, s, limit=1000):
+        return self.bars
+
+
+def breakout_bars():
+    bars = make_bars(400, seed=3)
+    last = bars[-1]
+    hi = max(b.high for b in bars[-101:-1])
+    bars[-1] = strategy.Bar(last.ts, last.open, hi * 1.06, last.low, hi * 1.05, 1.0)
+    return bars
+
+
+class BotFlow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = bot.connect(Path(self.tmp.name) / "l.db")
+        self.ldb = learner.connect(Path(self.tmp.name) / "learn.db")
+        self.client = FakeClient()
+        self.bars = breakout_bars()
+        self.now = self.bars[-1].ts + STEP + 60_000
+
+    def tearDown(self):
+        self.db.close()
+        self.ldb.close()
+        self.tmp.cleanup()
+
+    def tick(self, now=None):
+        return bot.tick(self.db, self.ldb, self.client, FakeMarket(self.bars), now or self.now)
+
+    def test_breakout_enters_and_places_protective_stop(self):
+        result = self.tick()
+        self.assertEqual(result["BTCUSDT"], "enter")
+        pos = self.db.execute("SELECT * FROM positions WHERE symbol='BTCUSDT'").fetchone()
+        self.assertEqual(pos["phase"], "long")
+        self.assertIn(pos["stop_id"], self.client.stops)
+        self.assertEqual(self.tick()["BTCUSDT"], "waiting")          # same bar never re-enters
+
+    def test_ambiguous_post_is_reconciled_not_reposted(self):
+        self.client.fail_next_post = TransportError("timeout")
+        self.tick()
+        self.assertEqual(len([p for p in self.client.posts if p.startswith("rmb-btc-e-")]), 1)
+        pos = self.db.execute("SELECT phase FROM positions WHERE symbol='BTCUSDT'").fetchone()
+        self.assertEqual(pos["phase"], "long")
+
+    def test_untracked_exchange_position_halts(self):
+        self.client.qty["ETHUSDT"] = Decimal("1")
+        with self.assertRaises(bot.Halt):
+            self.tick()
+
+    def test_missing_stop_halts(self):
+        self.tick()
+        self.client.stops.clear()
+        with self.assertRaises(bot.Halt):
+            self.tick(self.now + STEP)
+
+    def test_exchange_stop_closes_trade(self):
+        self.tick()
+        self.client.qty["BTCUSDT"] = Decimal(0)
+        self.client.stops = {k: v for k, v in self.client.stops.items() if v != "BTCUSDT"}
+        self.tick(self.now + 1000)
+        trade = self.db.execute("SELECT exit_reason FROM trades").fetchone()
+        self.assertEqual(trade["exit_reason"], "exchange_stop")
+
+    def test_drawdown_blocks_new_entries(self):
+        self.db.execute("UPDATE bot SET peak_wallet='6000'")
+        self.db.commit()
+        result = self.tick()
+        self.assertTrue(result["BTCUSDT"].startswith("entries_blocked"))
+        self.assertEqual(self.client.posts, [])
+
+    def test_client_ids_are_deterministic_and_short(self):
+        a = bot.client_id("BTCUSDT", 1_700_000_000_000, "e")
+        self.assertEqual(a, bot.client_id("BTCUSDT", 1_700_000_000_000, "e"))
+        self.assertLessEqual(len(a), 36)
+
+
+class TestnetOnly(unittest.TestCase):
+    def test_no_mainnet_host_for_signed_requests(self):
+        self.assertEqual(exchange.TESTNET_BASE, "https://testnet.binancefuture.com")
+        source = Path(exchange.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count("fapi.binance.com"), 1)     # public market data only
+        self.assertNotIn("ALLOW_MAINNET", source)
+
+    def test_unlisted_operations_refused(self):
+        client = exchange.TestnetClient.__new__(exchange.TestnetClient)
+        with self.assertRaises(ValueError):
+            client._send("POST", "/fapi/v1/listenKey", {}, False)
+
+
+if __name__ == "__main__":
+    unittest.main()

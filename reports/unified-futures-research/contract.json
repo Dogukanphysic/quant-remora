@@ -1,0 +1,27 @@
+{
+  "cost_per_side": {
+    "base": 0.0007,
+    "stress": 0.0012
+  },
+  "data": "Binance USD-M 15m klines + funding, 2021-09..2026-08, SHA-256 verified archives",
+  "fill": "decide on closed bar t, hold over (t, t+1]; close-to-close returns",
+  "funding": "position pays funding_rate * position at each funding timestamp",
+  "gates": {
+    "development_stress": "both symbols: net>0, sharpe>=0.5, max_dd<=0.40, entries>=30",
+    "plateau": "at least one grid neighbour also passes the development gate",
+    "selection_stress": "both symbols: net>0, sharpe>=0.3"
+  },
+  "holdout_pass": "equal-weight portfolio net>0 at stress cost",
+  "no_survivor": "report failure; bot runs the best-ranked development candidate as explicit Testnet exploration only",
+  "selection_rule": "max over survivors of min(dev, sel) equal-weight portfolio sharpe at base cost; tie -> fewer entries",
+  "sizing": {
+    "unit": "1x notional",
+    "voltarget": "min(1, 0.40 / realized_vol_annual)"
+  },
+  "splits": {
+    "development": "< 2024-09-01",
+    "holdout": ">= 2025-09-01 (selected candidate only, evaluated once)",
+    "selection": "2024-09-01 .. 2025-08-31"
+  },
+  "version": "unified-futures-research-v1"
+}

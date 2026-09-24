@@ -1,0 +1,358 @@
+{
+  "contract_sha256": "1c81b9428c187494efc3a0c04d45e5b93bc3527a6d2763aa4bebebc4fd924261",
+  "data_sha256": {
+    "BTCUSDT": "3fd5933260a78ded7f74d9079fd6cddb37c757176af4102be9b8a8d37e7a76cd",
+    "ETHUSDT": "a1c7cf5014b32c6565cd6246600e2b0286173c0a78e77579db6fcabe6df2532d"
+  },
+  "candidates": 184,
+  "passed_development": 2,
+  "passed_plateau": 0,
+  "passed_selection": 0,
+  "status": "no_survivor_exploration_only",
+  "chosen": {
+    "timeframe_h": 4,
+    "family": "donchian",
+    "params": {
+      "mode": "long_only",
+      "n": 100
+    },
+    "sizing": "voltarget"
+  },
+  "chosen_metrics": {
+    "dev_stress": {
+      "BTCUSDT": {
+        "net": 0.501698352075516,
+        "sharpe": 0.6767767492666292,
+        "max_dd": 0.31191466501218823,
+        "entries": 22,
+        "pf": 1.1619461595394227,
+        "exposure": 0.3915754257907543
+      },
+      "ETHUSDT": {
+        "net": 0.5313708747766877,
+        "sharpe": 0.6787569426199875,
+        "max_dd": 0.28341104357621627,
+        "entries": 19,
+        "pf": 1.163881428370025,
+        "exposure": 0.3864051094890511
+      },
+      "portfolio": {
+        "net": 0.5373402041530231,
+        "sharpe": 0.7328222027945198,
+        "max_dd": 0.21744249854697295,
+        "entries": 41,
+        "pf": 1.170945280287745,
+        "exposure": 1.0
+      }
+    },
+    "sel_stress": null,
+    "dev_base": null,
+    "sel_base": null
+  },
+  "holdout": {
+    "base": {
+      "BTCUSDT": {
+        "net": 0.09597604618642075,
+        "sharpe": 0.5980088652450507,
+        "max_dd": 0.1491165717517059,
+        "entries": 7,
+        "pf": 1.1473158325330928,
+        "exposure": 0.3095890410958904
+      },
+      "ETHUSDT": {
+        "net": -0.14163331101769772,
+        "sharpe": -0.5692618726980145,
+        "max_dd": 0.31418842926964197,
+        "entries": 8,
+        "pf": 0.8846915944034116,
+        "exposure": 0.3735159817351598
+      },
+      "portfolio": {
+        "net": -0.02606000443221912,
+        "sharpe": -0.05409269879574187,
+        "max_dd": 0.2202076682133095,
+        "entries": 15,
+        "pf": 0.9889542882061991,
+        "exposure": 1.0
+      }
+    },
+    "stress": {
+      "BTCUSDT": {
+        "net": 0.08880444885227923,
+        "sharpe": 0.5610868509113215,
+        "max_dd": 0.15158763258365826,
+        "entries": 7,
+        "pf": 1.1375822436251184,
+        "exposure": 0.3095890410958904
+      },
+      "ETHUSDT": {
+        "net": -0.14727575491185396,
+        "sharpe": -0.5975408250166567,
+        "max_dd": 0.31772395504527884,
+        "entries": 8,
+        "pf": 0.8792689641473969,
+        "exposure": 0.3735159817351598
+      },
+      "portfolio": {
+        "net": -0.03241522419534715,
+        "sharpe": -0.08985685511122822,
+        "max_dd": 0.22338891184692544,
+        "entries": 15,
+        "pf": 0.9817109184195005,
+        "exposure": 1.0
+      }
+    }
+  },
+  "holdout_pass": false,
+  "buy_and_hold": {
+    "development": {
+      "BTCUSDT": {
+        "net": 0.2517762480671335,
+        "sharpe": 0.4102379615133858,
+        "max_dd": 0.7708301064203108,
+        "entries": 1,
+        "pf": 1.062172950492806,
+        "exposure": 1.0
+      },
+      "ETHUSDT": {
+        "net": -0.27065228437450395,
+        "sharpe": 0.18962470176059526,
+        "max_dd": 0.8115523763386558,
+        "entries": 1,
+        "pf": 1.0282051875629215,
+        "exposure": 1.0
+      }
+    },
+    "selection": {
+      "BTCUSDT": {
+        "net": 0.8358485220191456,
+        "sharpe": 1.53843083805511,
+        "max_dd": 0.3069018865310442,
+        "entries": 1,
+        "pf": 1.2653503201386722,
+        "exposure": 1.0
+      },
+      "ETHUSDT": {
+        "net": 0.7475068772368472,
+        "sharpe": 1.137322723121027,
+        "max_dd": 0.6516924588553176,
+        "entries": 1,
+        "pf": 1.1767035020530843,
+        "exposure": 1.0
+      }
+    },
+    "holdout": {
+      "BTCUSDT": {
+        "net": -0.274089627052987,
+        "sharpe": -0.5475198086078245,
+        "max_dd": 0.5344810393969894,
+        "entries": 1,
+        "pf": 0.9242994920381828,
+        "exposure": 1.0
+      },
+      "ETHUSDT": {
+        "net": -0.43809430514992054,
+        "sharpe": -0.6590992191314533,
+        "max_dd": 0.6751879699248102,
+        "entries": 1,
+        "pf": 0.9097063464459366,
+        "exposure": 1.0
+      }
+    }
+  },
+  "survivors": [],
+  "top_development": [
+    {
+      "timeframe_h": 4,
+      "family": "donchian",
+      "params": {
+        "mode": "long_only",
+        "n": 100
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.6767767492666292,
+      "eth_sharpe": 0.6787569426199875,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_short",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "unit",
+      "btc_sharpe": 0.5726123746424755,
+      "eth_sharpe": 0.5436019631401982,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_short",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.7129495331608393,
+      "eth_sharpe": 0.5410829049204812,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_only",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.7578601024170328,
+      "eth_sharpe": 0.5257352077450207,
+      "dev_pass": true
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_only",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "unit",
+      "btc_sharpe": 0.6511043575660894,
+      "eth_sharpe": 0.5172425058583201,
+      "dev_pass": true
+    },
+    {
+      "timeframe_h": 4,
+      "family": "donchian",
+      "params": {
+        "mode": "long_only",
+        "n": 100
+      },
+      "sizing": "unit",
+      "btc_sharpe": 0.48358872053484825,
+      "eth_sharpe": 0.5249620346419491,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "ema_cross",
+      "params": {
+        "mode": "long_only",
+        "fast": 20,
+        "slow": 100
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.5950500690296489,
+      "eth_sharpe": 0.4732921221457901,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_short",
+        "lookback_h": 720,
+        "threshold": 0.02
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.4748689201803528,
+      "eth_sharpe": 0.43588479434096417,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "ema_cross",
+      "params": {
+        "mode": "long_short",
+        "fast": 20,
+        "slow": 100
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.43575223713547023,
+      "eth_sharpe": 0.4342060381374328,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_only",
+        "lookback_h": 336,
+        "threshold": 0.02
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.5351163868205217,
+      "eth_sharpe": 0.4281964940364363,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 1,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_only",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.6818711609149202,
+      "eth_sharpe": 0.40433824094572823,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "donchian",
+      "params": {
+        "mode": "long_short",
+        "n": 100
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.4099702535802692,
+      "eth_sharpe": 0.3947700235698547,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 1,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_only",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "unit",
+      "btc_sharpe": 0.5074855720443102,
+      "eth_sharpe": 0.3771705779106991,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 1,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_short",
+        "lookback_h": 720,
+        "threshold": 0.0
+      },
+      "sizing": "voltarget",
+      "btc_sharpe": 0.607575198620823,
+      "eth_sharpe": 0.362452955366004,
+      "dev_pass": false
+    },
+    {
+      "timeframe_h": 4,
+      "family": "tsmom",
+      "params": {
+        "mode": "long_short",
+        "lookback_h": 720,
+        "threshold": 0.02
+      },
+      "sizing": "unit",
+      "btc_sharpe": 0.34953897110500465,
+      "eth_sharpe": 0.40267005916201504,
+      "dev_pass": false
+    }
+  ]
+}

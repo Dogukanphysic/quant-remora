@@ -1,0 +1,14 @@
+{
+  "contract_sha256": "1c81b9428c187494efc3a0c04d45e5b93bc3527a6d2763aa4bebebc4fd924261",
+  "status": "no_survivor_exploration_only",
+  "timeframe_h": 4,
+  "family": "donchian",
+  "params": {
+    "mode": "long_only",
+    "n": 100
+  },
+  "sizing": "voltarget",
+  "holdout_pass": false,
+  "real_money_eligible": false,
+  "testnet_only": true
+}
