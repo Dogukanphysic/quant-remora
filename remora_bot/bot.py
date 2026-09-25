@@ -101,12 +101,19 @@ def bind_account(db, client):
         raise Halt("ledger is bound to another account/environment")
 
 
-def startup(db, client):
+def ensure_symbols(db, symbols):
+    with db:
+        for s in symbols:
+            db.execute("INSERT OR IGNORE INTO positions(symbol, phase, qty) VALUES (?, 'flat', '0')", (s,))
+
+
+def startup(db, client, symbols=SYMBOLS):
     # First signed call proves the key before the ledger is bound to it.
     if not client.one_way_mode():
         raise Halt("account must be in One-Way position mode")
     bind_account(db, client)
-    for s in SYMBOLS:
+    ensure_symbols(db, symbols)
+    for s in symbols:
         pos = db.execute("SELECT phase FROM positions WHERE symbol=?", (s,)).fetchone()
         qty, _ = client.position(s)
         if pos["phase"] == "flat" and qty == 0 and not client.open_orders(s):
@@ -279,21 +286,29 @@ def step_symbol(db, ldb, client, symbol, bars, now_ms, blocked, model_prediction
             reason = "zero_vol_scale"
         else:
             action, reason = "enter", "close_above_entry_channel"
+    notional = ALLOCATION_USDT * Decimal(str(sig.vol_scale))
+    return commit_and_execute(db, client, pos, sig.bar_ts, now_ms, action, reason, notional, record,
+                              prediction, authority)
+
+
+def commit_and_execute(db, client, pos, bar_ts, now_ms, action, reason, notional, record, prediction, authority):
+    """Persist the decision (+ intent before any POST), then send one order and reconcile. Never re-POSTs."""
+    symbol = pos["symbol"]
     kind = {"enter": "e", "exit": "x"}.get(action)
-    cid = client_id(symbol, sig.bar_ts, kind) if kind else None
+    cid = client_id(symbol, bar_ts, kind) if kind else None
     qty = None
     if action == "enter":
         rules, mark = client.rules(symbol), client.mark(symbol)
-        qty = floor_step(ALLOCATION_USDT * Decimal(str(sig.vol_scale)) / mark, rules["step"])
+        qty = floor_step(notional / mark, rules["step"])
         if qty < rules["min_qty"] or qty * mark < rules["min_notional"]:
             action, reason, cid = "hold", "below_exchange_minimum", None
     elif action == "exit":
         qty = Decimal(pos["qty"])
     with db:
         db.execute("INSERT INTO decisions(symbol, bar_ts, created_ms, signal, prediction, model_authority, action, "
-                   "reason) VALUES (?,?,?,?,?,?,?,?)", (symbol, sig.bar_ts, now_ms, json.dumps(record),
+                   "reason) VALUES (?,?,?,?,?,?,?,?)", (symbol, bar_ts, now_ms, json.dumps(record),
                                                         prediction, int(authority), action, reason))
-        db.execute("UPDATE positions SET last_bar=? WHERE symbol=?", (sig.bar_ts, symbol))
+        db.execute("UPDATE positions SET last_bar=? WHERE symbol=?", (bar_ts, symbol))
         if cid:
             db.execute("INSERT INTO intents VALUES (?,?,?,?,?,?,?,NULL)",
                        (cid, symbol, "BUY" if action == "enter" else "SELL", "entry" if action == "enter" else "exit",
@@ -362,7 +377,14 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
     with singleton():
         db, ldb = connect(ledger_path(mode)), learner.connect(LEARNING_DB)
         try:
-            startup(db, client)
+            explore_mode = os.environ.get("REMORA_EXPLORE") == "true"
+            if explore_mode and (os.environ.get("REMORA_MODEL_DECISIONS") != "true" or strategy.BAR_HOURS != 1):
+                print("STARTUP FAILED: -Explore requires -ModelDecisions and -Interval 1h")
+                return 1
+            if explore_mode:
+                from . import explore
+                explore.configure()
+            startup(db, client, explore.UNIVERSE if explore_mode else SYMBOLS)
         except ApiError as exc:
             hint = (f" -> key rejected by {client.environment}. Demo Trading keys (binance.com) need "
                     "-Environment demo; testnet.binancefuture.com keys need -Environment testnet. "
@@ -371,7 +393,14 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
             print(f"STARTUP FAILED, nothing traded: {exc}{hint}")
             return 1
         model_db = None
-        if os.environ.get("REMORA_MODEL_DECISIONS") == "true":
+        if explore_mode:
+            model_db = model_v2.connect(explore.MODEL_DB)
+            print(f"EXPLORATION ON: {len(explore.UNIVERSE)} coins, {explore.NOTIONAL} USDT, {explore.HOLD_BARS}h hold, "
+                  "learns from every executed trade (virtual money only)")
+            with db:
+                event(db, "model_decisions_enabled", model=model_v2.VERSION, interval=strategy.INTERVAL,
+                      explore=True)
+        elif os.environ.get("REMORA_MODEL_DECISIONS") == "true":
             model_db = model_v2.connect(model_db_path(strategy.BAR_HOURS))
             print(f"EXPERIMENTAL MODEL DECISIONS ON ({strategy.INTERVAL}; user opt-in; walk-forward gate failed; "
                   "virtual money only)")
@@ -383,7 +412,8 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             try:
-                result = tick(db, ldb, client, market, model_db=model_db)
+                result = (explore.tick(db, client, market, model_db) if explore_mode
+                          else tick(db, ldb, client, market, model_db=model_db))
                 write_status(mode, db, ldb, result)
                 if result.get("halted"):
                     print("HALTED - inspect status; no automatic restart.")
@@ -410,7 +440,7 @@ def status(mode):
     bot = dict(db.execute("SELECT halted, environment, entries_blocked, peak_wallet, updated_ms FROM bot").fetchone())
     decisions = []
     for r in db.execute("SELECT symbol, bar_ts, action, reason, prediction, model_authority, signal FROM decisions "
-                        "ORDER BY id DESC LIMIT 6"):
+                        "ORDER BY id DESC LIMIT 10"):
         row = dict(r)
         signal = json.loads(row.pop("signal"))
         row["decision_owner"] = signal.get("decision_owner", "donchian_rule")
@@ -418,15 +448,18 @@ def status(mode):
         decisions.append(row)
     enabled = db.execute("SELECT payload FROM events WHERE kind='model_decisions_enabled' ORDER BY id DESC LIMIT 1"
                          ).fetchone()
-    interval = json.loads(enabled[0]).get("interval", "4h") if enabled else "4h"
+    payload = json.loads(enabled[0]) if enabled else {}
+    interval = payload.get("interval", "4h")
     model_path = model_db_path(int(interval.rstrip("h")))
+    if payload.get("explore"):
+        model_path = STATE / "remora-bot-model-v3-universe.sqlite3"
     return dict(mode=mode, strategy=strategy.STRATEGY_ID, bot=bot,
                 positions=[dict(r) for r in db.execute("SELECT symbol, phase, qty, entry_price, stop_price, last_bar, "
                                                        "pending_id FROM positions")],
                 last_decisions=decisions,
                 trades=[dict(r) for r in db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 10")],
                 learning=learner.status(ldb),
-                model_interval=interval,
+                model_interval=interval, explore=bool(payload.get("explore")),
                 model_v2=model_v2.status(model_v2.connect(model_path)) if model_path.exists() else None,
                 real_money=False)
 

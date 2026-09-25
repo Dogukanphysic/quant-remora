@@ -24,20 +24,27 @@ WARMUP = 250
 SYMBOL_CODE = {"BTCUSDT": 0.0, "ETHUSDT": 1.0}
 
 
-def features_for(bar_hours: int) -> list[str]:
-    return [f"r_{bar_hours}h", "r_1d", "r_7d", "r_30d", "donchian100_position", "vol_30d", "ema50_ema200",
-            "funding_last", "funding_3d_mean", "other_asset_r_1d", "volume_ratio_30d", "symbol"]
+REALIZED_WEIGHT = 5.0          # an executed trade outcome counts 5x a market-proxy label
 
 
-def configure(bar_hours: int) -> None:
+def features_for(bar_hours: int, universe: bool = False) -> list[str]:
+    base = [f"r_{bar_hours}h", "r_1d", "r_7d", "r_30d", "donchian100_position", "vol_30d", "ema50_ema200",
+            "funding_last", "funding_3d_mean"]
+    # Universe mode is coin-agnostic: BTC's 1d return is the market factor and there is no symbol code.
+    return base + (["btc_r_1d", "volume_ratio_30d"] if universe else
+                   ["other_asset_r_1d", "volume_ratio_30d", "symbol"])
+
+
+def configure(bar_hours: int, universe: bool = False) -> None:
     """Select the bar interval (4h default, 1h). Day-based windows scale with it; 4h is unchanged."""
-    global BAR_HOURS, BAR, BAR_MS, PER_DAY, FEATURES, VERSION
-    if bar_hours not in (1, 4):
-        raise ValueError("model_v2 supports 1h or 4h bars")
+    global BAR_HOURS, BAR, BAR_MS, PER_DAY, FEATURES, VERSION, UNIVERSE
+    if bar_hours not in (1, 4) or (universe and bar_hours != 1):
+        raise ValueError("model_v2 supports 1h or 4h bars; universe mode is 1h only")
     BAR_HOURS, BAR, BAR_MS = bar_hours, pd.Timedelta(hours=bar_hours), bar_hours * 3600 * 1000
-    PER_DAY = 24 // bar_hours
-    FEATURES = features_for(bar_hours)
-    VERSION = "pooled-ridge-next24h-v2" if bar_hours == 4 else "pooled-ridge-1h-next6h-v2"
+    PER_DAY, UNIVERSE = 24 // bar_hours, universe
+    FEATURES = features_for(bar_hours, universe)
+    VERSION = ("pooled-ridge-1h-next6h-universe-v3" if universe else
+               "pooled-ridge-next24h-v2" if bar_hours == 4 else "pooled-ridge-1h-next6h-v2")
 
 
 configure(4)
@@ -70,8 +77,11 @@ def feature_frame(bars: pd.DataFrame, other_close: pd.Series, funding: pd.Series
         "funding_3d_mean": np.where(pos >= 0, fmean[safe] if len(fr) else np.nan, np.nan),
         "other_asset_r_1d": (ob / ob.shift(d) - 1).to_numpy(),
         "volume_ratio_30d": pd.Series(v) / pd.Series(v).rolling(30 * d).mean(),
-        "symbol": SYMBOL_CODE[symbol],
+        "symbol": SYMBOL_CODE.get(symbol, np.nan),
     })
+    if UNIVERSE:        # other_close is BTC's close here (BTC's own close for BTC)
+        x = x.rename(columns={"other_asset_r_1d": "btc_r_1d"}).drop(columns="symbol")
+    x = x[FEATURES]
     x.index = bars.index
     closes = pd.Series(c, index=bars.index)
     contiguous = pd.Series(bars.index, index=bars.index).shift(-HORIZON) == bars.index + HORIZON * BAR
@@ -80,13 +90,14 @@ def feature_frame(bars: pd.DataFrame, other_close: pd.Series, funding: pd.Series
 
 
 class Ridge:
-    def fit(self, x, y):
+    def fit(self, x, y, w=None):
         self.m, self.s = x.mean(0), x.std(0)
         self.s[self.s < 1e-12] = 1
         z = np.column_stack([np.ones(len(x)), (x - self.m) / self.s])
         p = np.eye(z.shape[1]) * 10
         p[0, 0] = 0
-        self.b = np.linalg.solve(z.T @ z + p, z.T @ y)
+        zw = z if w is None else z * np.asarray(w)[:, None]
+        self.b = np.linalg.solve(zw.T @ z + p, zw.T @ y)
         return self
 
     def predict(self, x):
@@ -118,7 +129,19 @@ def connect(path: Path) -> sqlite3.Connection:
                " value TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS predictions(symbol TEXT, ts INTEGER, model_id INTEGER, prediction REAL,"
                " created_ms INTEGER, PRIMARY KEY(symbol, ts))")
+    # Executed trade outcomes (wins and losses) keyed to the entry bar's feature row.
+    db.execute("CREATE TABLE IF NOT EXISTS realized(trade_id TEXT PRIMARY KEY, symbol TEXT, ts INTEGER,"
+               " net_return REAL, exit_reason TEXT, created_ms INTEGER)")
     return db
+
+
+def record_realized(db, trade_id: str, symbol: str, entry_bar_ts: int, net_return: float, exit_reason: str,
+                    now_ms: int) -> bool:
+    if not math.isfinite(net_return):
+        return False
+    cur = db.execute("INSERT OR IGNORE INTO realized VALUES (?,?,?,?,?,?)",
+                     (trade_id, symbol, entry_bar_ts, net_return, exit_reason, now_ms))
+    return cur.rowcount == 1
 
 
 def ingest(db, frame: pd.DataFrame, now_ms: int, origin: str) -> None:
@@ -141,17 +164,25 @@ def ingest(db, frame: pd.DataFrame, now_ms: int, origin: str) -> None:
 
 def train(db, now_ms: int) -> None:
     newest = db.execute("SELECT MAX(label_end) FROM samples WHERE y IS NOT NULL").fetchone()[0]
-    last = db.execute("SELECT last_label FROM models ORDER BY id DESC LIMIT 1").fetchone()
-    if newest is None or (last and last[0] >= newest):
+    last = db.execute("SELECT last_label, value FROM models ORDER BY id DESC LIMIT 1").fetchone()
+    n_realized = db.execute("SELECT COUNT(*) FROM realized").fetchone()[0]
+    if newest is None or (last and last[0] >= newest and json.loads(last[1]).get("realized", 0) == n_realized):
         return
     start = now_ms - int(TRAIN_WINDOW.total_seconds() * 1000)
-    rows = db.execute("SELECT x, y FROM samples WHERE y IS NOT NULL AND label_end <= ? AND ts >= ?",
-                      (now_ms, start)).fetchall()
+    # A realized trade replaces the proxy label of its entry bar and weighs REALIZED_WEIGHT.
+    rows = db.execute(
+        "SELECT s.x, COALESCE(r.net_return, s.y), r.net_return IS NOT NULL FROM samples s "
+        "LEFT JOIN (SELECT symbol, ts, AVG(net_return) net_return FROM realized GROUP BY symbol, ts) r "
+        "ON r.symbol=s.symbol AND r.ts=s.ts "
+        "WHERE (s.y IS NOT NULL AND s.label_end <= ? OR r.net_return IS NOT NULL) AND s.ts >= ?",
+        (now_ms, start)).fetchall()
     if len(rows) < 500:
         return
     y = np.array([r[1] for r in rows])
-    model = Ridge().fit(np.array([json.loads(r[0]) for r in rows]), y).to_json()
-    model.update(version=VERSION, samples=len(rows), train_mean=float(y.mean()), train_last_label=newest)
+    w = np.where([r[2] for r in rows], REALIZED_WEIGHT, 1.0)
+    model = Ridge().fit(np.array([json.loads(r[0]) for r in rows]), y, w).to_json()
+    model.update(version=VERSION, samples=len(rows), train_mean=float(y.mean()), train_last_label=newest,
+                 realized=n_realized, realized_in_window=int((w > 1).sum()))
     model["digest"] = hashlib.sha256(json.dumps(model, sort_keys=True).encode()).hexdigest()
     db.execute("INSERT INTO models(created_ms, last_label, value) VALUES (?,?,?)", (now_ms, newest, json.dumps(model)))
 
@@ -176,7 +207,7 @@ def update(db, bars_by_symbol: Mapping[str, list], funding_by_symbol: Mapping[st
     frames = {s: bars_frame(b) for s, b in bars_by_symbol.items()}
     with db:
         for s, f in frames.items():
-            other = next(o for o in frames if o != s)
+            other = "BTCUSDT" if UNIVERSE else next(o for o in frames if o != s)
             ingest(db, feature_frame(f, frames[other]["close"], funding_by_symbol[s], s), now_ms, origin)
         train(db, now_ms)
         return {s: register_prediction(db, s, int(f.index[-1].value // 10**6), now_ms) for s, f in frames.items()}
@@ -201,6 +232,25 @@ def status(db) -> dict:
     model = json.loads(latest[1]) if latest else {}
     version = model.get("version", VERSION)
     report = "reports/learner-v2-research-1h" if "-1h-" in version else "reports/learner-v2-research"
+    if "universe" in version:
+        report = "reports/universe-research"
     return dict(version=version, label_counts=counts, model_id=latest[0] if latest else None,
                 model_samples=model.get("samples", 0), live_forward=live_forward(db),
-                walk_forward_oos=f"no edge ({report})", profitability_proven=False)
+                realized_trades=realized_stats(db),
+                walk_forward_oos=f"see {report}", profitability_proven=False)
+
+
+def realized_stats(db) -> dict:
+    """Executed outcomes, and whether the model's pre-entry prediction separated winners from losers."""
+    rows = db.execute("SELECT r.net_return, p.prediction FROM realized r LEFT JOIN predictions p "
+                      "ON p.symbol=r.symbol AND p.ts=r.ts").fetchall()
+    if not rows:
+        return dict(count=0)
+    net = np.array([r[0] for r in rows])
+    pred = [r[1] for r in rows]
+    flagged = [n for n, p in zip(net, pred) if p is not None and p <= 0]
+    backed = [n for n, p in zip(net, pred) if p is not None and p > 0]
+    return dict(count=len(net), losses=int((net <= 0).sum()), wins=int((net > 0).sum()),
+                mean_net=float(net.mean()), total_net_pct=float(net.sum() * 100),
+                model_negative_mean_net=float(np.mean(flagged)) if flagged else None,
+                model_positive_mean_net=float(np.mean(backed)) if backed else None)

@@ -396,6 +396,109 @@ class TimeSync(unittest.TestCase):
         self.assertGreater(exchange.TestnetClient.RECV_WINDOW, exchange.TestnetClient.MAX_SYNC_RTT * 1000 + 2000)
 
 
+class UniverseClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        from collections import defaultdict
+        self.qty = defaultdict(Decimal)
+
+
+class Exploration(unittest.TestCase):
+    def setUp(self):
+        from remora_bot import explore
+        self.explore = explore
+        explore.configure()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = bot.connect(Path(self.tmp.name) / "l.db")
+        bot.ensure_symbols(self.db, explore.UNIVERSE)
+        self.mdb = model_v2.connect(Path(self.tmp.name) / "m.db")
+        self.client = UniverseClient()
+        self.bars = make_bars_h(800, 1, seed=21)
+        self.now = self.bars[-1].ts + 3_600_000 + 60_000
+        # Every coin negative; SOL least bad -> exploration must still trade SOL.
+        self.pred = {s: -0.01 for s in explore.UNIVERSE} | {"SOLUSDT": -0.001}
+        self.original = model_v2.update
+        model_v2.update = lambda *a, **k: dict(self.pred)
+
+    def tearDown(self):
+        model_v2.update = self.original
+        bot.configure_interval(4)
+        model_v2.configure(4)
+        self.tmp.cleanup()
+
+    def tick(self):
+        return self.explore.tick(self.db, self.client, FakeMarket(self.bars), self.mdb, self.now)
+
+    def advance(self):
+        last = self.bars[-1]
+        self.bars = self.bars + [strategy.Bar(last.ts + 3_600_000, *([last.close] * 4), 1.0)]
+        self.now += 3_600_000
+
+    def test_top_ranked_coin_traded_even_when_model_says_no(self):
+        result = self.tick()
+        self.assertEqual(result["SOLUSDT"], "enter")
+        self.assertEqual(sum(v == "enter" for v in result.values()), 1)
+        self.assertEqual(result["BTCUSDT"], "not_top_ranked")
+        signal = json.loads(self.db.execute("SELECT signal FROM decisions WHERE action='enter'").fetchone()[0])
+        self.assertEqual((signal["decision_owner"], signal["model_approved"], signal["rank"]), ("exploration", False, 1))
+        self.assertIn(True, [v == "SOLUSDT" for v in self.client.stops.values()])
+        self.assertEqual(self.tick(), {"waiting": True, "realized_added": 0})       # same bar: nothing new
+
+    def test_hold_six_bars_then_exit_and_learn_from_the_trade(self):
+        self.tick()
+        for hour in range(1, 7):
+            self.advance()
+            result = self.tick()
+            self.assertEqual(result["SOLUSDT"], "exit" if hour == 6 else "holding", hour)
+        self.explore.sync_realized(self.db, self.mdb, self.now)
+        row = self.mdb.execute("SELECT symbol, net_return, exit_reason FROM realized WHERE symbol='SOLUSDT'").fetchone()
+        self.assertEqual(row[0], "SOLUSDT")
+        self.assertAlmostEqual(row[1], -2 * self.explore.TAKER_FEE)            # flat price: fees only
+        self.assertEqual(row[2], "strategy_exit")
+        self.assertEqual(self.explore.sync_realized(self.db, self.mdb, self.now), 0)   # idempotent
+
+    def test_max_open_positions(self):
+        self.explore.MAX_OPEN, original = 1, self.explore.MAX_OPEN
+        try:
+            self.tick()
+            self.advance()
+            self.pred = {s: -0.01 for s in self.explore.UNIVERSE} | {"XRPUSDT": 0.02}
+            result = self.tick()
+            self.assertEqual(result["XRPUSDT"], "max_open_positions")
+        finally:
+            self.explore.MAX_OPEN = original
+
+    def test_missing_btc_bar_skips_the_hour(self):
+        self.bars_by = None
+        market = FakeMarket(self.bars)
+        market.closed_bars = lambda s, limit=None: [] if s == "BTCUSDT" else self.bars
+        result = self.explore.tick(self.db, self.client, market, self.mdb, self.now)
+        self.assertEqual(result.get("skipped"), "btc_bar_missing")
+        self.assertEqual(self.client.posts, [])
+
+
+class RealizedTraining(unittest.TestCase):
+    def test_realized_trade_replaces_proxy_label_with_weight(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            db = model_v2.connect(Path(d) / "m.db")
+            rng = np.random.default_rng(3)
+            now = 1_790_000_000_000
+            for i in range(600):
+                ts = now - (700 - i) * 3_600_000
+                db.execute("INSERT INTO samples VALUES (?,?,?,?,?,?)", ("BTCUSDT", ts, json.dumps(rng.normal(size=12).tolist()),
+                                                                        float(rng.normal() * 0.01), ts + 7 * 3_600_000, "t"))
+            model_v2.train(db, now)
+            before = json.loads(db.execute("SELECT value FROM models ORDER BY id DESC").fetchone()[0])
+            ts0 = db.execute("SELECT ts FROM samples ORDER BY ts DESC LIMIT 1").fetchone()[0]
+            self.assertTrue(model_v2.record_realized(db, "ledger:1", "BTCUSDT", ts0, -0.05, "exchange_stop", now))
+            self.assertFalse(model_v2.record_realized(db, "ledger:1", "BTCUSDT", ts0, -0.05, "exchange_stop", now))
+            model_v2.train(db, now)                                  # retrains on a new realized trade alone
+            after = json.loads(db.execute("SELECT value FROM models ORDER BY id DESC").fetchone()[0])
+            self.assertEqual((before["realized"], after["realized"], after["realized_in_window"]), (0, 1, 1))
+            self.assertNotEqual(before["beta"], after["beta"])
+            self.assertEqual(model_v2.realized_stats(db)["losses"], 1)
+
+
 class TestnetOnly(unittest.TestCase):
     def test_no_mainnet_host_for_signed_requests(self):
         self.assertEqual(set(exchange.TEST_HOSTS.values()),

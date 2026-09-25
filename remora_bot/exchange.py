@@ -299,8 +299,11 @@ class PaperClient:
         self._put(f"stop:{symbol}", dict(client_id=client_id, qty=str(qty), trigger=str(trigger)))
         return dict(clientAlgoId=client_id, algoStatus="NEW")
 
+    def _stop_symbols(self):
+        return [k.split(":", 1)[1] for (k,) in self.db.execute("SELECT k FROM paper WHERE k LIKE 'stop:%'")]
+
     def cancel_stop(self, client_id):
-        for sym in ("BTCUSDT", "ETHUSDT"):
+        for sym in self._stop_symbols():
             stop = self._get(f"stop:{sym}", None)
             if stop and stop["client_id"] == client_id:
                 with self.db:
@@ -309,7 +312,7 @@ class PaperClient:
 
     def check_stops(self):
         """Simulate exchange-side stop triggering at mark price."""
-        for sym in ("BTCUSDT", "ETHUSDT"):
+        for sym in self._stop_symbols():
             stop = self._get(f"stop:{sym}", None)
             if stop and self.mark(sym) <= Decimal(stop["trigger"]):
                 qty, _ = self.position(sym)
