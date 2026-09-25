@@ -113,14 +113,19 @@ class TestnetClient:
         self.opener = build_opener(_NoRedirect())
         self._anchor = None
 
+    MAX_SYNC_RTT = 2.5          # seconds; a fresh TLS handshake over a VPN alone takes ~0.6 s
+    RECV_WINDOW = 10_000        # ms; covers MAX_SYNC_RTT plus request transit with margin
+
     def _timestamp(self):
         if self._anchor is None or time.monotonic() - self._anchor[1] > 60:
             started = time.monotonic()
             server = int(self._send("GET", "/fapi/v1/time", {}, False)["serverTime"])
             done = time.monotonic()
-            if done - started > 1.0:
+            if done - started > self.MAX_SYNC_RTT:
                 raise TransportError("time sync RTT too high; signed request not sent")
-            self._anchor = (server + (done - started) * 500, done)
+            # serverTime was stamped before `done`, so advancing it from `done` is a lower bound
+            # on server time: never ahead (Binance rejects >1 s ahead), at most one RTT behind.
+            self._anchor = (server, done)
         return int(self._anchor[0] + (time.monotonic() - self._anchor[1]) * 1000)
 
     def _send(self, method, path, params, signed):
@@ -129,7 +134,7 @@ class TestnetClient:
         values = dict(params)
         headers = {}
         if signed:
-            values.update(timestamp=self._timestamp(), recvWindow=5000)
+            values.update(timestamp=self._timestamp(), recvWindow=self.RECV_WINDOW)
         query = urlencode(values)
         if signed:
             query += "&signature=" + hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()

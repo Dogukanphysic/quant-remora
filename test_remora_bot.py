@@ -356,6 +356,46 @@ class HourlyInterval(unittest.TestCase):
             self.assertEqual(signal["interval"], "1h")
 
 
+class TimeSync(unittest.TestCase):
+    """Binance rejects timestamps >1 s ahead of server time or older than recvWindow."""
+
+    def make(self, stamp_fraction, rtt):
+        client = exchange.TestnetClient.__new__(exchange.TestnetClient)
+        client._anchor = None
+        clock = {"t": 100.0}
+        offset_ms = 1_790_000_000_000
+
+        def fake_send(method, path, params, signed):
+            stamp = offset_ms + (clock["t"] + stamp_fraction * rtt) * 1000   # server stamps mid-flight
+            clock["t"] += rtt
+            return {"serverTime": int(stamp)}
+        client._send = fake_send
+        self.original = exchange.time.monotonic
+        exchange.time.monotonic = lambda: clock["t"]
+        return client, clock, offset_ms
+
+    def tearDown(self):
+        exchange.time.monotonic = self.original
+
+    def test_estimate_never_ahead_and_at_most_one_rtt_behind(self):
+        for fraction in (0.0, 0.5, 1.0):
+            client, clock, offset = self.make(fraction, rtt=2.0)
+            estimate = client._timestamp()
+            clock["t"] += 7.0
+            later = client._timestamp()                       # reuses anchor
+            for est, now in ((estimate, clock["t"] - 7.0), (later, clock["t"])):
+                true_server = offset + now * 1000
+                self.assertLessEqual(est, true_server, fraction)
+                self.assertGreaterEqual(est, true_server - 2000 - 1, fraction)
+            exchange.time.monotonic = self.original
+
+    def test_slow_sync_still_refused_and_window_covers_lag(self):
+        client, _, _ = self.make(0.5, rtt=exchange.TestnetClient.MAX_SYNC_RTT + 0.5)
+        with self.assertRaises(TransportError):
+            client._timestamp()
+        self.assertGreater(exchange.TestnetClient.RECV_WINDOW, exchange.TestnetClient.MAX_SYNC_RTT * 1000 + 2000)
+
+
 class TestnetOnly(unittest.TestCase):
     def test_no_mainnet_host_for_signed_requests(self):
         self.assertEqual(set(exchange.TEST_HOSTS.values()),
