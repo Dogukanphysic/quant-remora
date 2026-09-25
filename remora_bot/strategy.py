@@ -11,15 +11,24 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Sequence
 
-INTERVAL = "4h"
-STEP_MS = 4 * 3600 * 1000
 ENTRY_N = 100
 EXIT_N = 50
-VOL_BARS = 180                      # 30 days of 4h bars
 VOL_TARGET = 0.40
-BARS_PER_YEAR = 6 * 365
 MAX_STOP_DISTANCE = Decimal("0.25")
 STRATEGY_ID = "donchian100-4h-long-voltarget-v1"
+
+
+def configure(bar_hours: int) -> None:
+    """4h (default, the researched Donchian rule) or 1h (experimental model mode only)."""
+    global INTERVAL, STEP_MS, VOL_BARS, BARS_PER_YEAR, BAR_HOURS
+    if bar_hours not in (1, 4):
+        raise ValueError("supported intervals: 1h, 4h")
+    BAR_HOURS, INTERVAL, STEP_MS = bar_hours, f"{bar_hours}h", bar_hours * 3600 * 1000
+    VOL_BARS = 30 * 24 // bar_hours          # 30 days
+    BARS_PER_YEAR = 24 // bar_hours * 365
+
+
+configure(4)
 
 
 @dataclass(frozen=True)

@@ -34,12 +34,13 @@ def seed():
     print(json.dumps(dict(seeded_bars=report, learning=learner.status(ldb)), indent=2))
 
 
-def seed_v2():
+def seed_v2(bar_hours=4):
     """Train the v2 model on the verified 5y BTC+ETH history (same features as the walk-forward study)."""
     import learner_v2_research as research
     from . import model_v2
+    research.configure(bar_hours)          # also configures model_v2 for the same interval
     data = research.load_history()
-    db = model_v2.connect(bot.MODEL_DB)
+    db = model_v2.connect(bot.model_db_path(bar_hours))
     now_ms = int(time.time() * 1000)
     with db:
         for symbol, other in (("BTCUSDT", "ETHUSDT"), ("ETHUSDT", "BTCUSDT")):
@@ -83,9 +84,11 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("seed")
     sub.add_parser("keycheck")
-    sub.add_parser("seed-v2")
+    sv = sub.add_parser("seed-v2")
+    sv.add_argument("--interval", choices=("4h", "1h"), default="4h")
     r = sub.add_parser("run")
     r.add_argument("--mode", choices=("paper", "testnet"), required=True)
+    r.add_argument("--interval", choices=("4h", "1h"), default=os.environ.get("REMORA_INTERVAL", "4h"))
     r.add_argument("--poll-seconds", type=float, default=30)
     r.add_argument("--max-cycles", type=int)
     s = sub.add_parser("status")
@@ -96,10 +99,11 @@ def main(argv=None):
     if args.cmd == "keycheck":
         return keycheck()
     if args.cmd == "seed-v2":
-        return seed_v2()
+        return seed_v2(int(args.interval.rstrip("h")))
     if args.cmd == "status":
         print(json.dumps(bot.status(args.mode), indent=2, default=str))
         return 0
+    bot.configure_interval(int(args.interval.rstrip("h")))
     market = PublicMarketData()
     if args.mode == "testnet":
         if os.environ.get("REMORA_TESTNET_CONFIRM") != CONFIRM:
@@ -107,7 +111,8 @@ def main(argv=None):
         client = TestnetClient()
     else:
         client = PaperClient(bot.STATE / "remora-bot-paper-exchange.sqlite3", market)
-    print(f"remora_bot {args.mode}: {strategy.STRATEGY_ID}, symbols={bot.SYMBOLS}, real_money=False")
+    print(f"remora_bot {args.mode}: {strategy.STRATEGY_ID}, interval={strategy.INTERVAL}, "
+          f"symbols={bot.SYMBOLS}, real_money=False")
     return bot.run(args.mode, client, market, args.poll_seconds, args.max_cycles)
 
 

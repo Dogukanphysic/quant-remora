@@ -46,6 +46,16 @@ LEARNING_DB = STATE / "remora-bot-learning.sqlite3"
 MODEL_DB = STATE / "remora-bot-model-v2.sqlite3"
 
 
+def model_db_path(bar_hours: int) -> Path:
+    return MODEL_DB if bar_hours == 4 else STATE / f"remora-bot-model-v2-{bar_hours}h.sqlite3"
+
+
+def configure_interval(bar_hours: int) -> None:
+    """4h: researched Donchian rule (+ optional model). 1h: experimental model decisions only."""
+    strategy.configure(bar_hours)
+    model_v2.configure(bar_hours)
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, timeout=10)
@@ -240,11 +250,14 @@ def step_symbol(db, ldb, client, symbol, bars, now_ms, blocked, model_prediction
         reconcile_pending(db, client, pos, now_ms)   # query only; never re-POST
         return "reconciling"
     pos = verify_exchange(db, client, pos, now_ms)
-    prediction, gate = learn(ldb, symbol, bars, now_ms)
+    if strategy.BAR_HOURS == 4:
+        prediction, gate = learn(ldb, symbol, bars, now_ms)
+    else:                                   # the v1 learner is 4h-only; never feed it other bars
+        prediction, gate = None, learner.gate(ldb)
     sig = strategy.evaluate(bars)
     if pos["last_bar"] is not None and sig.bar_ts <= pos["last_bar"]:
         return "waiting"
-    record = dict(sig.__dict__, decision_owner="donchian_rule")
+    record = dict(sig.__dict__, decision_owner="donchian_rule", interval=strategy.INTERVAL)
     authority = bool(gate["authority"])
     action, reason = "hold", "no_signal"
     if model_mode:
@@ -359,10 +372,14 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
             return 1
         model_db = None
         if os.environ.get("REMORA_MODEL_DECISIONS") == "true":
-            model_db = model_v2.connect(MODEL_DB)
-            print("EXPERIMENTAL MODEL DECISIONS ON (user opt-in; walk-forward gate failed; virtual money only)")
+            model_db = model_v2.connect(model_db_path(strategy.BAR_HOURS))
+            print(f"EXPERIMENTAL MODEL DECISIONS ON ({strategy.INTERVAL}; user opt-in; walk-forward gate failed; "
+                  "virtual money only)")
             with db:
-                event(db, "model_decisions_enabled", model=model_v2.VERSION)
+                event(db, "model_decisions_enabled", model=model_v2.VERSION, interval=strategy.INTERVAL)
+        elif strategy.BAR_HOURS != 4:
+            print("STARTUP FAILED: 1h interval requires -ModelDecisions (the Donchian rule was researched on 4h)")
+            return 1
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             try:
@@ -395,15 +412,22 @@ def status(mode):
     for r in db.execute("SELECT symbol, bar_ts, action, reason, prediction, model_authority, signal FROM decisions "
                         "ORDER BY id DESC LIMIT 6"):
         row = dict(r)
-        row["decision_owner"] = json.loads(row.pop("signal")).get("decision_owner", "donchian_rule")
+        signal = json.loads(row.pop("signal"))
+        row["decision_owner"] = signal.get("decision_owner", "donchian_rule")
+        row["interval"] = signal.get("interval", "4h")
         decisions.append(row)
+    enabled = db.execute("SELECT payload FROM events WHERE kind='model_decisions_enabled' ORDER BY id DESC LIMIT 1"
+                         ).fetchone()
+    interval = json.loads(enabled[0]).get("interval", "4h") if enabled else "4h"
+    model_path = model_db_path(int(interval.rstrip("h")))
     return dict(mode=mode, strategy=strategy.STRATEGY_ID, bot=bot,
                 positions=[dict(r) for r in db.execute("SELECT symbol, phase, qty, entry_price, stop_price, last_bar, "
                                                        "pending_id FROM positions")],
                 last_decisions=decisions,
                 trades=[dict(r) for r in db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 10")],
                 learning=learner.status(ldb),
-                model_v2=model_v2.status(model_v2.connect(MODEL_DB)) if MODEL_DB.exists() else None,
+                model_interval=interval,
+                model_v2=model_v2.status(model_v2.connect(model_path)) if model_path.exists() else None,
                 real_money=False)
 
 

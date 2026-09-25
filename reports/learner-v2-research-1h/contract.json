@@ -1,0 +1,33 @@
+{
+  "features": [
+    "r_1h",
+    "r_1d",
+    "r_7d",
+    "r_30d",
+    "donchian100_position",
+    "vol_30d",
+    "ema50_ema200",
+    "funding_last",
+    "funding_3d_mean",
+    "other_asset_r_1d",
+    "volume_ratio_30d",
+    "symbol"
+  ],
+  "gate": {
+    "accepted_mean": "> 0",
+    "accepted_minus_rejected_mean": "> 0",
+    "ic_nonoverlap_t": ">= 2.0",
+    "mse_skill": "> 0",
+    "n_min": 1000
+  },
+  "gate_window": ">= 2024-09-01 (never used for choice), evaluated once",
+  "live": "authority revoked if >= 60 live forward labels exist and live mse_skill <= 0 or accepted mean <= 0",
+  "model_choice": "higher MSE skill (1-mse/const_mse) on 2023-09..2024-08 OOS; if both <=0 -> no authority",
+  "models": {
+    "hgb": "HistGradientBoosting depth3 lr0.05 300 iters l2=1",
+    "ridge": "standardized ridge alpha=10"
+  },
+  "target": "next 6h (6x1h) close-to-close return minus 0.14% round-trip cost",
+  "version": "learner-v2-walkforward-1h-v1",
+  "walk_forward": "refit every 720 bars (30d) on labels ending before the prediction bar (purged), 2y window; day-based feature windows scaled to 1h bars"
+}

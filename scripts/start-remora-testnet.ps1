@@ -3,9 +3,13 @@
 #   -Environment testnet : keys from testnet.binancefuture.com
 # Keys are read hidden, live only in this process and the detached bot, and are never written to disk.
 #   -ModelDecisions      : experimental v2 model decides long/cash (walk-forward gate FAILED; virtual money only)
+#   -Interval 1h         : hourly decisions (requires -ModelDecisions); default 4h
 param([string]$PythonPath = "python",
       [ValidateSet("demo", "testnet")][string]$Environment = "demo",
-      [switch]$ModelDecisions)
+      [switch]$ModelDecisions,
+      [ValidateSet("4h", "1h")][string]$Interval = "4h")
+if ($Interval -eq "1h" -and -not $ModelDecisions) { throw "-Interval 1h yalniz -ModelDecisions ile calisir; bot baslatilmadi." }
+$env:REMORA_INTERVAL = $Interval
 $root = Split-Path -Parent $PSScriptRoot
 $confirm = "REMORA BTC ETH FUTURES TESTNET BASLAT"
 
@@ -37,5 +41,5 @@ try {
     Write-Host "Durum: python -m remora_bot status --mode testnet"
 }
 finally {
-    Remove-Item Env:REMORA_FUTURES_TESTNET_API_KEY, Env:REMORA_FUTURES_TESTNET_SECRET_KEY, Env:REMORA_TESTNET_CONFIRM, Env:REMORA_FUTURES_TEST_ENV, Env:REMORA_MODEL_DECISIONS -ErrorAction SilentlyContinue
+    Remove-Item Env:REMORA_FUTURES_TESTNET_API_KEY, Env:REMORA_FUTURES_TESTNET_SECRET_KEY, Env:REMORA_TESTNET_CONFIRM, Env:REMORA_FUTURES_TEST_ENV, Env:REMORA_MODEL_DECISIONS, Env:REMORA_INTERVAL -ErrorAction SilentlyContinue
 }

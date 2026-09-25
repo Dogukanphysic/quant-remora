@@ -19,13 +19,14 @@ import unified_futures_research as ufr
 from remora_bot import model_v2
 
 ROOT = Path(__file__).resolve().parent
-OUT = ROOT / "reports" / "learner-v2-research"
-HORIZON = 6                    # 24h
+HORIZON = 6                    # bars: 24h on 4h, 6h on 1h
 COST = 0.0014                  # round trip at base cost
-RETRAIN_EVERY = 180            # 30 days of 4h bars
-TRAIN_WINDOW = 6 * 365 * 2     # last 2 years of labels per refit, per symbol
+TRAIN_WINDOW = pd.Timedelta(days=730)   # last 2 years of labels per refit
 MODEL_EVAL = (pd.Timestamp("2023-09-01", tz="UTC"), pd.Timestamp("2024-09-01", tz="UTC"))
 GATE_EVAL_START = pd.Timestamp("2024-09-01", tz="UTC")
+OUT = ROOT / "reports" / "learner-v2-research"
+BAR_HOURS = 4
+RETRAIN_EVERY = 180            # 30 days of bars
 
 CONTRACT = {
     "version": "learner-v2-walkforward-v1",
@@ -42,12 +43,28 @@ CONTRACT = {
 }
 
 
+def configure(bar_hours):
+    """4h keeps the original contract/output byte-for-byte; 1h gets its own pre-registered contract."""
+    global BAR_HOURS, RETRAIN_EVERY, OUT, CONTRACT, FEATURES
+    model_v2.configure(bar_hours)
+    BAR_HOURS, RETRAIN_EVERY = bar_hours, 30 * 24 // bar_hours
+    FEATURES = model_v2.FEATURES
+    if bar_hours == 1:
+        OUT = ROOT / "reports" / "learner-v2-research-1h"
+        CONTRACT = dict(CONTRACT, version="learner-v2-walkforward-1h-v1",
+                        target="next 6h (6x1h) close-to-close return minus 0.14% round-trip cost",
+                        features=FEATURES,
+                        walk_forward="refit every 720 bars (30d) on labels ending before the prediction bar "
+                                     "(purged), 2y window; day-based feature windows scaled to 1h bars")
+    assert FEATURES == CONTRACT["features"]
+
+
 def load_history():
-    """4h bars and funding from the verified 5y archives (shared with the live bot's seed)."""
+    """Bars at BAR_HOURS and funding from the verified 5y archives (shared with the live bot's seed)."""
     data = {}
     for s in ("BTCUSDT", "ETHUSDT"):
         k, f = ufr.load(s)
-        data[s] = (ufr.resample(k, 4), f)
+        data[s] = (ufr.resample(k, BAR_HOURS), f)
     return data
 
 
@@ -81,7 +98,7 @@ def walk_forward(frame, name, start):
         block = eval_times[k:k + RETRAIN_EVERY]
         t0 = block[0]
         train = frame[(frame["label_end"] <= t0) & frame["y"].notna()]
-        train = train[train.index >= t0 - pd.Timedelta(hours=4 * TRAIN_WINDOW)]
+        train = train[train.index >= t0 - TRAIN_WINDOW]
         model = make(name).fit(train[FEATURES].to_numpy(), train["y"].to_numpy())
         test = frame[frame.index.isin(block) & frame["y"].notna()]
         if len(test):
@@ -123,7 +140,11 @@ def gate(s):
                 and s["accepted_mean"] - s["rejected_mean"] > 0)
 
 
-def main():
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bar-hours", type=int, choices=(4, 1), default=4)
+    configure(parser.parse_args(argv).bar_hours)
     OUT.mkdir(parents=True, exist_ok=True)
     blob = json.dumps(CONTRACT, sort_keys=True, indent=2)
     (OUT / "contract.json").write_text(blob, encoding="utf-8")

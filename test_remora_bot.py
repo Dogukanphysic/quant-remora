@@ -304,6 +304,58 @@ class ModelV2Training(unittest.TestCase):
             self.assertTrue(all(isinstance(v, float) for v in preds.values()))
 
 
+def make_bars_h(n, hours, seed=1):
+    step = hours * 3600 * 1000
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.005, n)))
+    start = 1_600_000_000_000 // step * step
+    return [strategy.Bar(start + i * step, c, c * 1.002, c * 0.998, c, 1.0) for i, c in enumerate(close)]
+
+
+class HourlyInterval(unittest.TestCase):
+    def setUp(self):
+        bot.configure_interval(1)
+
+    def tearDown(self):
+        bot.configure_interval(4)
+
+    def test_configure_scales_day_windows_and_keeps_4h_unchanged(self):
+        self.assertEqual((strategy.INTERVAL, strategy.STEP_MS, strategy.VOL_BARS), ("1h", 3_600_000, 720))
+        self.assertEqual(model_v2.FEATURES[0], "r_1h")
+        bot.configure_interval(4)
+        self.assertEqual((strategy.VOL_BARS, strategy.BARS_PER_YEAR), (180, 2190))
+        self.assertEqual(model_v2.FEATURES[0], "r_4h")
+        self.assertEqual(model_v2.VERSION, "pooled-ridge-next24h-v2")
+
+    def test_hourly_features_are_causal(self):
+        bars = model_v2.bars_frame(make_bars_h(2000, 1, seed=3))
+        other = model_v2.bars_frame(make_bars_h(2000, 1, seed=4))["close"]
+        funding = pd.Series(0.0001, index=bars.index[::8])
+        full = model_v2.feature_frame(bars, other, funding, "ETHUSDT")
+        cut = model_v2.feature_frame(bars.iloc[:1500], other.iloc[:1500],
+                                     funding[funding.index < bars.index[1500]], "ETHUSDT")
+        rows = cut.dropna(subset=model_v2.FEATURES).index
+        self.assertGreater(len(rows), 500)
+        pd.testing.assert_frame_equal(full.loc[rows, model_v2.FEATURES], cut.loc[rows, model_v2.FEATURES])
+
+    def test_hourly_model_mode_trades_and_never_feeds_4h_learner(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            db, ldb = bot.connect(Path(d) / "l.db"), learner.connect(Path(d) / "learn.db")
+            mdb = model_v2.connect(Path(d) / "m.db")
+            bars = make_bars_h(800, 1, seed=6)
+            now = bars[-1].ts + 3_600_000 + 60_000
+            original = model_v2.update
+            model_v2.update = lambda *a, **k: {"BTCUSDT": 0.002, "ETHUSDT": -0.001}
+            try:
+                result = bot.tick(db, ldb, FakeClient(), FakeMarket(bars), now, model_db=mdb)
+            finally:
+                model_v2.update = original
+            self.assertEqual(result, {"BTCUSDT": "enter", "ETHUSDT": "model_predicts_non_positive"})
+            self.assertEqual(ldb.execute("SELECT COUNT(*) FROM samples").fetchone()[0], 0)
+            signal = json.loads(db.execute("SELECT signal FROM decisions WHERE action='enter'").fetchone()[0])
+            self.assertEqual(signal["interval"], "1h")
+
+
 class TestnetOnly(unittest.TestCase):
     def test_no_mainnet_host_for_signed_requests(self):
         self.assertEqual(set(exchange.TEST_HOSTS.values()),

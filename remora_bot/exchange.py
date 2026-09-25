@@ -19,7 +19,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .strategy import Bar, INTERVAL
+from . import strategy
+from .strategy import Bar
 
 PUBLIC_BASE = "https://fapi.binance.com"
 TESTNET_BASE = "https://testnet.binancefuture.com"
@@ -73,8 +74,10 @@ class PublicMarketData:
         self.base = base
         self.opener = build_opener(_NoRedirect())
 
-    def closed_bars(self, symbol: str, limit: int = 1000) -> list[Bar]:
-        url = f"{self.base}/fapi/v1/klines?" + urlencode(dict(symbol=symbol, interval=INTERVAL, limit=limit))
+    def closed_bars(self, symbol: str, limit: int | None = None) -> list[Bar]:
+        # 1h needs > 720 bars for 30-day windows; Binance allows up to 1500.
+        limit = limit or (1000 if strategy.INTERVAL == "4h" else 1500)
+        url = f"{self.base}/fapi/v1/klines?" + urlencode(dict(symbol=symbol, interval=strategy.INTERVAL, limit=limit))
         raw = _open(self.opener, Request(url))
         now = int(_open(self.opener, Request(f"{self.base}/fapi/v1/time"))["serverTime"])
         return [Bar(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]))

@@ -17,15 +17,30 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-VERSION = "pooled-ridge-next24h-v2"
-HORIZON = 6
+HORIZON = 6                              # bars: 24h on 4h bars, 6h on 1h bars
 COST = 0.0014
-BAR = pd.Timedelta(hours=4)
 TRAIN_WINDOW = pd.Timedelta(days=730)
 WARMUP = 250
-FEATURES = ["r_4h", "r_1d", "r_7d", "r_30d", "donchian100_position", "vol_30d", "ema50_ema200",
-            "funding_last", "funding_3d_mean", "other_asset_r_1d", "volume_ratio_30d", "symbol"]
 SYMBOL_CODE = {"BTCUSDT": 0.0, "ETHUSDT": 1.0}
+
+
+def features_for(bar_hours: int) -> list[str]:
+    return [f"r_{bar_hours}h", "r_1d", "r_7d", "r_30d", "donchian100_position", "vol_30d", "ema50_ema200",
+            "funding_last", "funding_3d_mean", "other_asset_r_1d", "volume_ratio_30d", "symbol"]
+
+
+def configure(bar_hours: int) -> None:
+    """Select the bar interval (4h default, 1h). Day-based windows scale with it; 4h is unchanged."""
+    global BAR_HOURS, BAR, BAR_MS, PER_DAY, FEATURES, VERSION
+    if bar_hours not in (1, 4):
+        raise ValueError("model_v2 supports 1h or 4h bars")
+    BAR_HOURS, BAR, BAR_MS = bar_hours, pd.Timedelta(hours=bar_hours), bar_hours * 3600 * 1000
+    PER_DAY = 24 // bar_hours
+    FEATURES = features_for(bar_hours)
+    VERSION = "pooled-ridge-next24h-v2" if bar_hours == 4 else "pooled-ridge-1h-next6h-v2"
+
+
+configure(4)
 
 
 def _ema(values: np.ndarray, n: int) -> np.ndarray:
@@ -33,7 +48,8 @@ def _ema(values: np.ndarray, n: int) -> np.ndarray:
 
 
 def feature_frame(bars: pd.DataFrame, other_close: pd.Series, funding: pd.Series, symbol: str) -> pd.DataFrame:
-    """bars: 4h OHLCV indexed by UTC open time. Row t uses only data closed at t+4h."""
+    """bars: OHLCV at BAR_HOURS, indexed by UTC open time. Row t uses only data closed at t+BAR."""
+    d = PER_DAY
     c, h, l, v = (bars[x].to_numpy(dtype=float) for x in ("close", "high", "low", "volume"))
     s = pd.Series(c)
     hi = pd.Series(h).rolling(100).max().shift(1)
@@ -47,13 +63,13 @@ def feature_frame(bars: pd.DataFrame, other_close: pd.Series, funding: pd.Series
     safe = np.clip(pos, 0, None)
     ob = other_close.reindex(bars.index)
     x = pd.DataFrame({
-        "r_4h": s / s.shift(1) - 1, "r_1d": s / s.shift(6) - 1, "r_7d": s / s.shift(42) - 1,
-        "r_30d": s / s.shift(180) - 1, "donchian100_position": ((s - lo) / (hi - lo)).clip(0, 1.5),
-        "vol_30d": r.rolling(180).std(), "ema50_ema200": _ema(c, 50) / _ema(c, 200) - 1,
+        FEATURES[0]: s / s.shift(1) - 1, "r_1d": s / s.shift(d) - 1, "r_7d": s / s.shift(7 * d) - 1,
+        "r_30d": s / s.shift(30 * d) - 1, "donchian100_position": ((s - lo) / (hi - lo)).clip(0, 1.5),
+        "vol_30d": r.rolling(30 * d).std(), "ema50_ema200": _ema(c, 50) / _ema(c, 200) - 1,
         "funding_last": np.where(pos >= 0, fr[safe] if len(fr) else np.nan, np.nan),
         "funding_3d_mean": np.where(pos >= 0, fmean[safe] if len(fr) else np.nan, np.nan),
-        "other_asset_r_1d": (ob / ob.shift(6) - 1).to_numpy(),
-        "volume_ratio_30d": pd.Series(v) / pd.Series(v).rolling(180).mean(),
+        "other_asset_r_1d": (ob / ob.shift(d) - 1).to_numpy(),
+        "volume_ratio_30d": pd.Series(v) / pd.Series(v).rolling(30 * d).mean(),
         "symbol": SYMBOL_CODE[symbol],
     })
     x.index = bars.index
@@ -105,9 +121,6 @@ def connect(path: Path) -> sqlite3.Connection:
     return db
 
 
-BAR_MS = 4 * 3600 * 1000
-
-
 def ingest(db, frame: pd.DataFrame, now_ms: int, origin: str) -> None:
     symbol = frame["symbol_name"].iloc[0]
     ts = frame.index.as_unit("ms").asi8
@@ -146,7 +159,7 @@ def train(db, now_ms: int) -> None:
 def register_prediction(db, symbol: str, bar_ts: int, now_ms: int) -> float | None:
     row = db.execute("SELECT x, y FROM samples WHERE symbol=? AND ts=?", (symbol, bar_ts)).fetchone()
     latest = db.execute("SELECT id, value, last_label FROM models ORDER BY id DESC LIMIT 1").fetchone()
-    if not row or not latest or row[1] is not None or latest[2] > bar_ts + 4 * 3600 * 1000:
+    if not row or not latest or row[1] is not None or latest[2] > bar_ts + BAR_MS:
         return None
     existing = db.execute("SELECT prediction FROM predictions WHERE symbol=? AND ts=?", (symbol, bar_ts)).fetchone()
     if existing:
@@ -185,6 +198,9 @@ def live_forward(db) -> dict:
 def status(db) -> dict:
     counts = dict(db.execute("SELECT origin, COUNT(*) FROM samples WHERE y IS NOT NULL GROUP BY origin"))
     latest = db.execute("SELECT id, value FROM models ORDER BY id DESC LIMIT 1").fetchone()
-    return dict(version=VERSION, label_counts=counts, model_id=latest[0] if latest else None,
-                model_samples=json.loads(latest[1])["samples"] if latest else 0, live_forward=live_forward(db),
-                walk_forward_oos="no edge (reports/learner-v2-research)", profitability_proven=False)
+    model = json.loads(latest[1]) if latest else {}
+    version = model.get("version", VERSION)
+    report = "reports/learner-v2-research-1h" if "-1h-" in version else "reports/learner-v2-research"
+    return dict(version=version, label_counts=counts, model_id=latest[0] if latest else None,
+                model_samples=model.get("samples", 0), live_forward=live_forward(db),
+                walk_forward_oos=f"no edge ({report})", profitability_proven=False)

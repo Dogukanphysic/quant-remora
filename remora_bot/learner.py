@@ -17,7 +17,9 @@ from typing import Sequence
 
 import numpy as np
 
-from .strategy import STEP_MS, Bar
+from .strategy import Bar
+
+STEP_MS = 4 * 3600 * 1000            # v1 is a 4h-only learner, independent of strategy.configure()
 
 VERSION = "pooled-ridge-next4h-v1"
 ROUND_TRIP_COST = 0.0014
