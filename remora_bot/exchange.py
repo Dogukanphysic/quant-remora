@@ -96,7 +96,7 @@ class TestnetClient:
         ("GET", "/fapi/v1/time"), ("GET", "/fapi/v1/exchangeInfo"), ("GET", "/fapi/v1/premiumIndex"),
         ("GET", "/fapi/v1/positionSide/dual"), ("GET", "/fapi/v2/account"), ("GET", "/fapi/v2/positionRisk"),
         ("GET", "/fapi/v1/openOrders"), ("GET", "/fapi/v1/openAlgoOrders"), ("GET", "/fapi/v1/order"),
-        ("GET", "/fapi/v1/algoOrder"),
+        ("GET", "/fapi/v1/algoOrder"), ("GET", "/fapi/v1/ticker/bookTicker"), ("DELETE", "/fapi/v1/order"),
         ("POST", "/fapi/v1/marginType"), ("POST", "/fapi/v1/leverage"), ("POST", "/fapi/v1/order"),
         ("POST", "/fapi/v1/algoOrder"), ("DELETE", "/fapi/v1/algoOrder"),
     }
@@ -210,6 +210,18 @@ class TestnetClient:
             params["reduceOnly"] = "true"
         return self.request("POST", "/fapi/v1/order", params, True)
 
+    def best_bid(self, symbol):
+        return Decimal(self.request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": symbol})["bidPrice"])
+
+    def limit_buy_post_only(self, symbol, qty, price, client_id):
+        """GTX: rejected (EXPIRED) instead of taking liquidity, so an entry never pays taker fees."""
+        return self.request("POST", "/fapi/v1/order", dict(
+            symbol=symbol, side="BUY", type="LIMIT", timeInForce="GTX", quantity=str(qty), price=str(price),
+            newClientOrderId=client_id, newOrderRespType="RESULT"), True)
+
+    def cancel_order(self, symbol, client_id):
+        return self.request("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id}, True)
+
     def place_stop(self, symbol, qty, trigger, client_id):
         return self.request("POST", "/fapi/v1/algoOrder", dict(
             algoType="CONDITIONAL", symbol=symbol, side="SELL", type="STOP_MARKET", quantity=str(qty),
@@ -267,7 +279,40 @@ class PaperClient:
         o = self._get(f"order:{client_id}", None)
         if o is None:
             raise ApiError("order not found", 400, -2013)
+        if o["status"] == "NEW" and self.mark(symbol) <= Decimal(o["price"]):
+            o = self._fill_limit(symbol, o)
         return o
+
+    MAKER_FEE = Decimal("0.0002")
+
+    def best_bid(self, symbol):
+        return self.mark(symbol)
+
+    def limit_buy_post_only(self, symbol, qty, price, client_id):
+        if self._get(f"order:{client_id}", None):
+            raise ApiError("duplicate client id", 400, -4116)
+        order = dict(clientOrderId=client_id, symbol=symbol, side="BUY", status="NEW", executedQty="0",
+                     avgPrice="0", price=str(price), origQty=str(qty))
+        self._put(f"order:{client_id}", order)
+        return order
+
+    def _fill_limit(self, symbol, o):
+        px, qty = Decimal(o["price"]), Decimal(o["origQty"])
+        qty_now, entry = self.position(symbol)
+        new_qty = qty_now + qty
+        wallet = Decimal(self._get("wallet", {})["usdt"]) - px * qty * self.MAKER_FEE
+        self._put("wallet", dict(usdt=str(wallet)))
+        self._put(f"pos:{symbol}", dict(qty=str(new_qty), entry=str((entry * qty_now + px * qty) / new_qty)))
+        o = dict(o, status="FILLED", executedQty=str(qty), avgPrice=str(px))
+        self._put(f"order:{o['clientOrderId']}", o)
+        return o
+
+    def cancel_order(self, symbol, client_id):
+        o = self._get(f"order:{client_id}", None)
+        if o is None or o["status"] != "NEW":
+            raise ApiError("unknown order", 400, -2011)
+        self._put(f"order:{client_id}", dict(o, status="CANCELED"))
+        return dict(o, status="CANCELED")
 
     def stop_order(self, client_id):
         return dict(status="NEW", client_id=client_id)

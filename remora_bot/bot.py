@@ -31,6 +31,7 @@ ALLOCATION_USDT = Decimal("1000")          # max notional per symbol
 DAILY_LOSS_LIMIT = Decimal("0.03")         # of total allocation, blocks new entries
 MAX_DRAWDOWN = Decimal("0.15")             # from bot peak wallet, blocks new entries
 MAX_SIGNAL_AGE_MS = 30 * 60 * 1000
+ENTRY_LIMIT_TIMEOUT_MS = 45 * 60 * 1000     # unfilled post-only entries are cancelled within the bar
 POLICY = f"remora-{strategy.STRATEGY_ID}"
 
 
@@ -153,7 +154,17 @@ def reconcile_pending(db, client, pos, now_ms):
             return
         raise
     if order["status"] in ("NEW", "PARTIALLY_FILLED"):
-        return
+        if intent["kind"] != "entry" or now_ms - intent["created_ms"] <= ENTRY_LIMIT_TIMEOUT_MS:
+            return
+        # Resting entry limit timed out: cancel, then read the terminal state (a partial fill is kept).
+        try:
+            client.cancel_order(pos["symbol"], intent["client_id"])
+        except ApiError as exc:
+            if exc.code != -2011:       # already filled/cancelled on the exchange: re-query decides
+                raise
+        order = client.order(pos["symbol"], intent["client_id"])
+        if order["status"] in ("NEW", "PARTIALLY_FILLED"):
+            return
     filled = Decimal(order.get("executedQty", "0"))
     price = Decimal(order.get("avgPrice", "0") or "0")
     with db:
@@ -291,17 +302,24 @@ def step_symbol(db, ldb, client, symbol, bars, now_ms, blocked, model_prediction
                               prediction, authority)
 
 
-def commit_and_execute(db, client, pos, bar_ts, now_ms, action, reason, notional, record, prediction, authority):
-    """Persist the decision (+ intent before any POST), then send one order and reconcile. Never re-POSTs."""
+def commit_and_execute(db, client, pos, bar_ts, now_ms, action, reason, notional, record, prediction, authority,
+                       limit_entry=False):
+    """Persist the decision (+ intent before any POST), then send one order and reconcile. Never re-POSTs.
+
+    limit_entry: enter with a post-only limit at the best bid (maker); exits stay market orders."""
     symbol = pos["symbol"]
     kind = {"enter": "e", "exit": "x"}.get(action)
     cid = client_id(symbol, bar_ts, kind) if kind else None
-    qty = None
+    qty = price = None
     if action == "enter":
-        rules, mark = client.rules(symbol), client.mark(symbol)
-        qty = floor_step(notional / mark, rules["step"])
-        if qty < rules["min_qty"] or qty * mark < rules["min_notional"]:
+        rules = client.rules(symbol)
+        ref = client.best_bid(symbol) if limit_entry else client.mark(symbol)
+        price = floor_step(ref, rules["tick"]) if limit_entry else None
+        qty = floor_step(notional / ref, rules["step"])
+        if qty < rules["min_qty"] or qty * ref < rules["min_notional"]:
             action, reason, cid = "hold", "below_exchange_minimum", None
+        elif limit_entry:
+            record = dict(record, entry_order="post_only_limit", limit_price=str(price))
     elif action == "exit":
         qty = Decimal(pos["qty"])
     with db:
@@ -323,7 +341,10 @@ def commit_and_execute(db, client, pos, bar_ts, now_ms, action, reason, notional
             if exc.code not in (-2011, -2013):
                 raise
     try:
-        client.market_order(symbol, "BUY" if action == "enter" else "SELL", qty, cid, action == "exit")
+        if price is not None:
+            client.limit_buy_post_only(symbol, qty, price, cid)
+        else:
+            client.market_order(symbol, "BUY" if action == "enter" else "SELL", qty, cid, action == "exit")
     except TransportError:
         pass            # outcome unknown: reconciled by GET on the next tick, never re-POSTed
     pos = db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
@@ -460,8 +481,14 @@ def status(mode):
                 trades=[dict(r) for r in db.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 10")],
                 learning=learner.status(ldb),
                 model_interval=interval, explore=bool(payload.get("explore")),
+                exploration_entries=_exploration_entries(db) if payload.get("explore") else None,
                 model_v2=model_v2.status(model_v2.connect(model_path)) if model_path.exists() else None,
                 real_money=False)
+
+
+def _exploration_entries(db):
+    from . import explore
+    return explore.entry_fill_stats(db)
 
 
 def write_status(mode, db, ldb, result):

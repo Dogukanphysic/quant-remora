@@ -1,0 +1,153 @@
+{
+  "contract_sha256": "046e7b20a728092b349a362161a26ff638180580de92f933264cb0d5753a3bc2",
+  "results": {
+    "offset_0.0": {
+      "gross_gt_0.0004": {
+        "signals": 83244,
+        "fill_rate": 0.9812719235019941,
+        "trades": 81685,
+        "mean_net": -2.9988772009849286e-05,
+        "win_rate": 0.4856338373018302,
+        "year1": {
+          "trades": 48313,
+          "mean_net": 0.0005706015868529444,
+          "win_rate": 0.5002173328089748
+        },
+        "year2": {
+          "trades": 33372,
+          "mean_net": -0.0008994698342098418,
+          "win_rate": 0.46452115545966677
+        },
+        "positive_both_years": false
+      },
+      "gross_gt_0.0010": {
+        "signals": 56676,
+        "fill_rate": 0.9810678241230856,
+        "trades": 55603,
+        "mean_net": 0.000163615771107861,
+        "win_rate": 0.4888764994694531,
+        "year1": {
+          "trades": 34866,
+          "mean_net": 0.0008668868949532002,
+          "win_rate": 0.5038719669592153
+        },
+        "year2": {
+          "trades": 20737,
+          "mean_net": -0.0010188238780213087,
+          "win_rate": 0.46366398225394223
+        },
+        "positive_both_years": false
+      },
+      "top_ranked_hourly": {
+        "signals": 17513,
+        "fill_rate": 0.9815565579854965,
+        "trades": 17190,
+        "mean_net": -0.0004760779150778399,
+        "win_rate": 0.46940081442699244,
+        "year1": {
+          "trades": 8609,
+          "mean_net": 2.191207706482098e-05,
+          "win_rate": 0.4741549541177837
+        },
+        "year2": {
+          "trades": 8581,
+          "mean_net": -0.0009756928599975656,
+          "win_rate": 0.464631161869246
+        },
+        "positive_both_years": false
+      },
+      "all": {
+        "signals": 175130,
+        "fill_rate": 0.9805230400274082,
+        "trades": 171719,
+        "mean_net": -0.00049884495984418,
+        "win_rate": 0.48108246612197836,
+        "year1": {
+          "trades": 86051,
+          "mean_net": 4.2953965723740824e-05,
+          "win_rate": 0.4939628824766708
+        },
+        "year2": {
+          "trades": 85668,
+          "mean_net": -0.0010430661316241348,
+          "win_rate": 0.4681444646775926
+        },
+        "positive_both_years": false
+      }
+    },
+    "offset_0.0005": {
+      "gross_gt_0.0004": {
+        "signals": 83244,
+        "fill_rate": 0.9115371678439287,
+        "trades": 75880,
+        "mean_net": -4.5449855662138974e-05,
+        "win_rate": 0.4890880337374802,
+        "year1": {
+          "trades": 44804,
+          "mean_net": 0.0005126555053348167,
+          "win_rate": 0.5022096241407017
+        },
+        "year2": {
+          "trades": 31076,
+          "mean_net": -0.0008501014386878695,
+          "win_rate": 0.47016990603681297
+        },
+        "positive_both_years": false
+      },
+      "gross_gt_0.0010": {
+        "signals": 56676,
+        "fill_rate": 0.9127320206083703,
+        "trades": 51730,
+        "mean_net": 0.00013377436942933448,
+        "win_rate": 0.4905664024743862,
+        "year1": {
+          "trades": 32365,
+          "mean_net": 0.0007957349621093922,
+          "win_rate": 0.5040630310520624
+        },
+        "year2": {
+          "trades": 19365,
+          "mean_net": -0.000972569786630055,
+          "win_rate": 0.46800929512006195
+        },
+        "positive_both_years": false
+      },
+      "top_ranked_hourly": {
+        "signals": 17513,
+        "fill_rate": 0.9029292525552447,
+        "trades": 15813,
+        "mean_net": -0.000512218512498948,
+        "win_rate": 0.4722696515525201,
+        "year1": {
+          "trades": 7899,
+          "mean_net": -8.894066762497825e-05,
+          "win_rate": 0.4784149892391442
+        },
+        "year2": {
+          "trades": 7914,
+          "mean_net": -0.0009346940870073492,
+          "win_rate": 0.4661359615870609
+        },
+        "positive_both_years": false
+      },
+      "all": {
+        "signals": 175130,
+        "fill_rate": 0.9075029977730829,
+        "trades": 158931,
+        "mean_net": -0.0004780353946180338,
+        "win_rate": 0.48624874945731167,
+        "year1": {
+          "trades": 79979,
+          "mean_net": 2.166330185653522e-05,
+          "win_rate": 0.4961427374685855
+        },
+        "year2": {
+          "trades": 78952,
+          "mean_net": -0.0009842341235335717,
+          "win_rate": 0.4762260614043976
+        },
+        "positive_both_years": false
+      }
+    }
+  }
+}

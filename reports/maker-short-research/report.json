@@ -1,0 +1,93 @@
+{
+  "contract_sha256": "7c2fbc4e3ded012ce1e3206e9a5c14fce4702ef1e7f42e9dd8bef157b9ed1ac3",
+  "results": {
+    "T_0.0004": {
+      "long_only": {
+        "trades": 81685,
+        "mean_net": -2.9988772009849286e-05,
+        "win_rate": 0.4856338373018302,
+        "year1": {
+          "trades": 48313,
+          "mean_net": 0.0005706015868529444
+        },
+        "year2": {
+          "trades": 33372,
+          "mean_net": -0.0008994698342098418
+        },
+        "positive_both_years": false
+      },
+      "short_only": {
+        "trades": 54868,
+        "mean_net": -0.00013536398491967975,
+        "win_rate": 0.4717868338557994,
+        "year1": {
+          "trades": 21783,
+          "mean_net": -8.293698235374023e-05
+        },
+        "year2": {
+          "trades": 33085,
+          "mean_net": -0.00016988166353215864
+        },
+        "positive_both_years": false
+      },
+      "long_short": {
+        "trades": 136553,
+        "mean_net": -7.232930778670197e-05,
+        "win_rate": 0.48007000944688144,
+        "year1": {
+          "trades": 70096,
+          "mean_net": 0.00036750824838813613
+        },
+        "year2": {
+          "trades": 66457,
+          "mean_net": -0.000536251142019837
+        },
+        "positive_both_years": false
+      }
+    },
+    "T_0.001": {
+      "long_only": {
+        "trades": 55603,
+        "mean_net": 0.000163615771107861,
+        "win_rate": 0.4888764994694531,
+        "year1": {
+          "trades": 34866,
+          "mean_net": 0.0008668868949532002
+        },
+        "year2": {
+          "trades": 20737,
+          "mean_net": -0.0010188238780213087
+        },
+        "positive_both_years": false
+      },
+      "short_only": {
+        "trades": 31956,
+        "mean_net": -0.00019716174875773006,
+        "win_rate": 0.4678307673050444,
+        "year1": {
+          "trades": 12509,
+          "mean_net": 0.0005341848377307131
+        },
+        "year2": {
+          "trades": 19447,
+          "mean_net": -0.0006675898070898087
+        },
+        "positive_both_years": false
+      },
+      "long_short": {
+        "trades": 87559,
+        "mean_net": 3.1944481750686744e-05,
+        "win_rate": 0.4811955367238091,
+        "year1": {
+          "trades": 47375,
+          "mean_net": 0.0007790395063770294
+        },
+        "year2": {
+          "trades": 40184,
+          "mean_net": -0.0008488445584561861
+        },
+        "positive_both_years": false
+      }
+    }
+  }
+}

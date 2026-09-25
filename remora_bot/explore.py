@@ -19,7 +19,7 @@ UNIVERSE = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
 NOTIONAL = Decimal("200")
 HOLD_BARS = 6
 MAX_OPEN = 6
-TAKER_FEE = 0.0005              # per side; demo fills do not report commission in the RESULT response
+MAKER_FEE, TAKER_FEE = 0.0002, 0.0005   # post-only entry, market exit; RESULT responses omit commission
 MODEL_DB = bot.STATE / "remora-bot-model-v3-universe.sqlite3"
 
 
@@ -40,7 +40,7 @@ def sync_realized(db, model_db, now_ms: int) -> int:
             entry, exit_ = float(t["entry_price"] or 0), float(t["exit_price"] or 0)
             if entry <= 0 or exit_ <= 0 or t["entry_bar"] is None:
                 continue
-            net = exit_ / entry - 1 - 2 * TAKER_FEE
+            net = exit_ / entry - 1 - MAKER_FEE - TAKER_FEE
             added += model_v2.record_realized(model_db, f"ledger:{t['id']}", t["symbol"], int(t["entry_bar"]),
                                               net, t["exit_reason"], now_ms)
     return added
@@ -122,8 +122,18 @@ def tick(db, client, market, model_db, now_ms=None):
         else:
             action, reason = "hold", "not_top_ranked"
         result[s] = bot.commit_and_execute(db, client, pos, latest, now_ms, action, reason, NOTIONAL,
-                                           _record(sig, pred, rank.get(s)), pred, True)
+                                           _record(sig, pred, rank.get(s)), pred, True, limit_entry=True)
     return dict(result, realized_added=added, top=ranked[:3])
+
+
+def entry_fill_stats(db) -> dict:
+    """Real maker fill rate of post-only entries (terminal intents only)."""
+    rows = db.execute("SELECT status, response FROM intents WHERE kind='entry' AND status NOT IN ('prepared')").fetchall()
+    done = [(s, json.loads(r) if r else {}) for s, r in rows]
+    filled = sum(1 for _, r in done if float(r.get("executedQty", 0) or 0) > 0)
+    rejected = sum(1 for s, _ in done if s == "EXPIRED")
+    return dict(attempts=len(done), filled=filled, post_only_rejected=rejected,
+                fill_rate=round(filled / len(done), 3) if done else None)
 
 
 def status(db, model_db) -> dict:

@@ -1,0 +1,12 @@
+{
+  "basis": "universe walk-forward OOS predictions; maker fill model of maker-execution-test-v1 at offset 0",
+  "caveat": "hypothesis chosen after seeing year-2 long losses; funding not modelled",
+  "entry": "long if predicted gross > T; short if predicted gross < -T; T in {0.0004, 0.0010}",
+  "policies": [
+    "long_only",
+    "short_only",
+    "long_short"
+  ],
+  "positive_if": "mean net per filled trade > 0 in BOTH OOS years",
+  "version": "maker-long-short-test-v1"
+}

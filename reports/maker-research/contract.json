@@ -1,0 +1,21 @@
+{
+  "costs": {
+    "maker_per_side": 0.0002,
+    "taker_per_side": 0.0005,
+    "taker_slippage": 0.0002
+  },
+  "fill_model": "entry limit filled iff next bar low < limit; exit limit iff bar t+7 high > limit, else taker exit at close t+7",
+  "offsets": [
+    0.0,
+    0.0005
+  ],
+  "policies": {
+    "all": "every coin every hour (baseline)",
+    "gross_gt_0.0004": "predicted gross (pred + 0.14% proxy cost) > maker round trip",
+    "gross_gt_0.0010": "predicted gross > 0.10% (conservative)",
+    "top_ranked_hourly": "exploration: best-ranked coin every hour"
+  },
+  "positive_if": "mean net per filled trade > 0 in BOTH OOS years",
+  "predictions": "universe model walk-forward OOS 2024-09..2026-08 (universe_research.walk_forward)",
+  "version": "maker-execution-test-v1"
+}

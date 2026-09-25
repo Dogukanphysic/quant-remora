@@ -401,6 +401,29 @@ class UniverseClient(FakeClient):
         super().__init__()
         from collections import defaultdict
         self.qty = defaultdict(Decimal)
+        self.limit_mode = "fill"          # fill | rest | reject
+        self.cancel_fills = Decimal(0)    # qty that turns out filled when a resting order is cancelled
+
+    def best_bid(self, s):
+        return Decimal("99.9")
+
+    def limit_buy_post_only(self, s, qty, price, cid):
+        self.posts.append(cid)
+        if self.limit_mode == "fill":
+            self.qty[s] += qty
+            self.orders[cid] = dict(status="FILLED", executedQty=str(qty), avgPrice=str(price))
+        elif self.limit_mode == "reject":
+            self.orders[cid] = dict(status="EXPIRED", executedQty="0", avgPrice="0")
+        else:
+            self.orders[cid] = dict(status="NEW", executedQty="0", avgPrice="0", price=str(price), sym=s)
+        return self.orders[cid]
+
+    def cancel_order(self, s, cid):
+        o = self.orders[cid]
+        filled = self.cancel_fills
+        self.qty[s] += filled
+        self.orders[cid] = dict(o, status="CANCELED", executedQty=str(filled), avgPrice=o["price"])
+        return self.orders[cid]
 
 
 class Exploration(unittest.TestCase):
@@ -453,9 +476,49 @@ class Exploration(unittest.TestCase):
         self.explore.sync_realized(self.db, self.mdb, self.now)
         row = self.mdb.execute("SELECT symbol, net_return, exit_reason FROM realized WHERE symbol='SOLUSDT'").fetchone()
         self.assertEqual(row[0], "SOLUSDT")
-        self.assertAlmostEqual(row[1], -2 * self.explore.TAKER_FEE)            # flat price: fees only
+        # maker entry at the bid (99.9), market exit at 100, minus maker + taker fees
+        self.assertAlmostEqual(row[1], 100 / 99.9 - 1 - self.explore.MAKER_FEE - self.explore.TAKER_FEE)
         self.assertEqual(row[2], "strategy_exit")
         self.assertEqual(self.explore.sync_realized(self.db, self.mdb, self.now), 0)   # idempotent
+
+    def pos(self, s="SOLUSDT"):
+        return self.db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
+
+    def test_entry_is_post_only_limit_at_the_bid(self):
+        self.tick()
+        intent = self.db.execute("SELECT * FROM intents WHERE kind='entry'").fetchone()
+        signal = json.loads(self.db.execute("SELECT signal FROM decisions WHERE action='enter'").fetchone()[0])
+        self.assertEqual((signal["entry_order"], signal["limit_price"]), ("post_only_limit", "99.9"))
+        self.assertEqual(self.pos()["entry_price"], "99.9")
+        self.assertEqual(intent["status"], "FILLED")
+
+    def test_resting_limit_times_out_then_cancelled_without_repost(self):
+        self.client.limit_mode = "rest"
+        self.tick()
+        self.assertIsNotNone(self.pos()["pending_id"])
+        self.now += 10 * 60_000
+        self.assertEqual(self.tick()["SOLUSDT"], "reconciling")                 # still resting, inside timeout
+        self.now += 40 * 60_000                                                 # 50 min > 45 min timeout
+        self.tick()
+        self.assertIsNone(self.pos()["pending_id"])
+        self.assertEqual(self.pos()["phase"], "flat")
+        self.assertEqual(len([p for p in self.client.posts if "-e-" in p]), 1)
+
+    def test_partial_fill_at_cancel_becomes_protected_position(self):
+        self.client.limit_mode, self.client.cancel_fills = "rest", Decimal("0.5")
+        self.tick()
+        self.now += 50 * 60_000
+        self.tick()
+        self.assertEqual((self.pos()["phase"], self.pos()["qty"]), ("long", "0.5"))
+        self.assertIn(self.pos()["stop_id"], self.client.stops)
+
+    def test_post_only_rejection_opens_nothing(self):
+        self.client.limit_mode = "reject"
+        self.tick()
+        self.assertEqual((self.pos()["phase"], self.pos()["pending_id"]), ("flat", None))
+        self.assertEqual(self.db.execute("SELECT status FROM intents").fetchone()[0], "EXPIRED")
+        from remora_bot import explore
+        self.assertEqual(explore.entry_fill_stats(self.db)["post_only_rejected"], 1)
 
     def test_max_open_positions(self):
         self.explore.MAX_OPEN, original = 1, self.explore.MAX_OPEN
