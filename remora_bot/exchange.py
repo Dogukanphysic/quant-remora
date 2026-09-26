@@ -97,6 +97,7 @@ class TestnetClient:
         ("GET", "/fapi/v1/positionSide/dual"), ("GET", "/fapi/v2/account"), ("GET", "/fapi/v2/positionRisk"),
         ("GET", "/fapi/v1/openOrders"), ("GET", "/fapi/v1/openAlgoOrders"), ("GET", "/fapi/v1/order"),
         ("GET", "/fapi/v1/algoOrder"), ("GET", "/fapi/v1/ticker/bookTicker"), ("DELETE", "/fapi/v1/order"),
+        ("GET", "/fapi/v1/allOrders"),
         ("POST", "/fapi/v1/marginType"), ("POST", "/fapi/v1/leverage"), ("POST", "/fapi/v1/order"),
         ("POST", "/fapi/v1/algoOrder"), ("DELETE", "/fapi/v1/algoOrder"),
     }

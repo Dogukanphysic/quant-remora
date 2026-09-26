@@ -94,6 +94,16 @@ def positions():
             print(f"  {s}: pozisyon {side} {abs(qty)} (giris {entry}), acik emir/stop: {orders or 'yok'}")
     if not found:
         print("  10 coinde acik pozisyon veya emir yok.")
+    import datetime as dt
+    tz = dt.timezone(dt.timedelta(hours=3))
+    print("\nSon emirler (clientOrderId oneki kaynagi gosterir: rmb-=bu bot, web_=site, android_/ios_=mobil):")
+    for s in UNIVERSE:
+        for o in client.order_history(s, limit=5):
+            if o.get("executedQty") in (None, "0", "0.0", "0.000"):
+                continue
+            t = dt.datetime.fromtimestamp(o["time"] / 1000, tz).strftime("%d.%m %H:%M")
+            print(f"  {t} {s} {o['side']:4s} {o.get('origType', o['type']):12s} qty={o['executedQty']:>10s} "
+                  f"reduceOnly={o.get('reduceOnly')} clientOrderId={o['clientOrderId']}")
 
 
 def clear_halt(mode):
