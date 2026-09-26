@@ -370,6 +370,26 @@ def tick(db, ldb, client, market, now_ms=None, model_db=None):
             for s in SYMBOLS}
 
 
+def clear_halt(db, client, symbols) -> str:
+    """User-run: clear a halt only after the exchange matches the ledger. Never sends an order."""
+    row = db.execute("SELECT halted, identity, environment FROM bot WHERE id=1").fetchone()
+    if not row["halted"]:
+        return "not halted; nothing to clear"
+    if row["identity"] != client.identity or row["environment"] != client.environment:
+        raise Halt("key/environment does not match this ledger; halt kept")
+    pending = [r[0] for r in db.execute("SELECT symbol FROM positions WHERE pending_id IS NOT NULL")]
+    if pending:
+        raise Halt(f"unresolved order intents on {pending}; halt kept")
+    ensure_symbols(db, symbols)
+    for s in symbols:        # raises Halt on any untracked position/order or protection mismatch
+        verify_exchange(db, client, db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone(),
+                        int(time.time() * 1000))
+    with db:
+        db.execute("UPDATE bot SET halted=NULL WHERE id=1")
+        event(db, "halt_cleared", previous=row["halted"])
+    return f"halt cleared (was: {row['halted']})"
+
+
 def halt(db, reason):
     with db:
         db.execute("UPDATE bot SET halted=? WHERE id=1", (reason,))

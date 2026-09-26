@@ -79,11 +79,42 @@ def keycheck():
         print(f"{name}: {result}")
 
 
+def positions():
+    """Read-only: exchange positions and open orders for the exploration universe. Sends no orders."""
+    from .explore import UNIVERSE
+    client = TestnetClient()
+    print(f"Ortam: {client.environment} (salt okunur; emir gonderilmez)")
+    found = False
+    for s in UNIVERSE:
+        qty, entry = client.position(s)
+        orders = client.open_orders(s)
+        if qty != 0 or orders:
+            found = True
+            side = "LONG" if qty > 0 else "SHORT" if qty < 0 else "-"
+            print(f"  {s}: pozisyon {side} {abs(qty)} (giris {entry}), acik emir/stop: {orders or 'yok'}")
+    if not found:
+        print("  10 coinde acik pozisyon veya emir yok.")
+
+
+def clear_halt(mode):
+    from .explore import UNIVERSE
+    client = TestnetClient()
+    db = bot.connect(bot.ledger_path(mode))
+    try:
+        print(bot.clear_halt(db, client, UNIVERSE))
+        return 0
+    except bot.Halt as exc:
+        print(f"NOT CLEARED: {exc}")
+        return 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="remora_bot")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("seed")
     sub.add_parser("keycheck")
+    sub.add_parser("positions")
+    sub.add_parser("clear-halt")
     sv = sub.add_parser("seed-v2")
     sv.add_argument("--interval", choices=("4h", "1h"), default="4h")
     r = sub.add_parser("run")
@@ -98,6 +129,10 @@ def main(argv=None):
         return seed()
     if args.cmd == "keycheck":
         return keycheck()
+    if args.cmd == "positions":
+        return positions()
+    if args.cmd == "clear-halt":
+        return clear_halt("testnet")
     if args.cmd == "seed-v2":
         return seed_v2(int(args.interval.rstrip("h")))
     if args.cmd == "status":

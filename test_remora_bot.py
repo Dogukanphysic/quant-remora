@@ -540,6 +540,37 @@ class Exploration(unittest.TestCase):
         self.assertEqual(self.client.posts, [])
 
 
+class ClearHalt(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = bot.connect(Path(self.tmp.name) / "l.db")
+        self.client = UniverseClient()
+        bot.bind_account(self.db, self.client)
+        bot.halt(self.db, "XRPUSDT untracked exchange position -105.3")
+        from remora_bot import explore
+        self.universe = explore.UNIVERSE
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_refuses_while_untracked_position_remains(self):
+        self.client.qty["XRPUSDT"] = Decimal("-105.3")
+        with self.assertRaises(bot.Halt):
+            bot.clear_halt(self.db, self.client, self.universe)
+        self.assertIsNotNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+
+    def test_refuses_other_key(self):
+        other = UniverseClient()
+        other.identity = "someone-else"
+        with self.assertRaises(bot.Halt):
+            bot.clear_halt(self.db, other, self.universe)
+
+    def test_clears_when_exchange_matches_and_sends_nothing(self):
+        self.assertTrue(bot.clear_halt(self.db, self.client, self.universe).startswith("halt cleared"))
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+        self.assertEqual(self.client.posts, [])
+
+
 class RealizedTraining(unittest.TestCase):
     def test_realized_trade_replaces_proxy_label_with_weight(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
