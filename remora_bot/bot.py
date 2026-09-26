@@ -370,6 +370,25 @@ def tick(db, ldb, client, market, now_ms=None, model_db=None):
             for s in SYMBOLS}
 
 
+def flatten_untracked(db, client) -> list[str]:
+    """User-run on Demo/Testnet only: close every position the ledger does not own (e.g. another bot's
+    leftovers) with ONE reduce-only market order each. Positions the bot tracks are never touched."""
+    if not client.environment.startswith("binance_usdm_futures_"):
+        raise Halt("flatten is only allowed on the virtual-money Demo/Testnet client")
+    tracked = {r[0] for r in db.execute("SELECT symbol FROM positions WHERE phase!='flat' OR pending_id IS NOT NULL")}
+    closed = []
+    for symbol, amount in sorted(client.all_positions().items()):
+        if symbol in tracked:
+            continue
+        side = "BUY" if amount < 0 else "SELL"
+        cid = f"rmb-cln-{symbol[:5].lower()}-{int(time.time() * 1000)}"[:36]
+        with db:
+            event(db, "flatten_untracked", symbol=symbol, amount=amount, side=side, client_id=cid)
+        client.market_order(symbol, side, abs(amount), cid, True)
+        closed.append(f"{symbol} {'SHORT' if amount < 0 else 'LONG'} {abs(amount)} -> {side} reduce-only")
+    return closed
+
+
 def clear_halt(db, client, symbols) -> str:
     """User-run: clear a halt only after the exchange matches the ledger. Never sends an order."""
     row = db.execute("SELECT halted, identity, environment FROM bot WHERE id=1").fetchone()

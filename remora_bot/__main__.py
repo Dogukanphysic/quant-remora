@@ -118,6 +118,35 @@ def clear_halt(mode):
         return 1
 
 
+def reset_demo(mode="testnet"):
+    """Close untracked positions, verify the exchange matches, clear the halt. Bot must be stopped."""
+    from .explore import UNIVERSE
+    if os.environ.get("REMORA_RESET_CONFIRM") != RESET_CONFIRM:
+        raise SystemExit("reset-demo requires REMORA_RESET_CONFIRM set by the launcher")
+    client = TestnetClient()
+    try:
+        with bot.singleton():
+            db = bot.connect(bot.ledger_path(mode))
+            for line in bot.flatten_untracked(db, client) or ["kapatilacak yabanci pozisyon yok"]:
+                print("  " + line)
+            time.sleep(3)
+            left = {s: a for s, a in client.all_positions().items() if s in UNIVERSE}
+            if left:
+                print(f"NOT CLEARED: positions still open {left}")
+                return 1
+            print(bot.clear_halt(db, client, UNIVERSE))
+            return 0
+    except OSError:
+        print("NOT CLEARED: bot is running; stop it first (stop-remora-bot.ps1 -Mode testnet)")
+        return 1
+    except bot.Halt as exc:
+        print(f"NOT CLEARED: {exc}")
+        return 1
+
+
+RESET_CONFIRM = "DEMO HESAPTAKI YABANCI POZISYONLARI KAPAT"
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="remora_bot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -125,6 +154,7 @@ def main(argv=None):
     sub.add_parser("keycheck")
     sub.add_parser("positions")
     sub.add_parser("clear-halt")
+    sub.add_parser("reset-demo")
     sv = sub.add_parser("seed-v2")
     sv.add_argument("--interval", choices=("4h", "1h"), default="4h")
     r = sub.add_parser("run")
@@ -143,6 +173,8 @@ def main(argv=None):
         return positions()
     if args.cmd == "clear-halt":
         return clear_halt("testnet")
+    if args.cmd == "reset-demo":
+        return reset_demo("testnet")
     if args.cmd == "seed-v2":
         return seed_v2(int(args.interval.rstrip("h")))
     if args.cmd == "status":

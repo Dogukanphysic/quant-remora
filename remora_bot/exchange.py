@@ -192,6 +192,11 @@ class TestnetClient:
     def order_history(self, symbol, limit=10):
         return self.request("GET", "/fapi/v1/allOrders", {"symbol": symbol, "limit": limit}, True)
 
+    def all_positions(self):
+        """{symbol: amount} for every non-zero one-way position on the account."""
+        rows = self.request("GET", "/fapi/v2/positionRisk", {}, True)
+        return {r["symbol"]: Decimal(r["positionAmt"]) for r in rows if Decimal(r["positionAmt"]) != 0}
+
     def stop_order(self, client_id):
         row = self.request("GET", "/fapi/v1/algoOrder", {"clientAlgoId": client_id}, True)
         return dict(status=row.get("algoStatus"), client_id=row.get("clientAlgoId"))

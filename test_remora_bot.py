@@ -540,6 +540,33 @@ class Exploration(unittest.TestCase):
         self.assertEqual(self.client.posts, [])
 
 
+class FlattenUntracked(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = bot.connect(Path(self.tmp.name) / "l.db")
+        self.client = UniverseClient()
+        self.client.environment = "binance_usdm_futures_demo"
+        self.client.all_positions = lambda: {s: q for s, q in self.client.qty.items() if q != 0}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_closes_foreign_positions_reduce_only_and_keeps_own(self):
+        self.client.qty.update({"DOGEUSDT": Decimal("-1109"), "AVAXUSDT": Decimal("-5"), "OPUSDT": Decimal("3"),
+                                "BTCUSDT": Decimal("0.01")})
+        self.db.execute("UPDATE positions SET phase='long', qty='0.01' WHERE symbol='BTCUSDT'")
+        self.db.commit()
+        closed = bot.flatten_untracked(self.db, self.client)
+        self.assertEqual(len(closed), 3)
+        self.assertEqual({s: q for s, q in self.client.qty.items() if q != 0}, {"BTCUSDT": Decimal("0.01")})
+        self.assertTrue(all(c.startswith("rmb-cln-") and len(c) <= 36 for c in self.client.posts))
+
+    def test_refuses_non_virtual_client(self):
+        self.client.environment = "paper_simulation"
+        with self.assertRaises(bot.Halt):
+            bot.flatten_untracked(self.db, self.client)
+
+
 class ClearHalt(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
