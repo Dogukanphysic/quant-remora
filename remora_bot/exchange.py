@@ -189,6 +189,9 @@ class TestnetClient:
     def order(self, symbol, client_id):
         return self.request("GET", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id}, True)
 
+    def order_history(self, symbol, limit=10):
+        return self.request("GET", "/fapi/v1/allOrders", {"symbol": symbol, "limit": limit}, True)
+
     def stop_order(self, client_id):
         row = self.request("GET", "/fapi/v1/algoOrder", {"clientAlgoId": client_id}, True)
         return dict(status=row.get("algoStatus"), client_id=row.get("clientAlgoId"))
