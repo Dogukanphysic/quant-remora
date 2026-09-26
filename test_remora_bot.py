@@ -457,13 +457,15 @@ class Exploration(unittest.TestCase):
         self.bars = self.bars + [strategy.Bar(last.ts + 3_600_000, *([last.close] * 4), 1.0)]
         self.now += 3_600_000
 
-    def test_top_ranked_coin_traded_even_when_model_says_no(self):
+    def test_every_coin_traded_in_rank_order_even_when_model_says_no(self):
         result = self.tick()
-        self.assertEqual(result["SOLUSDT"], "enter")
-        self.assertEqual(sum(v == "enter" for v in result.values()), 1)
-        self.assertEqual(result["BTCUSDT"], "not_top_ranked")
-        signal = json.loads(self.db.execute("SELECT signal FROM decisions WHERE action='enter'").fetchone()[0])
-        self.assertEqual((signal["decision_owner"], signal["model_approved"], signal["rank"]), ("exploration", False, 1))
+        self.assertEqual(sum(v == "enter" for v in result.values()), len(self.explore.UNIVERSE))
+        first = self.db.execute("SELECT symbol, signal FROM decisions WHERE action='enter' ORDER BY id").fetchone()
+        signal = json.loads(first[1])
+        self.assertEqual((first[0], signal["decision_owner"], signal["model_approved"], signal["rank"]),
+                         ("SOLUSDT", "exploration", False, 1))
+        ranks = [json.loads(r[0])["rank"] for r in self.db.execute("SELECT signal FROM decisions WHERE action='enter'")]
+        self.assertEqual(sorted(ranks), list(range(1, 11)))
         self.assertIn(True, [v == "SOLUSDT" for v in self.client.stops.values()])
         self.assertEqual(self.tick(), {"waiting": True, "realized_added": 0})       # same bar: nothing new
 
@@ -502,7 +504,7 @@ class Exploration(unittest.TestCase):
         self.tick()
         self.assertIsNone(self.pos()["pending_id"])
         self.assertEqual(self.pos()["phase"], "flat")
-        self.assertEqual(len([p for p in self.client.posts if "-e-" in p]), 1)
+        self.assertEqual(len([p for p in self.client.posts if p.startswith("rmb-sol-e-")]), 1)
 
     def test_partial_fill_at_cancel_becomes_protected_position(self):
         self.client.limit_mode, self.client.cancel_fills = "rest", Decimal("0.5")
@@ -518,7 +520,17 @@ class Exploration(unittest.TestCase):
         self.assertEqual((self.pos()["phase"], self.pos()["pending_id"]), ("flat", None))
         self.assertEqual(self.db.execute("SELECT status FROM intents").fetchone()[0], "EXPIRED")
         from remora_bot import explore
-        self.assertEqual(explore.entry_fill_stats(self.db)["post_only_rejected"], 1)
+        stats = explore.entry_fill_stats(self.db)
+        self.assertEqual((stats["post_only_rejected"], stats["filled"]), (stats["attempts"], 0))
+
+    def test_hourly_entry_limit(self):
+        self.explore.ENTRIES_PER_HOUR, original = 3, self.explore.ENTRIES_PER_HOUR
+        try:
+            result = self.tick()
+            self.assertEqual(sum(v == "enter" for v in result.values()), 3)
+            self.assertEqual(sum(v == "hourly_entry_limit" for v in result.values()), 7)
+        finally:
+            self.explore.ENTRIES_PER_HOUR = original
 
     def test_max_open_positions(self):
         self.explore.MAX_OPEN, original = 1, self.explore.MAX_OPEN

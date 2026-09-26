@@ -1,8 +1,9 @@
 """Exploration mode: learn from executed trades across a 10-coin universe (virtual money only).
 
-Every closed 1h bar: score all coins with the pooled universe model, open one fixed 200 USDT long in
-the best-ranked flat coin even if its prediction is negative, hold it 6 bars (the model's horizon),
-then close it.  Each closed trade's realized net return is fed back into the model's training set,
+Every closed 1h bar: score all coins with the pooled universe model and open a fixed 200 USDT long in
+every flat coin (best-ranked first, up to ENTRIES_PER_HOUR / MAX_OPEN) even if its prediction is
+negative, hold it 6 bars (the model's horizon), then close it.  The rank is recorded with each trade
+so the model's ordering can be judged on executed results.  Each closed trade's realized net return is fed back into the model's training set,
 where it replaces the market-proxy label of its entry bar and weighs 5x.  Order safety is the same
 code path as the main bot (intent persisted before POST, never re-POSTed, exchange-side stop).
 """
@@ -18,7 +19,8 @@ UNIVERSE = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
             "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT")
 NOTIONAL = Decimal("200")
 HOLD_BARS = 6
-MAX_OPEN = 6
+MAX_OPEN = 10                 # one position per coin at most, so every coin can be traded and learned
+ENTRIES_PER_HOUR = 10
 MAKER_FEE, TAKER_FEE = 0.0002, 0.0005   # post-only entry, market exit; RESULT responses omit commission
 MODEL_DB = bot.STATE / "remora-bot-model-v3-universe.sqlite3"
 
@@ -100,9 +102,10 @@ def tick(db, client, market, model_db, now_ms=None):
             result[s] = "holding"
 
     positions = {r["symbol"]: r for r in db.execute("SELECT * FROM positions")}
-    candidates = [s for s in ranked if positions[s]["phase"] == "flat" and not positions[s]["pending_id"]
-                  and s not in result]
-    for s in usable:
+    # Flat coins in rank order (best prediction first), then any coin without a prediction.
+    order = [s for s in ranked if s in usable] + [s for s in usable if s not in rank]
+    open_count, entered = open_after_exits, 0
+    for s in order:
         if s in result:
             continue
         pos, sig, pred = positions[s], signals[s], predictions.get(s)
@@ -110,19 +113,23 @@ def tick(db, client, market, model_db, now_ms=None):
             action, reason = "hold", "stale_bar"
         elif pred is None:
             action, reason = "hold", "no_model_prediction"
-        elif candidates and s == candidates[0]:
-            if blocked:
-                action, reason = "hold", f"entries_blocked:{blocked}"
-            elif open_after_exits >= MAX_OPEN:
-                action, reason = "hold", "max_open_positions"
-            elif sig.vol_annual <= 0:
-                action, reason = "hold", "zero_volatility"
-            else:
-                action, reason = "enter", "exploration_best_ranked"
+        elif pos["pending_id"] or pos["phase"] != "flat":
+            action, reason = "hold", "already_active"
+        elif blocked:
+            action, reason = "hold", f"entries_blocked:{blocked}"
+        elif open_count >= MAX_OPEN:
+            action, reason = "hold", "max_open_positions"
+        elif entered >= ENTRIES_PER_HOUR:
+            action, reason = "hold", "hourly_entry_limit"
+        elif sig.vol_annual <= 0:
+            action, reason = "hold", "zero_volatility"
         else:
-            action, reason = "hold", "not_top_ranked"
+            action, reason = "enter", "exploration_ranked_entry"
         result[s] = bot.commit_and_execute(db, client, pos, latest, now_ms, action, reason, NOTIONAL,
                                            _record(sig, pred, rank.get(s)), pred, True, limit_entry=True)
+        if action == "enter":
+            entered += 1
+            open_count += 1
     return dict(result, realized_added=added, top=ranked[:3])
 
 
@@ -138,6 +145,7 @@ def entry_fill_stats(db) -> dict:
 
 def status(db, model_db) -> dict:
     return dict(universe=UNIVERSE, notional_usdt=str(NOTIONAL), hold_bars=HOLD_BARS, max_open=MAX_OPEN,
+                entries_per_hour=ENTRIES_PER_HOUR,
                 open_positions=[dict(r) for r in db.execute(
                     "SELECT symbol, qty, entry_price, stop_price, entry_bar FROM positions WHERE phase='long'")],
                 model=model_v2.status(model_db))
