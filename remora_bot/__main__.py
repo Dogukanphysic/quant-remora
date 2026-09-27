@@ -130,7 +130,8 @@ def reset_demo(mode="testnet"):
             for line in bot.flatten_untracked(db, client) or ["kapatilacak yabanci pozisyon yok"]:
                 print("  " + line)
             time.sleep(3)
-            left = {s: a for s, a in client.all_positions().items() if s in UNIVERSE}
+            tracked = {r[0] for r in db.execute("SELECT symbol FROM positions WHERE phase!='flat' OR pending_id IS NOT NULL")}
+            left = {s: a for s, a in client.all_positions().items() if s in UNIVERSE and s not in tracked}
             if left:
                 print(f"NOT CLEARED: positions still open {left}")
                 return 1
