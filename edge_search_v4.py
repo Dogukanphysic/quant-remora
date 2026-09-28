@@ -64,8 +64,9 @@ def frame():
 
 
 def fit_predict(kind, xtr, ytr, xte):
-    if kind == "ridge":
-        return model_v2.Ridge().fit(xtr, ytr).predict(xte)
+    if kind == "ridge":     # metrics features (v5) have gaps/inf; v4's own features have none
+        clean = lambda a: np.clip(np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0), -1e3, 1e3)
+        return model_v2.Ridge().fit(clean(xtr), ytr).predict(clean(xte))
     m = HistGradientBoostingRegressor(max_iter=200, learning_rate=0.05, max_leaf_nodes=15,
                                       min_samples_leaf=500, l2_regularization=1.0, random_state=0)
     return m.fit(np.nan_to_num(xtr), ytr).predict(np.nan_to_num(xte))

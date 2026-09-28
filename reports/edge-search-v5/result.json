@@ -1,0 +1,25 @@
+{
+  "contract": "Edge search v5: v4's contract plus Binance positioning data (open interest, long/short ratios,\ntaker buy/sell volume ratio from data.binance.vision 'metrics').\n\nPre-registered before results: identical windows, policy, cost, qualification rule and single holdout\nevaluation as edge_search_v4.  Feature sets: base+metrics and base+v4 extra+metrics.\n",
+  "qualifiers": 4,
+  "best_dev": {
+    "H": 24,
+    "features": "base+metrics",
+    "model": "hgb",
+    "side": "long",
+    "rank_ic": -0.0103,
+    "trades": 688,
+    "mean_net_pct": 0.209,
+    "win_rate": 0.506,
+    "half1_pct": 0.2671,
+    "half2_pct": 0.1496,
+    "total_pct": 143.8
+  },
+  "holdout": {
+    "trades": 654,
+    "mean_net_pct": -0.1749,
+    "win_rate": 0.456,
+    "half1_pct": -0.2939,
+    "half2_pct": -0.0528,
+    "total_pct": -114.4
+  }
+}

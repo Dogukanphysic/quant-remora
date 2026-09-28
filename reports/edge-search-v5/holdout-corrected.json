@@ -1,0 +1,10 @@
+{
+  "config": "H24 base+metrics ridge long (corrected pick)",
+  "holdout_rank_ic": -0.0056,
+  "trades": 635,
+  "mean_net_pct": -0.3497,
+  "win_rate": 0.439,
+  "half1_pct": -0.5388,
+  "half2_pct": -0.1671,
+  "total_pct": -222.1
+}
