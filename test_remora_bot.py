@@ -483,6 +483,18 @@ class Exploration(unittest.TestCase):
         self.assertEqual(row[2], "strategy_exit")
         self.assertEqual(self.explore.sync_realized(self.db, self.mdb, self.now), 0)   # idempotent
 
+    def test_trade_held_far_past_horizon_is_not_learned(self):
+        self.tick()
+        for _ in range(12):                       # offline-like: exit only after 12 bars
+            last = self.bars[-1]
+            self.bars = self.bars + [strategy.Bar(last.ts + 3_600_000, *([last.close] * 4), 1.0)]
+            self.now += 3_600_000
+        self.tick()
+        self.assertGreater(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 0)
+        self.mdb.execute("INSERT INTO realized VALUES ('ledger:1','SOLUSDT',0,-0.02,'x',0)")
+        self.explore.sync_realized(self.db, self.mdb, self.now)
+        self.assertEqual(self.mdb.execute("SELECT COUNT(*) FROM realized").fetchone()[0], 0)
+
     def pos(self, s="SOLUSDT"):
         return self.db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
 

@@ -38,9 +38,15 @@ def sync_realized(db, model_db, now_ms: int) -> int:
     """Feed every closed ledger trade (wins and losses) to the model; idempotent by trade id."""
     added = 0
     with model_db:
-        for t in db.execute("SELECT id, symbol, entry_bar, entry_price, exit_price, exit_reason FROM trades"):
+        for t in db.execute("SELECT id, symbol, entry_bar, entry_price, exit_price, exit_reason, exit_ms FROM trades"):
             entry, exit_ = float(t["entry_price"] or 0), float(t["exit_price"] or 0)
             if entry <= 0 or exit_ <= 0 or t["entry_bar"] is None:
+                continue
+            # The model learns a HOLD_BARS-horizon return; a trade held far longer (bot offline, late
+            # exit) measures something else and must not overwrite that label.
+            held = (int(t["exit_ms"]) - (int(t["entry_bar"]) + strategy.STEP_MS)) / strategy.STEP_MS
+            if held > HOLD_BARS + 1:
+                model_db.execute("DELETE FROM realized WHERE trade_id=?", (f"ledger:{t['id']}",))
                 continue
             net = exit_ / entry - 1 - MAKER_FEE - TAKER_FEE
             added += model_v2.record_realized(model_db, f"ledger:{t['id']}", t["symbol"], int(t["entry_bar"]),
