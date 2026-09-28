@@ -1,0 +1,25 @@
+{
+  "contract": "Edge search v4: hold period x side x feature set x model on the 10-coin universe (research only).\n\nPre-registered before results:\n  * development window 2024-09-01 .. 2025-08-31 (walk-forward, retrain every 30 days, 730-day train window)\n  * holdout 2025-09-01 .. end, evaluated ONCE, only for the single best development config\n  * policy per entry time: go long the top-2 predictions if pred > cost, short the bottom-2 if pred < -cost\n    (side=\"long\"/\"short\" restricts it); entries only every H hours so trades never overlap\n  * cost 0.0007 per round trip (post-only maker entry 0.02% + taker exit 0.05%)\n  * a config qualifies only with >= 200 dev trades and positive mean net in both dev halves;\n    best = highest dev mean net among qualifiers\n",
+  "qualifiers": 6,
+  "best_dev": {
+    "H": 24,
+    "features": "base",
+    "model": "ridge",
+    "side": "long",
+    "rank_ic": 0.001,
+    "trades": 665,
+    "mean_net_pct": 0.3446,
+    "win_rate": 0.513,
+    "half1_pct": 0.5126,
+    "half2_pct": 0.1592,
+    "total_pct": 229.2
+  },
+  "holdout": {
+    "trades": 509,
+    "mean_net_pct": -0.3339,
+    "win_rate": 0.417,
+    "half1_pct": -0.3878,
+    "half2_pct": -0.2669,
+    "total_pct": -170.0
+  }
+}
