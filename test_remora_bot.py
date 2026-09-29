@@ -748,10 +748,14 @@ class Carry(unittest.TestCase):
         with self.assertRaises(bot.Halt):
             self.tick(self.ts + 60_000)
 
-    def test_late_start_skips_the_week(self):
-        r = self.tick(self.ts + self.carry.MAX_LATE_MS + 60_000)
-        self.assertEqual(r, {"waiting": "first_rebalance"})
-        self.assertEqual(self.client.posts, [])
+    def test_late_first_start_joins_current_week_but_later_weeks_are_not_chased(self):
+        r = self.tick(self.ts + 3 * 86400_000)                    # Thursday, fresh ledger
+        self.assertEqual(sum(v == "entry" for v in r.values()), 4)
+        posts = len(self.client.posts)
+        nxt = self.ts + self.carry.REBALANCE_MS
+        r = self.tick(nxt + self.carry.MAX_LATE_MS + 60_000)       # next Monday missed by > 24h
+        self.assertEqual(r["rebalance_ts"], self.ts)               # keeps last week's book
+        self.assertEqual(len(self.client.posts), posts)
 
     def test_score_uses_only_past_72h(self):
         idx = pd.to_datetime([self.ts - 80 * 3600_000, self.ts - 8 * 3600_000, self.ts, self.ts + 8 * 3600_000],

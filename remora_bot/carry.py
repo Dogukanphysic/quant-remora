@@ -25,7 +25,9 @@ K, LOOKBACK_DAYS = {"a": (2, 3), "b": (3, 7)}[universe.name()]
 LOOKBACK_MS = LOOKBACK_DAYS * 24 * 3600_000
 REBALANCE_MS = 168 * 3600_000
 ANCHOR_MS = 1704067200000                 # Monday 2024-01-01 00:00 UTC
-MAX_LATE_MS = 24 * 3600_000               # a missed rebalance is skipped, never chased
+MAX_LATE_MS = 24 * 3600_000               # a missed rebalance is skipped, never chased...
+# ...except the very first one: a fresh ledger joins the current week's book immediately (user choice,
+# 2026-09-29) using that Monday's signal; the entry window then runs from when the book was set.
 LEG_NOTIONAL = (Decimal("1000") / K).quantize(Decimal("1"))
 STOP_DISTANCE = Decimal("0.15")
 POLICY = f"remora-funding-carry-v1-{universe.name()}"
@@ -188,6 +190,15 @@ def _send(db, client, pos, ts, now_ms, kind, side, qty, record, reason):
     return kind
 
 
+def _book_set_ms(db, ts):
+    """When this week's book was set (>= its Monday for a late first start)."""
+    for (payload,) in db.execute("SELECT payload FROM events WHERE kind='carry_targets' ORDER BY id DESC"):
+        p = json.loads(payload)
+        if p.get("rebalance_ts") == ts:
+            return max(ts, p.get("set_ms", ts))
+    return ts
+
+
 def _intent_exists(db, cid):
     return db.execute("SELECT 1 FROM intents WHERE client_id=?", (cid,)).fetchone() is not None
 
@@ -196,7 +207,8 @@ def ensure_targets(db, market, now_ms, blocked):
     ts = rebalance_ts(now_ms)
     if db.execute("SELECT 1 FROM carry_targets WHERE rebalance_ts=?", (ts,)).fetchone():
         return ts
-    if now_ms - ts > MAX_LATE_MS:
+    first = db.execute("SELECT 1 FROM carry_targets LIMIT 1").fetchone() is None
+    if now_ms - ts > MAX_LATE_MS and not first:
         return None                              # too late for this week; keep last week's book as is
     scores = {s: funding_score(market.funding(s), ts) for s in UNIVERSE}
     if any(v is None for v in scores.values()):
@@ -207,7 +219,8 @@ def ensure_targets(db, market, now_ms, blocked):
     with db:
         for s in UNIVERSE:
             db.execute("INSERT INTO carry_targets VALUES (?,?,?,?,?)", (ts, s, side[s], scores[s], rank[s]))
-        bot.event(db, "carry_targets", rebalance_ts=ts, blocked=blocked, targets=side, scores=scores)
+        bot.event(db, "carry_targets", rebalance_ts=ts, blocked=blocked, targets=side, scores=scores,
+                  set_ms=now_ms)
     return ts
 
 
@@ -243,7 +256,7 @@ def tick(db, client, market, now_ms=None):
             result[s] = _send(db, client, pos, ts, now_ms, "exit", side, Decimal(pos["qty"]), record,
                               f"rebalance_to_{tgt['side']}")
         elif pos["phase"] == "flat" and tgt["side"] != "flat" and not _intent_exists(db, client_id(s, ts, "e")):
-            if now_ms - ts > MAX_LATE_MS:
+            if now_ms - _book_set_ms(db, ts) > MAX_LATE_MS:
                 result[s] = "entry_window_passed"
                 continue
             rules, mark = client.rules(s), client.mark(s)
