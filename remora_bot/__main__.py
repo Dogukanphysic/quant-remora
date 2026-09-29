@@ -146,6 +146,34 @@ def reset_demo(mode="testnet"):
 
 
 RESET_CONFIRM = "DEMO HESAPTAKI YABANCI POZISYONLARI KAPAT"
+CARRY_CONFIRM = "REMORA CARRY DEMO BASLAT"
+
+
+def carry_switch():
+    """Close the exploration bot's positions via its own ledger. Bot must be stopped."""
+    from . import carry
+    if os.environ.get("REMORA_CARRY_CONFIRM") != CARRY_CONFIRM:
+        raise SystemExit("carry-switch requires REMORA_CARRY_CONFIRM set by the launcher")
+    client = TestnetClient()
+    try:
+        with bot.singleton():
+            for line in carry.close_explore(client) or ["kapatilacak kesif pozisyonu yok"]:
+                print("  " + line)
+            return 0
+    except OSError:
+        print("NOT DONE: bot is running; stop it first")
+        return 1
+    except bot.Halt as exc:
+        print(f"NOT DONE: {exc}")
+        return 1
+
+
+def run_carry(mode, poll_seconds):
+    from . import carry
+    if os.environ.get("REMORA_CARRY_CONFIRM") != CARRY_CONFIRM:
+        raise SystemExit("run-carry requires REMORA_CARRY_CONFIRM set by the launcher")
+    market = PublicMarketData()
+    return carry.run(mode, TestnetClient(), market, poll_seconds)
 
 
 def main(argv=None):
@@ -156,6 +184,10 @@ def main(argv=None):
     sub.add_parser("positions")
     sub.add_parser("clear-halt")
     sub.add_parser("reset-demo")
+    sub.add_parser("carry-switch")
+    rc = sub.add_parser("run-carry")
+    rc.add_argument("--poll-seconds", type=float, default=30)
+    sub.add_parser("carry-status")
     sv = sub.add_parser("seed-v2")
     sv.add_argument("--interval", choices=("4h", "1h"), default="4h")
     r = sub.add_parser("run")
@@ -176,6 +208,14 @@ def main(argv=None):
         return clear_halt("testnet")
     if args.cmd == "reset-demo":
         return reset_demo("testnet")
+    if args.cmd == "carry-switch":
+        return carry_switch()
+    if args.cmd == "run-carry":
+        return run_carry("testnet", args.poll_seconds)
+    if args.cmd == "carry-status":
+        from . import carry
+        print(json.dumps(carry.status("testnet"), indent=2, default=str))
+        return 0
     if args.cmd == "seed-v2":
         return seed_v2(int(args.interval.rstrip("h")))
     if args.cmd == "status":

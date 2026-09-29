@@ -231,9 +231,10 @@ class TestnetClient:
     def cancel_order(self, symbol, client_id):
         return self.request("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id}, True)
 
-    def place_stop(self, symbol, qty, trigger, client_id):
+    def place_stop(self, symbol, qty, trigger, client_id, side="SELL"):
+        """side SELL protects a long (trigger below), BUY protects a short (trigger above)."""
         return self.request("POST", "/fapi/v1/algoOrder", dict(
-            algoType="CONDITIONAL", symbol=symbol, side="SELL", type="STOP_MARKET", quantity=str(qty),
+            algoType="CONDITIONAL", symbol=symbol, side=side, type="STOP_MARKET", quantity=str(qty),
             triggerPrice=str(trigger), reduceOnly="true", workingType="MARK_PRICE", clientAlgoId=client_id), True)
 
     def cancel_stop(self, client_id):

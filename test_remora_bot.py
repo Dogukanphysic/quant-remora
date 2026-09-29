@@ -671,3 +671,115 @@ class TestnetOnly(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CarryClient(UniverseClient):
+    def place_stop(self, s, qty, trigger, cid, side="SELL"):
+        self.stops[cid] = s
+        self.stop_sides = getattr(self, "stop_sides", {}) | {cid: (side, trigger)}
+
+
+class CarryMarket:
+    def __init__(self, rates):
+        self.rates = rates
+
+    def funding(self, s, limit=1000):
+        idx = pd.date_range("2025-12-26", periods=120, freq="8h", tz="UTC")
+        return pd.Series(self.rates[s], index=idx)
+
+
+class Carry(unittest.TestCase):
+    def setUp(self):
+        from remora_bot import carry
+        self.carry = carry
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = carry.connect(Path(self.tmp.name) / "c.db")
+        self.client = CarryClient()
+        rates = {s: 0.0001 for s in carry.UNIVERSE}
+        rates.update(DOGEUSDT=0.0009, SOLUSDT=0.0005, ADAUSDT=-0.0004, LTCUSDT=-0.0002)
+        self.market = CarryMarket(rates)
+        self.ts = 1767571200000                     # Monday 2026-01-05 00:00 UTC
+        self.assertEqual(carry.rebalance_ts(self.ts + 3600_000), self.ts)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def tick(self, now):
+        return self.carry.tick(self.db, self.client, self.market, now)
+
+    def test_rebalance_shorts_highest_longs_lowest_with_protective_stops(self):
+        r = self.tick(self.ts + 60_000)
+        self.assertEqual({s for s, v in r.items() if v == "entry"},
+                         {"DOGEUSDT", "SOLUSDT", "ADAUSDT", "LTCUSDT"})
+        self.assertEqual(self.client.qty["DOGEUSDT"], -5)       # 500 USDT / 100
+        self.assertEqual(self.client.qty["ADAUSDT"], 5)
+        sides = {cid.split("-")[1]: v for cid, v in self.client.stop_sides.items()}
+        self.assertEqual(sides["cdoge"], ("BUY", Decimal("115.0")))
+        self.assertEqual(sides["cadau"], ("SELL", Decimal("85.0")))
+        posts = len(self.client.posts)
+        self.tick(self.ts + 120_000)                              # same week: nothing re-sent
+        self.assertEqual(len(self.client.posts), posts)
+
+    def test_next_week_flips_and_exits_before_entering(self):
+        self.tick(self.ts + 60_000)
+        self.market.rates.update(DOGEUSDT=-0.0009)                 # DOGE now the cheapest -> long
+        nxt = self.ts + self.carry.REBALANCE_MS
+        r = self.tick(nxt + 60_000)
+        self.assertEqual(r["DOGEUSDT"], "exit")
+        self.assertEqual(self.client.qty["DOGEUSDT"], 0)
+        r = self.tick(nxt + 120_000)
+        self.assertEqual(r["DOGEUSDT"], "entry")
+        self.assertEqual(self.client.qty["DOGEUSDT"], 5)
+        pnl = self.db.execute("SELECT gross_pnl, exit_reason FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual((Decimal(pnl[0]), pnl[1]), (Decimal(0), "rebalance_exit"))
+
+    def test_stop_hit_is_recorded_and_not_reentered_same_week(self):
+        self.tick(self.ts + 60_000)
+        self.client.qty["DOGEUSDT"] = Decimal(0)                  # exchange stop fired
+        self.client.stops = {c: s for c, s in self.client.stops.items() if s != "DOGEUSDT"}
+        r = self.tick(self.ts + 3600_000)
+        self.assertEqual(r["DOGEUSDT"], "flat")
+        row = self.db.execute("SELECT exit_reason, gross_pnl FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual(row[0], "exchange_stop")
+        self.assertLess(Decimal(row[1]), 0)                      # short stopped above entry loses
+
+    def test_untracked_position_halts(self):
+        self.client.qty["XRPUSDT"] = Decimal(3)
+        with self.assertRaises(bot.Halt):
+            self.tick(self.ts + 60_000)
+
+    def test_late_start_skips_the_week(self):
+        r = self.tick(self.ts + self.carry.MAX_LATE_MS + 60_000)
+        self.assertEqual(r, {"waiting": "first_rebalance"})
+        self.assertEqual(self.client.posts, [])
+
+    def test_score_uses_only_past_72h(self):
+        idx = pd.to_datetime([self.ts - 80 * 3600_000, self.ts - 8 * 3600_000, self.ts, self.ts + 8 * 3600_000],
+                             unit="ms", utc=True)
+        s = pd.Series([1.0, 2.0, 3.0, 100.0], index=idx)
+        self.assertEqual(self.carry.funding_score(s, self.ts), 5.0)
+
+
+class CarrySwitch(unittest.TestCase):
+    def test_exploration_positions_closed_via_own_ledger_and_never_learned(self):
+        from remora_bot import carry, explore
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            original = bot.ledger_path
+            bot.ledger_path = lambda mode: Path(d) / "x.db"
+            try:
+                db = bot.connect(Path(d) / "x.db")
+                bot.ensure_symbols(db, explore.UNIVERSE)
+                client = CarryClient()
+                client.qty["SOLUSDT"] = Decimal(2)
+                client.stops["stop-sol"] = "SOLUSDT"
+                with db:
+                    db.execute("UPDATE positions SET phase='long', qty='2', entry_price='100', entry_bar=1, "
+                               "stop_id='stop-sol', stop_price='90' WHERE symbol='SOLUSDT'")
+                lines = carry.close_explore(client)
+                self.assertEqual(len(lines), 1)
+                self.assertEqual(client.qty["SOLUSDT"], 0)
+                self.assertEqual(db.execute("SELECT exit_reason FROM trades").fetchone()[0], "carry_switch")
+                mdb = model_v2.connect(Path(d) / "m.db")
+                self.assertEqual(explore.sync_realized(db, mdb, 10**13), 0)
+            finally:
+                bot.ledger_path = original

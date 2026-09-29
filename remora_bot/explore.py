@@ -40,8 +40,8 @@ def sync_realized(db, model_db, now_ms: int) -> int:
     with model_db:
         for t in db.execute("SELECT id, symbol, entry_bar, entry_price, exit_price, exit_reason, exit_ms FROM trades"):
             entry, exit_ = float(t["entry_price"] or 0), float(t["exit_price"] or 0)
-            if entry <= 0 or exit_ <= 0 or t["entry_bar"] is None:
-                continue
+            if entry <= 0 or exit_ <= 0 or t["entry_bar"] is None or t["exit_reason"] == "carry_switch":
+                continue                      # carry_switch: closed early for the carry mode, not a 6h outcome
             # The model learns a HOLD_BARS-horizon return; a trade held far longer (bot offline, late
             # exit) measures something else and must not overwrite that label.
             held = (int(t["exit_ms"]) - (int(t["entry_bar"]) + strategy.STEP_MS)) / strategy.STEP_MS
