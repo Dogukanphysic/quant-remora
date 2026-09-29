@@ -178,7 +178,9 @@ class TestnetClient:
 
     def position(self, symbol):
         rows = self.request("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, True)
-        row = next(r for r in rows if r["symbol"] == symbol and r.get("positionSide", "BOTH") == "BOTH")
+        row = next((r for r in rows if r["symbol"] == symbol and r.get("positionSide", "BOTH") == "BOTH"), None)
+        if row is None:
+            raise ValueError(f"{symbol} has no position row on {self.environment} (symbol not listed there?)")
         return Decimal(row["positionAmt"]), Decimal(row["entryPrice"])
 
     def open_orders(self, symbol):

@@ -5,8 +5,9 @@ import os
 UNIVERSES = {
     "a": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
           "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"),
+    # ICPUSDT dropped: not listed on Binance Futures Demo (checked 2026-09-29); carry rechecked on these 9.
     "b": ("DOTUSDT", "ATOMUSDT", "ETCUSDT", "TRXUSDT", "OPUSDT",
-          "APTUSDT", "INJUSDT", "ICPUSDT", "GRTUSDT", "LDOUSDT"),
+          "APTUSDT", "INJUSDT", "GRTUSDT", "LDOUSDT"),
 }
 
 
