@@ -1,7 +1,9 @@
 # Switch the Demo/Testnet account from the exploration bot to the funding carry bot (virtual money).
 # 1) stops the running bot, 2) closes the exploration bot's own positions through its ledger,
 # 3) starts the carry bot detached. Keys are asked once, kept only in this process and the bot.
-param([string]$PythonPath = "python", [ValidateSet("demo", "testnet")][string]$Environment = "demo")
+# Universe b (default) avoids the top-20 coins another bot on the shared Demo account trades.
+param([string]$PythonPath = "python", [ValidateSet("demo", "testnet")][string]$Environment = "demo",
+      [ValidateSet("a", "b")][string]$Universe = "b")
 $root = Split-Path -Parent $PSScriptRoot
 $confirm = "REMORA CARRY DEMO BASLAT"
 
@@ -19,6 +21,7 @@ Start-Sleep -Seconds 2
 $env:REMORA_FUTURES_TESTNET_API_KEY = Read-Secret "API key"
 $env:REMORA_FUTURES_TESTNET_SECRET_KEY = Read-Secret "Secret key"
 $env:REMORA_FUTURES_TEST_ENV = $Environment
+$env:REMORA_UNIVERSE = $Universe
 try {
     Write-Host "Not: Turkce harf kullanmadan yazin (BASLAT)."
     $answer = (Read-Host "Onay icin tam olarak yazin: $confirm").Trim()
@@ -37,5 +40,5 @@ try {
 }
 finally {
     Remove-Item Env:REMORA_FUTURES_TESTNET_API_KEY, Env:REMORA_FUTURES_TESTNET_SECRET_KEY, Env:REMORA_FUTURES_TEST_ENV, `
-        Env:REMORA_CARRY_CONFIRM -ErrorAction SilentlyContinue
+        Env:REMORA_CARRY_CONFIRM, Env:REMORA_UNIVERSE -ErrorAction SilentlyContinue
 }

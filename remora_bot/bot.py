@@ -121,8 +121,15 @@ def startup(db, client, symbols=SYMBOLS):
             client.configure(s, LEVERAGE)
 
 
-def update_risk(db, client, now_ms):
-    wallet, _ = client.wallet()
+def ledger_equity(db) -> Decimal:
+    """This bot's own realized PnL (+ a fixed base), independent of other bots sharing the account."""
+    total = sum((Decimal(r[0]) for r in db.execute("SELECT gross_pnl FROM trades")), Decimal(0))
+    return ALLOCATION_USDT * len(SYMBOLS) + total
+
+
+def update_risk(db, client, now_ms, own_pnl=False):
+    """own_pnl: judge limits on this ledger's realized PnL, not the shared account wallet."""
+    wallet = ledger_equity(db) if own_pnl else client.wallet()[0]
     day = time.strftime("%Y-%m-%d", time.gmtime(now_ms / 1000))
     row = db.execute("SELECT * FROM bot WHERE id=1").fetchone()
     day_start = Decimal(row["day_start_wallet"]) if row["day"] == day else wallet

@@ -1,0 +1,25 @@
+{
+  "contract": "Funding carry research: market-neutral perp-only portfolio on the 10-coin universe (research only).\n\nPre-registered before results:\n  * signal at each rebalance: trailing mean funding rate over L days (L in 1, 3, 7)\n  * short the K highest-funding perps, long the K lowest (K in 2, 3), equal notional, dollar neutral\n  * rebalance every R hours (R in 8, 24, 72, 168); PnL = price legs + funding actually paid/received\n  * cost 0.0007 per unit notional traded per side-change (maker entry + taker exit) on turnover\n  * dev 2023-10-01 .. 2025-08-31, holdout 2025-09-01 .. end evaluated ONCE for the best qualifier\n  * qualifies if dev net > 0 in each of the dev years (split at 2024-09-01) and Sharpe > 0.5\n",
+  "qualifiers": 3,
+  "best_dev": {
+    "L": 7.0,
+    "K": 3.0,
+    "R": 168.0,
+    "net_pct": 39.51,
+    "funding_pct": 7.96,
+    "price_pct": 37.27,
+    "cost_pct": 5.72,
+    "sharpe": 0.79,
+    "max_dd_pct": -29.06,
+    "y1_net": 9.12,
+    "y2_net": 30.39
+  },
+  "holdout": {
+    "net_pct": 43.35,
+    "funding_pct": 7.95,
+    "price_pct": 38.42,
+    "cost_pct": 3.01,
+    "sharpe": 1.95,
+    "max_dd_pct": -11.02
+  }
+}

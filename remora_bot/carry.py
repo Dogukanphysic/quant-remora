@@ -15,23 +15,25 @@ import json
 import time
 from decimal import ROUND_CEILING, Decimal
 
-from . import bot
+from . import bot, universe
 from .exchange import ApiError, TransportError, floor_step
 
-UNIVERSE = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-            "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT")
-K = 2
-LOOKBACK_MS = 72 * 3600_000
+UNIVERSE = universe.active()
+# Per-universe parameters are each universe's own pre-registered research pick (funding_carry_research.py):
+# a: 72h lookback, 2 per side; b: 7-day lookback, 3 per side. Gross exposure stays 2000 USDT.
+K, LOOKBACK_DAYS = {"a": (2, 3), "b": (3, 7)}[universe.name()]
+LOOKBACK_MS = LOOKBACK_DAYS * 24 * 3600_000
 REBALANCE_MS = 168 * 3600_000
 ANCHOR_MS = 1704067200000                 # Monday 2024-01-01 00:00 UTC
 MAX_LATE_MS = 24 * 3600_000               # a missed rebalance is skipped, never chased
-LEG_NOTIONAL = Decimal("500")
+LEG_NOTIONAL = (Decimal("1000") / K).quantize(Decimal("1"))
 STOP_DISTANCE = Decimal("0.15")
-POLICY = "remora-funding-carry-v1"
+POLICY = f"remora-funding-carry-v1-{universe.name()}"
 
 
 def ledger_path(mode):
-    return bot.STATE / f"remora-bot-carry-{mode}.sqlite3"
+    suffix = "" if universe.name() == "a" else f"-{universe.name()}"
+    return bot.STATE / f"remora-bot-carry-{mode}{suffix}.sqlite3"
 
 
 def connect(path):
@@ -53,7 +55,7 @@ def client_id(symbol, ts, kind):
 
 
 def funding_score(series, ts):
-    """Funding paid in (ts-72h, ts]; settlement times are floored to the hour like the research grid."""
+    """Funding paid in (ts-lookback, ts]; settlement times are floored to the hour like the research grid."""
     if series is None or len(series) == 0:
         return None
     hours = series.index.floor("h").as_unit("ms").asi8
@@ -213,7 +215,7 @@ def tick(db, client, market, now_ms=None):
     now_ms = now_ms or int(time.time() * 1000)
     if db.execute("SELECT halted FROM bot WHERE id=1").fetchone()["halted"]:
         return {"halted": True}
-    blocked = bot.update_risk(db, client, now_ms)
+    blocked = bot.update_risk(db, client, now_ms, universe.shared_account())
     positions = {r["symbol"]: r for r in db.execute("SELECT * FROM positions")}
     result = {}
     for s in UNIVERSE:                           # pending intents: query only
@@ -290,7 +292,8 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
         except ApiError as exc:
             print(f"STARTUP FAILED, nothing traded: {exc}")
             return 1
-        print(f"CARRY ON: short top-{K} / long bottom-{K} 72h funding, {LEG_NOTIONAL} USDT per leg, weekly "
+        print(f"CARRY ON ({universe.name()}: {', '.join(UNIVERSE)}): short top-{K} / long bottom-{K} "
+              f"{LOOKBACK_DAYS}d funding, {LEG_NOTIONAL} USDT per leg, weekly "
               "(Monday 00:00 UTC), virtual money only")
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
@@ -323,12 +326,12 @@ def close_explore(client, mode="testnet"):
     from . import explore
     db = bot.connect(bot.ledger_path(mode))
     bot.ensure_symbols(db, explore.UNIVERSE)
-    if db.execute("SELECT halted FROM bot WHERE id=1").fetchone()["halted"]:
-        raise bot.Halt("exploration ledger is halted; clear it first")
+    # A halt caused by another bot's coin must not block closing our own legs: only the positions this
+    # ledger holds are verified (each still halts on its own mismatch), foreign coins are left alone.
     now_ms = int(time.time() * 1000)
     before = db.execute("SELECT COALESCE(MAX(id), 0) FROM trades").fetchone()[0]
     lines = []
-    for pos in db.execute("SELECT * FROM positions").fetchall():
+    for pos in db.execute("SELECT * FROM positions WHERE phase!='flat' OR pending_id IS NOT NULL").fetchall():
         if pos["pending_id"]:
             bot.reconcile_pending(db, client, pos, now_ms)
             pos = db.execute("SELECT * FROM positions WHERE symbol=?", (pos["symbol"],)).fetchone()

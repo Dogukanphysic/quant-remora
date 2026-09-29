@@ -18,17 +18,18 @@ import numpy as np
 import pandas as pd
 
 import universe_research as ur
-from remora_bot import explore
+from remora_bot import universe
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "reports" / "funding-carry"
+UNIVERSE = universe.UNIVERSES["a"]
 DEV_START, SPLIT, DEV_END = (pd.Timestamp(x, tz="UTC") for x in ("2023-10-01", "2024-09-01", "2025-09-01"))
 COST = 0.0007
 
 
 def load():
     close, fund = {}, {}
-    for s in explore.UNIVERSE:
+    for s in UNIVERSE:
         bars, f = ur.load(s)
         close[s] = bars["close"]
         fund[s] = f
@@ -70,6 +71,11 @@ def stats(p):
 
 
 def main():
+    global OUT, UNIVERSE
+    import sys
+    if len(sys.argv) > 1:                       # e.g. `b`: same contract on another universe
+        UNIVERSE = universe.UNIVERSES[sys.argv[1]]
+        OUT = ROOT / "reports" / f"funding-carry-{sys.argv[1]}"
     OUT.mkdir(parents=True, exist_ok=True)
     c, fr = load()
     rows = []
