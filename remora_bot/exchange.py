@@ -83,6 +83,22 @@ class PublicMarketData:
         return [Bar(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]))
                 for r in raw if int(r[6]) < now]
 
+    def opens(self, symbol: str, interval: str = "1d", limit: int = 400) -> dict[int, float]:
+        """{open_time_ms: open price}; the current (unclosed) bar's open is already final."""
+        url = f"{self.base}/fapi/v1/klines?" + urlencode(dict(symbol=symbol, interval=interval, limit=limit))
+        return {int(r[0]): float(r[1]) for r in _open(self.opener, Request(url))}
+
+    def funding_since(self, symbol: str, start_ms: int) -> list[tuple[int, float]]:
+        """Every settled funding (time_ms, rate) since start_ms, paginated."""
+        out, cursor = [], start_ms
+        while True:
+            url = f"{self.base}/fapi/v1/fundingRate?" + urlencode(dict(symbol=symbol, startTime=cursor, limit=1000))
+            rows = _open(self.opener, Request(url))
+            out += [(int(r["fundingTime"]), float(r["fundingRate"])) for r in rows]
+            if len(rows) < 1000:
+                return out
+            cursor = int(rows[-1]["fundingTime"]) + 1
+
     def funding(self, symbol: str, limit: int = 1000):
         import pandas as pd
         url = f"{self.base}/fapi/v1/fundingRate?" + urlencode(dict(symbol=symbol, limit=limit))

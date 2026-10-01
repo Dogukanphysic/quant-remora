@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from decimal import ROUND_CEILING, Decimal
 
-from . import bot, universe
+from . import bot, carry_adaptive, universe
 from .exchange import ApiError, TransportError, floor_step
 
 UNIVERSE = universe.active()
@@ -30,7 +31,10 @@ MAX_LATE_MS = 24 * 3600_000               # a missed rebalance is skipped, never
 # 2026-09-29) using that Monday's signal; the entry window then runs from when the book was set.
 LEG_NOTIONAL = (Decimal("1000") / K).quantize(Decimal("1"))
 STOP_DISTANCE = Decimal("0.15")
-POLICY = f"remora-funding-carry-v1-{universe.name()}"
+POLICY = f"remora-funding-carry-v1-{universe.name()}"     # unchanged by adaptive mode: keeps client ids stable
+# Adaptive (self-updating) mode: see carry_adaptive.py. Off -> the single fixed config above.
+ADAPTIVE = os.environ.get("REMORA_CARRY_ADAPTIVE") == "true"
+RESIZE_TOLERANCE = Decimal("0.3")        # same-side legs are only re-sized when >30% off the new target
 
 
 def ledger_path(mode):
@@ -42,6 +46,12 @@ def connect(path):
     db = bot.connect(path)
     db.execute("CREATE TABLE IF NOT EXISTS carry_targets(rebalance_ts INTEGER, symbol TEXT, side TEXT, score REAL, "
                "rank INTEGER, PRIMARY KEY(rebalance_ts, symbol))")
+    cols = {r[1] for r in db.execute("PRAGMA table_info(carry_targets)")}
+    if "notional" not in cols:           # signed USDT per leg (adaptive); NULL = fixed LEG_NOTIONAL
+        db.execute("ALTER TABLE carry_targets ADD COLUMN notional TEXT")
+    db.execute("CREATE TABLE IF NOT EXISTS carry_model(rebalance_ts INTEGER PRIMARY KEY, weights TEXT, cost REAL, "
+               "fills INTEGER, scale REAL, window TEXT, created_ms INTEGER)")
+    db.execute("CREATE TABLE IF NOT EXISTS carry_refs(client_id TEXT PRIMARY KEY, ref TEXT)")
     db.commit()
     bot.ensure_symbols(db, UNIVERSE)
     return db
@@ -167,9 +177,11 @@ def reconcile(db, client, pos, now_ms):
         close_trade(db, pos["symbol"], price, now_ms, "rebalance_exit")
 
 
-def _send(db, client, pos, ts, now_ms, kind, side, qty, record, reason):
+def _send(db, client, pos, ts, now_ms, kind, side, qty, record, reason, ref=None):
     cid = client_id(pos["symbol"], ts, {"entry": "e", "exit": "x"}[kind])
     with db:
+        if ref is not None:              # price seen just before the order: live slippage -> learned cost
+            db.execute("INSERT OR REPLACE INTO carry_refs VALUES (?,?)", (cid, str(ref)))
         db.execute("INSERT INTO decisions(symbol, bar_ts, created_ms, signal, prediction, model_authority, action, "
                    "reason) VALUES (?,?,?,?,?,?,?,?)", (pos["symbol"], ts, now_ms, json.dumps(record, default=str),
                                                         record.get("score"), 0, kind, reason))
@@ -203,6 +215,48 @@ def _intent_exists(db, cid):
     return db.execute("SELECT 1 FROM intents WHERE client_id=?", (cid,)).fetchone() is not None
 
 
+def live_fills(db):
+    rows = db.execute("SELECT r.ref, i.response FROM carry_refs r JOIN intents i USING(client_id) "
+                      "WHERE i.response IS NOT NULL ORDER BY i.created_ms DESC LIMIT 50").fetchall()
+    out = []
+    for ref, response in rows:
+        avg = float(json.loads(response).get("avgPrice") or 0)
+        if avg > 0:
+            out.append((float(ref), avg))
+    return out
+
+
+def _own_equity_and_peak(db):
+    """This ledger's realized equity curve (base = gross exposure); independent of the shared wallet."""
+    equity = peak = carry_adaptive.GROSS_USDT
+    for (pnl,) in db.execute("SELECT gross_pnl FROM trades ORDER BY id"):
+        equity += Decimal(pnl)
+        peak = max(peak, equity)
+    return equity, peak
+
+
+def adaptive_book(db, market, ts, blocked):
+    """Learn this week's config weights and the netted book; persisted before any order."""
+    rebal = [ts - n * REBALANCE_MS for n in range(carry_adaptive.WINDOW_WEEKS + 1, -1, -1)]
+    since = rebal[0] - 7 * carry_adaptive.DAY_MS - carry_adaptive.HOUR_MS
+    funding = {s: market.funding_since(s, since) for s in UNIVERSE}
+    opens = {s: market.opens(s) for s in UNIVERSE}
+    if any(ts not in opens[s] for s in UNIVERSE):
+        return None
+    cost, n_fills = carry_adaptive.learned_cost(live_fills(db))
+    window = carry_adaptive.simulate(opens, funding, rebal, cost, UNIVERSE)
+    prev = db.execute("SELECT weights FROM carry_model WHERE rebalance_ts<? ORDER BY rebalance_ts DESC LIMIT 1",
+                      (ts,)).fetchone()
+    weights = carry_adaptive.learn_weights(window, json.loads(prev[0]) if prev else None)
+    book = carry_adaptive.combined_book(funding, ts, weights, UNIVERSE)
+    equity, peak = _own_equity_and_peak(db)
+    scale = 0.0 if blocked else carry_adaptive.drawdown_scale(peak, equity)
+    notional = carry_adaptive.leg_notionals(book, scale)
+    summary = {n: round(sum(r[n] for _, r in window) * 100, 2) for n in weights}
+    return dict(book=book, notional=notional, weights=weights, cost=cost, fills=n_fills, scale=scale,
+                window=dict(weeks=len(window), net_pct_by_config=summary))
+
+
 def ensure_targets(db, market, now_ms, blocked):
     ts = rebalance_ts(now_ms)
     if db.execute("SELECT 1 FROM carry_targets WHERE rebalance_ts=?", (ts,)).fetchone():
@@ -210,6 +264,23 @@ def ensure_targets(db, market, now_ms, blocked):
     first = db.execute("SELECT 1 FROM carry_targets LIMIT 1").fetchone() is None
     if now_ms - ts > MAX_LATE_MS and not first:
         return None                              # too late for this week; keep last week's book as is
+    if ADAPTIVE:
+        m = adaptive_book(db, market, ts, blocked)
+        if m is None:
+            return None
+        ranked = sorted(UNIVERSE, key=lambda s: (m["book"][s], s))
+        with db:
+            db.execute("INSERT INTO carry_model VALUES (?,?,?,?,?,?,?)",
+                       (ts, carry_adaptive.dumps(m["weights"]), m["cost"], m["fills"], m["scale"],
+                        carry_adaptive.dumps(m["window"]), now_ms))
+            for i, s in enumerate(ranked):
+                n = m["notional"][s]
+                side = "long" if n > 0 else "short" if n < 0 else "flat"
+                db.execute("INSERT INTO carry_targets VALUES (?,?,?,?,?,?)", (ts, s, side, m["book"][s], i + 1, str(n)))
+            bot.event(db, "carry_targets", rebalance_ts=ts, blocked=blocked, adaptive=True, set_ms=now_ms,
+                      notional={s: str(v) for s, v in m["notional"].items()}, weights=m["weights"], cost=m["cost"],
+                      scale=m["scale"])
+        return ts
     scores = {s: funding_score(market.funding(s), ts) for s in UNIVERSE}
     if any(v is None for v in scores.values()):
         return None
@@ -218,7 +289,7 @@ def ensure_targets(db, market, now_ms, blocked):
         side = {s: "flat" for s in UNIVERSE}
     with db:
         for s in UNIVERSE:
-            db.execute("INSERT INTO carry_targets VALUES (?,?,?,?,?)", (ts, s, side[s], scores[s], rank[s]))
+            db.execute("INSERT INTO carry_targets VALUES (?,?,?,?,?,NULL)", (ts, s, side[s], scores[s], rank[s]))
         bot.event(db, "carry_targets", rebalance_ts=ts, blocked=blocked, targets=side, scores=scores,
                   set_ms=now_ms)
     return ts
@@ -248,24 +319,31 @@ def tick(db, client, market, now_ms=None):
         if s in result:
             continue
         pos, tgt = positions[s], targets[s]
-        record = dict(rebalance_ts=ts, score=tgt["score"], rank=tgt["rank"], target=tgt["side"], policy=POLICY)
-        if pos["phase"] != "flat" and pos["phase"] != tgt["side"]:
-            if _intent_exists(db, client_id(s, ts, "x")):
+        record = dict(rebalance_ts=ts, score=tgt["score"], rank=tgt["rank"], target=tgt["side"], policy=POLICY,
+                      notional=tgt["notional"], adaptive=tgt["notional"] is not None)
+        target_usdt = abs(Decimal(tgt["notional"])) if tgt["notional"] is not None else LEG_NOTIONAL
+        exit_sent = _intent_exists(db, client_id(s, ts, "x"))
+        resize = (pos["phase"] == tgt["side"] and pos["phase"] != "flat" and tgt["notional"] is not None
+                  and not exit_sent and not _intent_exists(db, client_id(s, ts, "e"))
+                  and abs(Decimal(pos["qty"]) * Decimal(pos["entry_price"]) - target_usdt)
+                  > RESIZE_TOLERANCE * target_usdt)
+        if (pos["phase"] != "flat" and pos["phase"] != tgt["side"]) or resize:
+            if exit_sent:
                 raise bot.Halt(f"{s} still {pos['phase']} after this rebalance's exit")
             side = "SELL" if pos["phase"] == "long" else "BUY"
             result[s] = _send(db, client, pos, ts, now_ms, "exit", side, Decimal(pos["qty"]), record,
-                              f"rebalance_to_{tgt['side']}")
+                              "resize" if resize else f"rebalance_to_{tgt['side']}", ref=client.mark(s))
         elif pos["phase"] == "flat" and tgt["side"] != "flat" and not _intent_exists(db, client_id(s, ts, "e")):
             if now_ms - _book_set_ms(db, ts) > MAX_LATE_MS:
                 result[s] = "entry_window_passed"
                 continue
             rules, mark = client.rules(s), client.mark(s)
-            qty = floor_step(LEG_NOTIONAL / mark, rules["step"])
+            qty = floor_step(target_usdt / mark, rules["step"])
             if qty < rules["min_qty"] or qty * mark < rules["min_notional"]:
                 result[s] = "below_exchange_minimum"
                 continue
             result[s] = _send(db, client, pos, ts, now_ms, "entry", "BUY" if tgt["side"] == "long" else "SELL",
-                              qty, record, f"carry_{tgt['side']}")
+                              qty, record, f"carry_{tgt['side']}", ref=mark)
         else:
             result[s] = pos["phase"] if pos["phase"] != "flat" else "flat"
     return dict(result, rebalance_ts=ts)
@@ -280,7 +358,9 @@ def status(mode):
                 bot=dict(db.execute("SELECT halted, environment, entries_blocked, peak_wallet, updated_ms FROM bot"
                                     ).fetchone()),
                 rebalance_ts=ts, next_rebalance_ts=(rebalance_ts(int(time.time() * 1000)) + REBALANCE_MS),
-                targets=[dict(r) for r in db.execute("SELECT symbol, side, score, rank FROM carry_targets "
+                adaptive=ADAPTIVE,
+                model=_model_status(db),
+                targets=[dict(r) for r in db.execute("SELECT symbol, side, score, rank, notional FROM carry_targets "
                                                      "WHERE rebalance_ts=? ORDER BY rank", (ts,))] if ts else [],
                 positions=[dict(r) for r in db.execute("SELECT symbol, phase, qty, entry_price, stop_price, pending_id "
                                                        "FROM positions WHERE symbol IN (%s)" % ",".join("?" * len(UNIVERSE)),
@@ -288,8 +368,19 @@ def status(mode):
                 trades=trades, total_gross_pnl=str(total))
 
 
+def _model_status(db):
+    rows = db.execute("SELECT rebalance_ts, weights, cost, fills, scale, window FROM carry_model "
+                      "ORDER BY rebalance_ts DESC LIMIT 2").fetchall()
+    if not rows:
+        return None
+    cur = dict(rows[0])
+    cur.update(weights=json.loads(cur["weights"]), window=json.loads(cur["window"]))
+    if len(rows) > 1:
+        cur["previous_weights"] = json.loads(rows[1]["weights"])
+    return cur
+
+
 def write_status(mode, result):
-    import os
     payload = status(mode)
     payload.update(last_tick=result, written_ms=int(time.time() * 1000), pid=os.getpid())
     (bot.STATE / f"remora-bot-carry-{mode}-status.json").write_text(json.dumps(payload, indent=2, default=str),
@@ -305,9 +396,12 @@ def run(mode, client, market, poll_seconds=30, max_cycles=None):
         except ApiError as exc:
             print(f"STARTUP FAILED, nothing traded: {exc}")
             return 1
-        print(f"CARRY ON ({universe.name()}: {', '.join(UNIVERSE)}): short top-{K} / long bottom-{K} "
-              f"{LOOKBACK_DAYS}d funding, {LEG_NOTIONAL} USDT per leg, weekly "
-              "(Monday 00:00 UTC), virtual money only")
+        mode_text = (f"ADAPTIVE ensemble of {len(carry_adaptive.CONFIGS)} configs, weights re-learned weekly "
+                     f"from the last {carry_adaptive.WINDOW_WEEKS} weeks + live fill costs, gross "
+                     f"{carry_adaptive.GROSS_USDT} USDT" if ADAPTIVE else
+                     f"short top-{K} / long bottom-{K} {LOOKBACK_DAYS}d funding, {LEG_NOTIONAL} USDT per leg")
+        print(f"CARRY ON ({universe.name()}: {', '.join(UNIVERSE)}): {mode_text}, weekly (Monday 00:00 UTC), "
+              "virtual money only")
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             try:

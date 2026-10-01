@@ -1,0 +1,53 @@
+{
+  "doc": "Walk-forward check of the self-updating carry (remora_bot/carry_adaptive.py) on universe b history.\n\nUses exactly the live functions: weekly prices at Monday 00:00 UTC + settled funding, configs simulated\nover the trailing window, weights learned (inverse vol, smoothed), book netted across configs, cost\ncharged on the book's own turnover. Compared with the single fixed config the bot ran before (L7K3)\nevaluated the same way. Evaluation starts 2024-09-02 (first Monday of the development window).\n",
+  "adaptive": {
+    "weeks": 104,
+    "net_pct": 90.9,
+    "sharpe": 1.93,
+    "max_dd_pct": -13.0,
+    "positive_weeks": 62
+  },
+  "fixed_L7K3": {
+    "weeks": 104,
+    "net_pct": 67.7,
+    "sharpe": 1.56,
+    "max_dd_pct": -18.7,
+    "positive_weeks": 64
+  },
+  "adaptive_dev": {
+    "weeks": 52,
+    "net_pct": 59.8,
+    "sharpe": 2.13,
+    "max_dd_pct": -13.0,
+    "positive_weeks": 30
+  },
+  "adaptive_holdout": {
+    "weeks": 52,
+    "net_pct": 31.1,
+    "sharpe": 1.74,
+    "max_dd_pct": -10.4,
+    "positive_weeks": 32
+  },
+  "fixed_dev": {
+    "weeks": 52,
+    "net_pct": 37.9,
+    "sharpe": 1.41,
+    "max_dd_pct": -18.7,
+    "positive_weeks": 32
+  },
+  "fixed_holdout": {
+    "weeks": 52,
+    "net_pct": 29.8,
+    "sharpe": 1.95,
+    "max_dd_pct": -8.6,
+    "positive_weeks": 32
+  },
+  "last_weights": {
+    "L1K2": 0.147,
+    "L1K3": 0.179,
+    "L3K2": 0.125,
+    "L3K3": 0.166,
+    "L7K2": 0.156,
+    "L7K3": 0.227
+  }
+}

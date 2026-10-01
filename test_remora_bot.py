@@ -787,3 +787,93 @@ class CarrySwitch(unittest.TestCase):
                 self.assertEqual(explore.sync_realized(db, mdb, 10**13), 0)
             finally:
                 bot.ledger_path = original
+
+
+class AdaptiveMarket(CarryMarket):
+    """Weekly opens + funding history for the adaptive book (rates per symbol, constant)."""
+    def __init__(self, rates, start, weeks, drift):
+        super().__init__(rates)
+        self.start, self.weeks, self.drift = start, weeks, drift
+
+    def opens(self, s, interval="1d", limit=400):
+        return {self.start + i * 86400_000: 100 * (1 + self.drift[s]) ** i for i in range(self.weeks * 7 + 1)}
+
+    def funding_since(self, s, start_ms):
+        return [(t, self.rates[s]) for t in range(start_ms // 28800_000 * 28800_000, self.start + self.weeks * 7 * 86400_000 + 1, 28800_000)
+                if t >= start_ms]
+
+
+class AdaptiveCarry(unittest.TestCase):
+    def setUp(self):
+        from remora_bot import carry, carry_adaptive
+        self.carry, self.ca = carry, carry_adaptive
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = carry.connect(Path(self.tmp.name) / "a.db")
+        self.client = CarryClient()
+        self.ts = 1767571200000
+        u = carry.UNIVERSE
+        rates = {s: 0.0001 * (i - 4) for i, s in enumerate(u)}           # distinct funding ranks
+        drift = {s: (0.002 if rates[s] < 0 else -0.002) for s in u}      # low funding coins rise: carry works
+        self.market = AdaptiveMarket(rates, self.ts - 30 * 7 * 86400_000, 31, drift)
+        carry.ADAPTIVE = True
+
+    def tearDown(self):
+        self.carry.ADAPTIVE = False
+        self.tmp.cleanup()
+
+    def test_weights_learned_and_book_is_dollar_neutral_with_sized_legs(self):
+        r = self.carry.tick(self.db, self.client, self.market, self.ts + 60_000)
+        model = self.db.execute("SELECT weights, cost, scale FROM carry_model").fetchone()
+        w = json.loads(model[0])
+        self.assertAlmostEqual(sum(w.values()), 1.0, places=6)
+        self.assertEqual(set(w), {self.ca.config_name(c) for c in self.ca.CONFIGS})
+        self.assertEqual((model[1], model[2]), (self.ca.DEFAULT_COST, 1.0))
+        rows = self.db.execute("SELECT symbol, notional FROM carry_targets").fetchall()
+        total = sum(Decimal(n) for _, n in rows)
+        self.assertLessEqual(abs(total), Decimal("5"))                   # long and short sides balance
+        gross = sum(abs(Decimal(n)) for _, n in rows)
+        self.assertLessEqual(gross, self.ca.GROSS_USDT + 10)   # per-leg rounding
+        for s, n in rows:
+            if Decimal(n) != 0:
+                self.assertEqual(r[s], "entry")
+                self.assertEqual(abs(self.client.qty[s]) * 100, (abs(Decimal(n)) / 100).quantize(Decimal("0.001")) * 100)
+
+    def test_weights_move_only_half_way_next_week(self):
+        self.carry.tick(self.db, self.client, self.market, self.ts + 60_000)
+        self.market.weeks += 1
+        nxt = self.ts + self.carry.REBALANCE_MS
+        self.carry.tick(self.db, self.client, self.market, nxt + 60_000)
+        a, b = [json.loads(r[0]) for r in self.db.execute("SELECT weights FROM carry_model ORDER BY rebalance_ts")]
+        window = self.ca.simulate({s: self.market.opens(s) for s in self.carry.UNIVERSE},
+                                  {s: self.market.funding_since(s, 0) for s in self.carry.UNIVERSE},
+                                  [nxt - n * self.carry.REBALANCE_MS for n in range(27, -1, -1)],
+                                  self.ca.DEFAULT_COST, self.carry.UNIVERSE)
+        target = self.ca.learn_weights(window)
+        for k in a:
+            self.assertAlmostEqual(b[k], 0.5 * a[k] + 0.5 * target[k], places=6)
+
+    def test_simulation_uses_only_completed_weeks(self):
+        rebal = [self.ts - n * self.carry.REBALANCE_MS for n in range(27, -1, -1)]
+        opens = {s: self.market.opens(s) for s in self.carry.UNIVERSE}
+        fund = {s: self.market.funding_since(s, 0) for s in self.carry.UNIVERSE}
+        rows = self.ca.simulate(opens, fund, rebal, 0.0007, self.carry.UNIVERSE)
+        self.assertEqual(rows[-1][0], rebal[-2])                          # last week ends exactly at ts
+        future = {s: {**o, **{k + 10**12: 1.0 for k in o}} for s, o in opens.items()}
+        self.assertEqual(self.ca.simulate(future, fund, rebal, 0.0007, self.carry.UNIVERSE), rows)
+
+    def test_learned_cost_from_live_fills_and_drawdown_brake(self):
+        self.assertEqual(self.ca.learned_cost([(100, 100.1)] * 4), (self.ca.DEFAULT_COST, 4))
+        cost, n = self.ca.learned_cost([(100, 100.1)] * 6)
+        self.assertAlmostEqual(cost, 0.0005 + 0.001)
+        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1950)), 1.0)
+        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1890)), 0.5)
+        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1790)), 0.25)
+
+    def test_fixed_legacy_week_keeps_running_after_switch(self):
+        self.carry.ADAPTIVE = False
+        self.carry.tick(self.db, self.client, self.market, self.ts + 60_000)
+        self.carry.ADAPTIVE = True
+        posts = len(self.client.posts)
+        r = self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)  # same week, NULL notional
+        self.assertEqual(len(self.client.posts), posts)
+        self.assertIsNone(self.db.execute("SELECT notional FROM carry_targets LIMIT 1").fetchone()[0])

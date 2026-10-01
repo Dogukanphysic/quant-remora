@@ -3,7 +3,8 @@
 # 3) starts the carry bot detached. Keys are asked once, kept only in this process and the bot.
 # Universe b (default) avoids the top-20 coins another bot on the shared Demo account trades.
 param([string]$PythonPath = "python", [ValidateSet("demo", "testnet")][string]$Environment = "demo",
-      [ValidateSet("a", "b")][string]$Universe = "b")
+      [ValidateSet("a", "b")][string]$Universe = "b", [switch]$Fixed)
+# Default: self-updating carry (weights re-learned weekly, carry_adaptive.py). -Fixed: the single fixed config.
 $root = Split-Path -Parent $PSScriptRoot
 $confirm = "REMORA CARRY DEMO BASLAT"
 
@@ -22,6 +23,7 @@ $env:REMORA_FUTURES_TESTNET_API_KEY = Read-Secret "API key"
 $env:REMORA_FUTURES_TESTNET_SECRET_KEY = Read-Secret "Secret key"
 $env:REMORA_FUTURES_TEST_ENV = $Environment
 $env:REMORA_UNIVERSE = $Universe
+$env:REMORA_CARRY_ADAPTIVE = if ($Fixed) { "false" } else { "true" }
 try {
     Write-Host "Not: Turkce harf kullanmadan yazin (BASLAT)."
     $answer = (Read-Host "Onay icin tam olarak yazin: $confirm").Trim()
@@ -40,5 +42,5 @@ try {
 }
 finally {
     Remove-Item Env:REMORA_FUTURES_TESTNET_API_KEY, Env:REMORA_FUTURES_TESTNET_SECRET_KEY, Env:REMORA_FUTURES_TEST_ENV, `
-        Env:REMORA_CARRY_CONFIRM, Env:REMORA_UNIVERSE -ErrorAction SilentlyContinue
+        Env:REMORA_CARRY_CONFIRM, Env:REMORA_UNIVERSE, Env:REMORA_CARRY_ADAPTIVE -ErrorAction SilentlyContinue
 }
