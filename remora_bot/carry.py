@@ -101,13 +101,97 @@ def verify(db, client, pos, now_ms):
         if qty != _sign(pos["phase"]) * Decimal(pos["qty"]):
             raise bot.Halt(f"{symbol} position mismatch: ledger {pos['phase']} {pos['qty']} exchange {qty}")
         if pos["stop_id"] not in orders:
-            raise bot.Halt(f"{symbol} protective stop missing")
+            orders = set(client.open_orders(symbol))          # a flaky listing is re-read once
+        if pos["stop_id"] not in orders:
+            before = pos["stop_id"]
+            pos = restore_stop(db, client, pos, qty, now_ms)  # halts if it cannot be restored safely
+            if pos["stop_id"] == before:
+                orders.add(before)                            # confirmed live by a direct query
+            else:
+                orders = set(client.open_orders(symbol))
+                if pos["stop_id"] not in orders:
+                    raise bot.Halt(f"{symbol} protective stop missing after restore")
         orders.discard(pos["stop_id"])
     elif qty != 0:
         raise bot.Halt(f"{symbol} untracked exchange position {qty}")
     if orders:
         raise bot.Halt(f"{symbol} untracked open orders {sorted(orders)[:3]}")
     return pos
+
+
+STOP_LIVE = {"NEW", "WORKING", "PARTIALLY_FILLED"}
+
+
+def restore_stop(db, client, pos, qty, now_ms):
+    """The ledger's stop is not in the open-order list while the position is open. Ask for that exact
+    stop by id: if it is still live the listing was wrong (keep it); if it is gone, place ONE
+    replacement with a new deterministic id (never a second one) and record it."""
+    symbol = pos["symbol"]
+    try:
+        state = client.stop_order(pos["stop_id"]).get("status")
+    except ApiError:
+        state = None                                     # unknown to the exchange
+    if state in STOP_LIVE:
+        bot.event(db, "stop_listing_mismatch", symbol=symbol, stop_id=pos["stop_id"], status=state)
+        db.commit()
+        return pos
+    new_id = client_id(symbol, int(pos["entry_bar"]), "r")
+    if new_id == pos["stop_id"] or _intent_exists(db, new_id):
+        raise bot.Halt(f"{symbol} protective stop missing again after one restore ({state})")
+    side = "SELL" if pos["phase"] == "long" else "BUY"
+    with db:
+        db.execute("INSERT INTO intents VALUES (?,?,?,?,?,?,?,NULL)",
+                   (new_id, symbol, side, "stop_restore", str(abs(qty)), now_ms, "prepared"))
+        bot.event(db, "stop_restore", symbol=symbol, old=pos["stop_id"], old_status=state, new=new_id,
+                  trigger=pos["stop_price"])
+    try:
+        client.place_stop(symbol, Decimal(pos["qty"]), Decimal(pos["stop_price"]), new_id, side=side)
+    except Exception as exc:
+        raise bot.Halt(f"{symbol} protective stop missing and restore failed: {exc}")
+    with db:
+        db.execute("UPDATE positions SET stop_id=? WHERE symbol=?", (new_id, symbol))
+        db.execute("UPDATE intents SET status='placed' WHERE client_id=?", (new_id,))
+    return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
+
+
+def repair(db, client, now_ms=None):
+    """User-run (bot stopped): reconcile every leg with the exchange, restore missing stops, record legs
+    closed outside the bot (manually or by a stop) at the current mark, then clear the halt.
+    Any other mismatch keeps the halt."""
+    now_ms = now_ms or int(time.time() * 1000)
+    row = db.execute("SELECT halted, identity, environment FROM bot WHERE id=1").fetchone()
+    if row["identity"] and (row["identity"] != client.identity or row["environment"] != client.environment):
+        raise bot.Halt("key/environment does not match this ledger")
+    lines = []
+    for s in UNIVERSE:
+        pos = db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
+        if pos["pending_id"]:
+            reconcile(db, client, pos, now_ms)
+            pos = db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
+            if pos["pending_id"]:
+                raise bot.Halt(f"{s} order intent still unresolved; try again in a minute")
+        if pos["phase"] in ("long", "short"):
+            qty, _ = client.position(s)
+            if qty == 0:
+                stop = pos["stop_id"]
+                try:
+                    if stop:
+                        client.cancel_stop(stop)
+                except ApiError:
+                    pass
+                close_trade(db, s, client.mark(s), now_ms, "closed_outside_bot")
+                lines.append(f"{s}: borsada kapali bulundu, kayda islendi")
+                continue
+        before = pos["stop_id"]
+        pos = verify(db, client, pos, now_ms)
+        if pos["phase"] != "flat" and pos["stop_id"] != before:
+            lines.append(f"{s}: eksik stop yeniden konuldu ({pos['stop_price']})")
+    if row["halted"]:
+        with db:
+            db.execute("UPDATE bot SET halted=NULL WHERE id=1")
+            bot.event(db, "halt_cleared", previous=row["halted"], by="carry-repair")
+        lines.append(f"halt temizlendi (onceki: {row['halted']})")
+    return lines
 
 
 def close_trade(db, symbol, price, now_ms, reason):

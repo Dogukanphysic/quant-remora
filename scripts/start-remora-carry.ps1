@@ -34,6 +34,11 @@ try {
     $ok = ($LASTEXITCODE -eq 0)
     Pop-Location
     if (-not $ok) { throw "Kesif pozisyonlari kapatilamadi; carry botu baslatilmadi." }
+    Push-Location $root
+    & $PythonPath -m remora_bot carry-repair       # restores missing stops / clears a halt; no-op when clean
+    $ok = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    if (-not $ok) { throw "Carry kaydi onarilamadi; bot baslatilmadi (yukaridaki mesaja bakin)." }
     $p = Start-Process -FilePath $PythonPath -ArgumentList @("-u", "-m", "remora_bot", "run-carry") `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $root "state\remora-bot-carry-testnet.out.log") `

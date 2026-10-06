@@ -168,6 +168,26 @@ def carry_switch():
         return 1
 
 
+def carry_repair():
+    """Restore missing stops / record legs closed outside the bot, then clear the carry halt."""
+    from . import carry
+    if os.environ.get("REMORA_CARRY_CONFIRM") != CARRY_CONFIRM:
+        raise SystemExit("carry-repair requires REMORA_CARRY_CONFIRM set by the launcher")
+    client = TestnetClient()
+    try:
+        with bot.singleton():
+            db = carry.connect(carry.ledger_path("testnet"))
+            for line in carry.repair(db, client) or ["onarilacak bir sey yok"]:
+                print("  " + line)
+            return 0
+    except OSError:
+        print("NOT DONE: bot is running; stop it first")
+        return 1
+    except bot.Halt as exc:
+        print(f"NOT DONE (halt kept): {exc}")
+        return 1
+
+
 def run_carry(mode, poll_seconds):
     from . import carry
     if os.environ.get("REMORA_CARRY_CONFIRM") != CARRY_CONFIRM:
@@ -185,6 +205,7 @@ def main(argv=None):
     sub.add_parser("clear-halt")
     sub.add_parser("reset-demo")
     sub.add_parser("carry-switch")
+    sub.add_parser("carry-repair")
     rc = sub.add_parser("run-carry")
     rc.add_argument("--poll-seconds", type=float, default=30)
     sub.add_parser("carry-status")
@@ -208,6 +229,8 @@ def main(argv=None):
         return clear_halt("testnet")
     if args.cmd == "reset-demo":
         return reset_demo("testnet")
+    if args.cmd == "carry-repair":
+        return carry_repair()
     if args.cmd == "carry-switch":
         return carry_switch()
     if args.cmd == "run-carry":

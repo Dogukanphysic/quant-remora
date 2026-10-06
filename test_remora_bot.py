@@ -877,3 +877,65 @@ class AdaptiveCarry(unittest.TestCase):
         r = self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)  # same week, NULL notional
         self.assertEqual(len(self.client.posts), posts)
         self.assertIsNone(self.db.execute("SELECT notional FROM carry_targets LIMIT 1").fetchone()[0])
+
+
+class StopRestore(unittest.TestCase):
+    def setUp(self):
+        from remora_bot import carry
+        self.carry = carry
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db = carry.connect(Path(self.tmp.name) / "r.db")
+        self.client = CarryClient()
+        self.client.stop_status = {}
+        self.client.stop_order = lambda cid: dict(status=self.client.stop_status.get(cid, "CANCELED"), client_id=cid)
+        rates = {s: 0.0001 for s in carry.UNIVERSE}
+        rates.update(DOGEUSDT=0.0009, SOLUSDT=0.0005, ADAUSDT=-0.0004, LTCUSDT=-0.0002)
+        self.market = CarryMarket(rates)
+        self.ts = 1767571200000
+        self.carry.tick(self.db, self.client, self.market, self.ts + 60_000)
+        self.doge_stop = self.db.execute("SELECT stop_id FROM positions WHERE symbol='DOGEUSDT'").fetchone()[0]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def drop_stop(self):
+        self.client.stops.pop(self.doge_stop)
+
+    def test_cancelled_stop_is_restored_once_without_halting(self):
+        self.drop_stop()
+        self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
+        new = self.db.execute("SELECT stop_id, stop_price FROM positions WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertNotEqual(new[0], self.doge_stop)
+        self.assertIn(new[0], self.client.stops)
+        self.assertEqual(self.client.stop_sides[new[0]], ("BUY", Decimal(new[1])))
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+        self.client.stops.pop(new[0])                              # lost a second time -> halt
+        with self.assertRaises(bot.Halt):
+            self.carry.tick(self.db, self.client, self.market, self.ts + 7200_000)
+
+    def test_listing_glitch_keeps_the_live_stop_and_places_nothing(self):
+        self.drop_stop()
+        self.client.stop_status[self.doge_stop] = "NEW"            # direct query says it is live
+        before = set(self.client.stops)
+        self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
+        self.assertEqual(set(self.client.stops), before)
+        self.assertEqual(self.db.execute("SELECT stop_id FROM positions WHERE symbol='DOGEUSDT'").fetchone()[0],
+                         self.doge_stop)
+
+    def test_repair_records_leg_closed_outside_and_clears_halt(self):
+        bot.halt(self.db, "DOGEUSDT protective stop missing")
+        self.client.qty["DOGEUSDT"] = Decimal(0)                  # user closed it on the website
+        self.drop_stop()
+        lines = self.carry.repair(self.db, self.client, self.ts + 3600_000)
+        self.assertTrue(any("DOGEUSDT" in l for l in lines))
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+        row = self.db.execute("SELECT exit_reason FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual(row[0], "closed_outside_bot")
+        self.assertEqual(self.db.execute("SELECT phase FROM positions WHERE symbol='DOGEUSDT'").fetchone()[0], "flat")
+
+    def test_repair_keeps_halt_on_untracked_position(self):
+        bot.halt(self.db, "x")
+        self.client.qty["XRPUSDT"] = Decimal(5)
+        with self.assertRaises(bot.Halt):
+            self.carry.repair(self.db, self.client, self.ts + 3600_000)
+        self.assertEqual(self.db.execute("SELECT halted FROM bot").fetchone()[0], "x")
