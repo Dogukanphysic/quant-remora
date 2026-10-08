@@ -90,14 +90,47 @@ def _sign(phase):
     return {"long": 1, "short": -1}.get(phase, 0)
 
 
+ZERO_CONFIRM_TICKS = 10       # ~5 min of consistent "flat + stop still live" before believing it
+_zero_seen: dict[str, int] = {}
+
+
+def _stop_state(client, stop_id):
+    try:
+        return client.stop_order(stop_id).get("status")
+    except ApiError:
+        return None
+
+
 def verify(db, client, pos, now_ms):
     symbol = pos["symbol"]
     qty, _ = client.position(symbol)
+    if pos["phase"] in ("long", "short") and qty == 0:
+        qty, _ = client.position(symbol)                       # a flaky zero is re-read once
     orders = set(client.open_orders(symbol))
     if pos["phase"] in ("long", "short"):
         if qty == 0:
+            state = _stop_state(client, pos["stop_id"]) if pos["stop_id"] else None
+            if state in STOP_LIVE:
+                # Flat but our stop is still working: the stop did NOT fire. Either the position read
+                # was wrong (Demo glitch) or the leg was closed outside the bot. Never book it on one read.
+                n = _zero_seen.get(symbol, 0) + 1
+                _zero_seen[symbol] = n
+                bot.event(db, "position_zero_unconfirmed", symbol=symbol, stop_id=pos["stop_id"], seen=n)
+                db.commit()
+                if n < ZERO_CONFIRM_TICKS:
+                    return pos                                   # skip this leg this tick
+                try:
+                    client.cancel_stop(pos["stop_id"])
+                except ApiError as exc:
+                    if exc.code not in (-2011, -2013):
+                        raise
+                _zero_seen.pop(symbol, None)
+                close_trade(db, symbol, client.mark(symbol), now_ms, "closed_outside_bot")
+                return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
+            _zero_seen.pop(symbol, None)
             close_trade(db, symbol, Decimal(pos["stop_price"]), now_ms, "exchange_stop")
             return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
+        _zero_seen.pop(symbol, None)
         if qty != _sign(pos["phase"]) * Decimal(pos["qty"]):
             raise bot.Halt(f"{symbol} position mismatch: ledger {pos['phase']} {pos['qty']} exchange {qty}")
         if pos["stop_id"] not in orders:
@@ -154,6 +187,53 @@ def restore_stop(db, client, pos, qty, now_ms):
     return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
 
 
+def _own_stops(client, symbol):
+    prefix = f"rmb-c{symbol[:4].lower()}-"
+    return [o for o in client.open_orders(symbol) if o and o.startswith(prefix) and o.split("-")[2] in ("s", "r")]
+
+
+def _revert_false_close(db, client, symbol, qty, now_ms):
+    """Ledger says flat. If the exchange still holds the leg the ledger last closed, with that leg's own
+    stop still live, the close was booked from a wrong zero read: undo it. If the leg is gone but our
+    stop is still open, cancel the orphan stop. Anything else is left to verify() (which halts)."""
+    stops = _own_stops(client, symbol)
+    last = db.execute("SELECT * FROM trades WHERE symbol=? ORDER BY id DESC LIMIT 1", (symbol,)).fetchone()
+    if qty == 0:
+        for sid in stops:
+            client.cancel_stop(sid)
+        if stops:
+            with db:
+                bot.event(db, "orphan_stop_cancelled", symbol=symbol, stops=stops)
+            return f"{symbol}: sahipsiz stop iptal edildi"
+        return None
+    if not last or len(stops) != 1 or abs(Decimal(last["qty"])) != abs(qty) or \
+            (Decimal(last["qty"]) < 0) != (qty < 0) or last["exit_reason"] not in ("exchange_stop", "closed_outside_bot"):
+        return None
+    filled = None
+    for (payload,) in db.execute("SELECT payload FROM events WHERE kind='entry_filled' ORDER BY id DESC"):
+        e = json.loads(payload)
+        if e.get("symbol") == symbol:
+            filled = e
+            break
+    stop_price = (filled or {}).get("stop")
+    for (payload,) in db.execute("SELECT payload FROM events WHERE kind='stop_restore' ORDER BY id DESC"):
+        e = json.loads(payload)
+        if e.get("symbol") == symbol and e.get("new") == stops[0]:
+            stop_price = e.get("trigger")
+            break
+    if stop_price is None:
+        return None
+    phase = "short" if qty < 0 else "long"
+    with db:
+        db.execute("DELETE FROM trades WHERE id=?", (last["id"],))
+        db.execute("UPDATE positions SET phase=?, qty=?, entry_price=?, entry_bar=?, stop_id=?, stop_price=? "
+                   "WHERE symbol=?", (phase, str(abs(qty)), last["entry_price"], last["entry_bar"], stops[0],
+                                      str(stop_price), symbol))
+        bot.event(db, "false_close_reverted", symbol=symbol, trade_id=last["id"], pnl=last["gross_pnl"],
+                  reason=last["exit_reason"])
+    return f"{symbol}: yanlis kapanis kaydi geri alindi ({last['gross_pnl']} USDT silindi), pozisyon yeniden izleniyor"
+
+
 def repair(db, client, now_ms=None):
     """User-run (bot stopped): reconcile every leg with the exchange, restore missing stops, record legs
     closed outside the bot (manually or by a stop) at the current mark, then clear the halt.
@@ -170,18 +250,24 @@ def repair(db, client, now_ms=None):
             pos = db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
             if pos["pending_id"]:
                 raise bot.Halt(f"{s} order intent still unresolved; try again in a minute")
-        if pos["phase"] in ("long", "short"):
-            qty, _ = client.position(s)
-            if qty == 0:
-                stop = pos["stop_id"]
-                try:
-                    if stop:
-                        client.cancel_stop(stop)
-                except ApiError:
-                    pass
-                close_trade(db, s, client.mark(s), now_ms, "closed_outside_bot")
-                lines.append(f"{s}: borsada kapali bulundu, kayda islendi")
-                continue
+        qty, _ = client.position(s)
+        if qty == 0:
+            qty, _ = client.position(s)                          # never act on a single zero read
+        if pos["phase"] in ("long", "short") and qty == 0:
+            stop = pos["stop_id"]
+            try:
+                if stop:
+                    client.cancel_stop(stop)
+            except ApiError:
+                pass
+            close_trade(db, s, client.mark(s), now_ms, "closed_outside_bot")
+            lines.append(f"{s}: borsada kapali bulundu, kayda islendi")
+            continue
+        if pos["phase"] == "flat":
+            line = _revert_false_close(db, client, s, qty, now_ms)
+            if line:
+                lines.append(line)
+                pos = db.execute("SELECT * FROM positions WHERE symbol=?", (s,)).fetchone()
         before = pos["stop_id"]
         pos = verify(db, client, pos, now_ms)
         if pos["phase"] != "flat" and pos["stop_id"] != before:
@@ -393,6 +479,8 @@ def tick(db, client, market, now_ms=None):
     for s in UNIVERSE:
         if s not in result:
             positions[s] = verify(db, client, positions[s], now_ms)
+            if _zero_seen.get(s):
+                result[s] = "position_unconfirmed"       # no orders on a leg whose read is in doubt
     ts = ensure_targets(db, market, now_ms, blocked)
     if ts is None:
         ts = db.execute("SELECT MAX(rebalance_ts) FROM carry_targets").fetchone()[0]

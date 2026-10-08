@@ -678,6 +678,9 @@ class CarryClient(UniverseClient):
         self.stops[cid] = s
         self.stop_sides = getattr(self, "stop_sides", {}) | {cid: (side, trigger)}
 
+    def stop_order(self, cid):
+        return dict(status="NEW" if cid in self.stops else "FINISHED", client_id=cid)
+
 
 class CarryMarket:
     def __init__(self, rates):
@@ -883,6 +886,7 @@ class StopRestore(unittest.TestCase):
     def setUp(self):
         from remora_bot import carry
         self.carry = carry
+        carry._zero_seen.clear()
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = carry.connect(Path(self.tmp.name) / "r.db")
         self.client = CarryClient()
@@ -932,6 +936,59 @@ class StopRestore(unittest.TestCase):
         row = self.db.execute("SELECT exit_reason FROM trades WHERE symbol='DOGEUSDT'").fetchone()
         self.assertEqual(row[0], "closed_outside_bot")
         self.assertEqual(self.db.execute("SELECT phase FROM positions WHERE symbol='DOGEUSDT'").fetchone()[0], "flat")
+
+    def test_zero_read_with_live_stop_is_not_booked_as_a_stop_hit(self):
+        real = self.client.position
+        self.client.position = lambda s: (Decimal(0), Decimal(0)) if s == "DOGEUSDT" else real(s)
+        self.client.stop_status[self.doge_stop] = "NEW"            # the stop never fired
+        posts = len(self.client.posts)
+        r = self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
+        self.assertEqual(r["DOGEUSDT"], "position_unconfirmed")
+        self.assertIsNone(self.db.execute("SELECT 1 FROM trades").fetchone())
+        self.assertEqual(self.db.execute("SELECT phase FROM positions WHERE symbol='DOGEUSDT'").fetchone()[0], "short")
+        self.assertEqual(len(self.client.posts), posts)
+        self.client.position = real                                # glitch over: normal again
+        r = self.carry.tick(self.db, self.client, self.market, self.ts + 3660_000)
+        self.assertEqual(r["DOGEUSDT"], "short")
+        self.assertEqual(self.carry._zero_seen, {})
+
+    def test_persistent_zero_with_live_stop_is_closed_outside_after_confirmation(self):
+        self.client.qty["DOGEUSDT"] = Decimal(0)                  # really closed on the website
+        self.client.stop_status[self.doge_stop] = "NEW"
+        for i in range(self.carry.ZERO_CONFIRM_TICKS - 1):
+            self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000 + i * 30_000)
+            self.assertIsNone(self.db.execute("SELECT 1 FROM trades").fetchone())
+        self.carry.tick(self.db, self.client, self.market, self.ts + 7200_000)
+        row = self.db.execute("SELECT exit_reason FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual(row[0], "closed_outside_bot")
+        self.assertNotIn(self.doge_stop, self.client.stops)        # its stop was cancelled
+
+    def test_repair_reverts_a_false_close_when_the_leg_is_still_open(self):
+        qty = self.client.qty["DOGEUSDT"]
+        pos = self.db.execute("SELECT * FROM positions WHERE symbol='DOGEUSDT'").fetchone()
+        self.carry.close_trade(self.db, "DOGEUSDT", Decimal(pos["stop_price"]), self.ts + 3600_000, "exchange_stop")
+        bot.halt(self.db, f"DOGEUSDT untracked open orders ['{self.doge_stop}']")
+        lines = self.carry.repair(self.db, self.client, self.ts + 3700_000)
+        self.assertTrue(any("geri alindi" in l for l in lines))
+        self.assertIsNone(self.db.execute("SELECT 1 FROM trades WHERE symbol='DOGEUSDT'").fetchone())
+        back = self.db.execute("SELECT * FROM positions WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual((back["phase"], Decimal(back["qty"]), back["stop_id"], back["stop_price"],
+                          back["entry_price"], back["entry_bar"]),
+                         ("short", abs(qty), self.doge_stop, pos["stop_price"], pos["entry_price"], pos["entry_bar"]))
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+        r = self.carry.tick(self.db, self.client, self.market, self.ts + 3800_000)
+        self.assertEqual(r["DOGEUSDT"], "short")
+
+    def test_repair_cancels_orphan_stop_of_a_leg_that_is_gone(self):
+        pos = self.db.execute("SELECT * FROM positions WHERE symbol='DOGEUSDT'").fetchone()
+        self.carry.close_trade(self.db, "DOGEUSDT", Decimal(pos["stop_price"]), self.ts + 3600_000, "exchange_stop")
+        self.client.qty["DOGEUSDT"] = Decimal(0)
+        bot.halt(self.db, "x")
+        lines = self.carry.repair(self.db, self.client, self.ts + 3700_000)
+        self.assertTrue(any("sahipsiz stop" in l for l in lines))
+        self.assertNotIn(self.doge_stop, self.client.stops)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)   # real close kept
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
 
     def test_repair_keeps_halt_on_untracked_position(self):
         bot.halt(self.db, "x")
