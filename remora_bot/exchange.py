@@ -215,6 +215,15 @@ class TestnetClient:
         rows = self.request("GET", "/fapi/v2/positionRisk", {}, True)
         return {r["symbol"]: Decimal(r["positionAmt"]) for r in rows if Decimal(r["positionAmt"]) != 0}
 
+    def user_trades(self, symbol, start_ms, end_ms=None):
+        """Account fills (incl. stop, liquidation and ADL closes) for one symbol, oldest first."""
+        params = {"symbol": symbol, "startTime": int(start_ms), "limit": 1000}
+        if end_ms:
+            params["endTime"] = int(end_ms)
+        rows = self.request("GET", "/fapi/v1/userTrades", params, True)
+        return [dict(time=r["time"], side=r["side"], price=Decimal(r["price"]), qty=Decimal(r["qty"]))
+                for r in sorted(rows, key=lambda r: (r["time"], r["id"]))]
+
     def stop_order(self, client_id):
         row = self.request("GET", "/fapi/v1/algoOrder", {"clientAlgoId": client_id}, True)
         return dict(status=row.get("algoStatus"), client_id=row.get("clientAlgoId"))

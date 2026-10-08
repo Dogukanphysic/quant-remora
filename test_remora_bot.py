@@ -681,6 +681,10 @@ class CarryClient(UniverseClient):
     def stop_order(self, cid):
         return dict(status="NEW" if cid in self.stops else "FINISHED", client_id=cid)
 
+    def user_trades(self, s, start_ms, end_ms=None):
+        return [f for f in getattr(self, "fills", []) if f["symbol"] == s and start_ms <= f["time"]
+                and (end_ms is None or f["time"] <= end_ms)]
+
 
 class CarryMarket:
     def __init__(self, rates):
@@ -989,6 +993,41 @@ class StopRestore(unittest.TestCase):
         self.assertNotIn(self.doge_stop, self.client.stops)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM trades").fetchone()[0], 1)   # real close kept
         self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+
+    def test_stop_close_is_booked_at_the_real_fill_price(self):
+        import time as _t
+        now = int(_t.time() * 1000)
+        self.client.qty["DOGEUSDT"] = Decimal(0)                  # closed by ADL, not by our stop
+        self.client.fills = [dict(symbol="DOGEUSDT", time=now + 1000, side="BUY", price=Decimal("90"), qty=Decimal(2)),
+                             dict(symbol="DOGEUSDT", time=now + 2000, side="BUY", price=Decimal("80"), qty=Decimal(3))]
+        self.client.stops.pop(self.doge_stop)
+        self.carry.tick(self.db, self.client, self.market, now + 3000)
+        row = self.db.execute("SELECT exit_reason, exit_price, gross_pnl FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual(row[0], "exchange_stop")
+        self.assertEqual(Decimal(row[1]), Decimal(84))             # (2*90 + 3*80) / 5
+        self.assertEqual(Decimal(row[2]), Decimal(80))             # short 5 from 100 -> 84
+
+    def test_stop_close_without_fills_falls_back_to_stop_price(self):
+        self.client.qty["DOGEUSDT"] = Decimal(0)
+        self.client.stops.pop(self.doge_stop)
+        self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
+        row = self.db.execute("SELECT exit_price FROM trades WHERE symbol='DOGEUSDT'").fetchone()
+        self.assertEqual(Decimal(row[0]), Decimal("115.0"))
+        self.assertTrue(self.db.execute("SELECT 1 FROM events WHERE kind='exit_price_estimated'").fetchone())
+
+    def test_repair_reprices_an_earlier_assumed_close_once(self):
+        import time as _t
+        pos = self.db.execute("SELECT * FROM positions WHERE symbol='DOGEUSDT'").fetchone()
+        self.client.qty["DOGEUSDT"] = Decimal(0)
+        self.client.stops.pop(self.doge_stop)
+        self.carry.close_trade(self.db, "DOGEUSDT", Decimal(pos["stop_price"]), int(_t.time() * 1000) + 5000,
+                               "exchange_stop")                      # booked -75 at the assumed stop
+        self.client.fills = [dict(symbol="DOGEUSDT", time=int(_t.time() * 1000) + 1000, side="BUY",
+                                  price=Decimal("88"), qty=Decimal(5))]
+        lines = self.carry.repair(self.db, self.client, self.ts + 3700_000)
+        self.assertTrue(any("gercek fiyatla" in l for l in lines))
+        self.assertEqual(Decimal(self.db.execute("SELECT gross_pnl FROM trades").fetchone()[0]), Decimal(60))
+        self.assertFalse(any("gercek fiyatla" in l for l in self.carry.repair(self.db, self.client)))
 
     def test_repair_keeps_halt_on_untracked_position(self):
         bot.halt(self.db, "x")

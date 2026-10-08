@@ -125,10 +125,10 @@ def verify(db, client, pos, now_ms):
                     if exc.code not in (-2011, -2013):
                         raise
                 _zero_seen.pop(symbol, None)
-                close_trade(db, symbol, client.mark(symbol), now_ms, "closed_outside_bot")
+                close_outside(db, client, symbol, now_ms, "closed_outside_bot", client.mark(symbol))
                 return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
             _zero_seen.pop(symbol, None)
-            close_trade(db, symbol, Decimal(pos["stop_price"]), now_ms, "exchange_stop")
+            close_outside(db, client, symbol, now_ms, "exchange_stop", Decimal(pos["stop_price"]))
             return db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
         _zero_seen.pop(symbol, None)
         if qty != _sign(pos["phase"]) * Decimal(pos["qty"]):
@@ -260,7 +260,7 @@ def repair(db, client, now_ms=None):
                     client.cancel_stop(stop)
             except ApiError:
                 pass
-            close_trade(db, s, client.mark(s), now_ms, "closed_outside_bot")
+            close_outside(db, client, s, now_ms, "closed_outside_bot", client.mark(s))
             lines.append(f"{s}: borsada kapali bulundu, kayda islendi")
             continue
         if pos["phase"] == "flat":
@@ -272,11 +272,79 @@ def repair(db, client, now_ms=None):
         pos = verify(db, client, pos, now_ms)
         if pos["phase"] != "flat" and pos["stop_id"] != before:
             lines.append(f"{s}: eksik stop yeniden konuldu ({pos['stop_price']})")
+    lines += reprice_closes(db, client)
     if row["halted"]:
         with db:
             db.execute("UPDATE bot SET halted=NULL WHERE id=1")
             bot.event(db, "halt_cleared", previous=row["halted"], by="carry-repair")
         lines.append(f"halt temizlendi (onceki: {row['halted']})")
+    return lines
+
+
+def _entry_seen_ms(db, symbol, before_ms=None):
+    """When the bot recorded the current/last leg's entry fill (fills after this belong to its close)."""
+    for ts, payload in db.execute("SELECT ts, payload FROM events WHERE kind='entry_filled' ORDER BY id DESC"):
+        if json.loads(payload).get("symbol") == symbol and (before_ms is None or ts <= before_ms):
+            return ts
+    return None
+
+
+USER_TRADES_SPAN_MS = 7 * 86400_000 - 60_000
+
+
+def actual_exit(client, symbol, phase, qty, since_ms, until_ms=None):
+    """Volume-weighted price of the closing-side fills after the entry (stop, ADL, liquidation or a
+    manual close all show up here). None when the fills cannot account for the whole leg."""
+    if since_ms is None or not hasattr(client, "user_trades"):
+        return None
+    end = until_ms or int(time.time() * 1000)
+    since_ms = max(since_ms, end - USER_TRADES_SPAN_MS)   # the exchange serves at most 7 days per query
+    try:
+        fills = client.user_trades(symbol, since_ms, end)
+    except (ApiError, TransportError):
+        return None
+    side, left, cost = ("BUY" if phase == "short" else "SELL"), Decimal(qty), Decimal(0)
+    for f in fills:
+        if f["side"] != side or left <= 0:
+            continue
+        take = min(left, f["qty"])
+        cost += take * f["price"]
+        left -= take
+    return (cost / Decimal(qty)) if left <= 0 else None
+
+
+def close_outside(db, client, symbol, now_ms, reason, fallback):
+    """Book a leg the exchange closed (or someone else did) at its real fill price when available."""
+    pos = db.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
+    price = actual_exit(client, symbol, pos["phase"], pos["qty"], _entry_seen_ms(db, symbol), now_ms)
+    if price is None:
+        bot.event(db, "exit_price_estimated", symbol=symbol, reason=reason, price=fallback)
+        price = fallback
+    close_trade(db, symbol, price, now_ms, reason)
+
+
+def reprice_closes(db, client):
+    """Re-price earlier stop/outside closes that were booked at an assumed price (stop or mark)."""
+    done = {json.loads(p).get("trade_id") for (p,) in db.execute("SELECT payload FROM events WHERE kind='exit_repriced'")}
+    lines = []
+    for t in db.execute("SELECT * FROM trades WHERE exit_reason IN ('exchange_stop','closed_outside_bot') "
+                        "ORDER BY id").fetchall():
+        if t["id"] in done:
+            continue
+        qty = Decimal(t["qty"])
+        phase = "short" if qty < 0 else "long"
+        price = actual_exit(client, t["symbol"], phase, abs(qty), _entry_seen_ms(db, t["symbol"], t["exit_ms"]),
+                            t["exit_ms"])
+        if price is None:
+            continue
+        pnl = (price - Decimal(t["entry_price"])) * qty
+        with db:
+            db.execute("UPDATE trades SET exit_price=?, gross_pnl=? WHERE id=?", (str(price), str(pnl), t["id"]))
+            bot.event(db, "exit_repriced", trade_id=t["id"], symbol=t["symbol"], old_price=t["exit_price"],
+                      new_price=price, old_pnl=t["gross_pnl"], new_pnl=pnl)
+        if Decimal(t["gross_pnl"]) != pnl:
+            lines.append(f"{t['symbol']}: kapanis gercek fiyatla duzeltildi {t['exit_price']} -> {price:.7f}, "
+                         f"PnL {Decimal(t['gross_pnl']):.2f} -> {pnl:.2f} USDT")
     return lines
 
 
