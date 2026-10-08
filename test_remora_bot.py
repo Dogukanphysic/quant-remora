@@ -1029,6 +1029,21 @@ class StopRestore(unittest.TestCase):
         self.assertEqual(Decimal(self.db.execute("SELECT gross_pnl FROM trades").fetchone()[0]), Decimal(60))
         self.assertFalse(any("gercek fiyatla" in l for l in self.carry.repair(self.db, self.client)))
 
+    def test_real_client_allows_every_read_the_carry_bot_uses(self):
+        from remora_bot.exchange import TestnetClient
+        for path in ("/fapi/v1/userTrades", "/fapi/v1/algoOrder", "/fapi/v2/positionRisk", "/fapi/v1/openAlgoOrders"):
+            self.assertIn(("GET", path), TestnetClient.ALLOWED)
+
+    def test_fill_lookup_failure_falls_back_instead_of_crashing(self):
+        def boom(*a):
+            raise ValueError("operation not allowed")
+        self.client.user_trades = boom
+        self.client.qty["DOGEUSDT"] = Decimal(0)
+        self.client.stops.pop(self.doge_stop)
+        self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
+        self.assertEqual(Decimal(self.db.execute("SELECT exit_price FROM trades").fetchone()[0]), Decimal("115.0"))
+        self.carry.repair(self.db, self.client)
+
     def test_repair_keeps_halt_on_untracked_position(self):
         bot.halt(self.db, "x")
         self.client.qty["XRPUSDT"] = Decimal(5)

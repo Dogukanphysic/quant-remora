@@ -301,7 +301,7 @@ def actual_exit(client, symbol, phase, qty, since_ms, until_ms=None):
     since_ms = max(since_ms, end - USER_TRADES_SPAN_MS)   # the exchange serves at most 7 days per query
     try:
         fills = client.user_trades(symbol, since_ms, end)
-    except (ApiError, TransportError):
+    except Exception:                       # pricing is best effort; it must never block trading or repair
         return None
     side, left, cost = ("BUY" if phase == "short" else "SELL"), Decimal(qty), Decimal(0)
     for f in fills:
