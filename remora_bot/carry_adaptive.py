@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from decimal import Decimal
 
 CONFIGS = ((1, 2), (1, 3), (3, 2), (3, 3), (7, 2), (7, 3))     # (funding lookback days, coins per side)
 WINDOW_WEEKS = 26
 SMOOTH = 0.5
-GROSS_USDT = Decimal("2000")
+def _gross():
+    value = Decimal(os.environ.get("REMORA_CARRY_GROSS_USDT", "4000"))
+    if not Decimal("500") <= value <= Decimal("10000"):
+        raise SystemExit("REMORA_CARRY_GROSS_USDT must be between 500 and 10000")
+    return value
+
+
+GROSS_USDT = _gross()          # total long + short notional; leverage stays 2x isolated (bot.startup)
 MIN_LEG_USDT = Decimal("60")
 DEFAULT_COST = 0.0007          # per unit traded until enough live fills: taker 0.05% + slippage allowance
 TAKER_FEE = 0.0005

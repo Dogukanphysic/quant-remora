@@ -127,14 +127,15 @@ def ledger_equity(db) -> Decimal:
     return ALLOCATION_USDT * len(SYMBOLS) + total
 
 
-def update_risk(db, client, now_ms, own_pnl=False):
-    """own_pnl: judge limits on this ledger's realized PnL, not the shared account wallet."""
+def update_risk(db, client, now_ms, own_pnl=False, total=None):
+    """own_pnl: judge limits on this ledger's realized PnL, not the shared account wallet.
+    total: the exposure the loss limits are a fraction of (default: this bot's allocation)."""
     wallet = ledger_equity(db) if own_pnl else client.wallet()[0]
     day = time.strftime("%Y-%m-%d", time.gmtime(now_ms / 1000))
     row = db.execute("SELECT * FROM bot WHERE id=1").fetchone()
     day_start = Decimal(row["day_start_wallet"]) if row["day"] == day else wallet
     peak = max(Decimal(row["peak_wallet"] or wallet), wallet)
-    total = ALLOCATION_USDT * len(SYMBOLS)
+    total = total or ALLOCATION_USDT * len(SYMBOLS)
     blocked = None
     if day_start - wallet >= total * DAILY_LOSS_LIMIT:
         blocked = "daily_loss_limit"

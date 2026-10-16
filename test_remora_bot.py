@@ -872,9 +872,10 @@ class AdaptiveCarry(unittest.TestCase):
         self.assertEqual(self.ca.learned_cost([(100, 100.1)] * 4), (self.ca.DEFAULT_COST, 4))
         cost, n = self.ca.learned_cost([(100, 100.1)] * 6)
         self.assertAlmostEqual(cost, 0.0005 + 0.001)
-        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1950)), 1.0)
-        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1890)), 0.5)
-        self.assertEqual(self.ca.drawdown_scale(Decimal(2000), Decimal(1790)), 0.25)
+        g = self.ca.GROSS_USDT                                   # drawdown is a fraction of the book
+        self.assertEqual(self.ca.drawdown_scale(g, g * Decimal("0.975")), 1.0)
+        self.assertEqual(self.ca.drawdown_scale(g, g * Decimal("0.945")), 0.5)
+        self.assertEqual(self.ca.drawdown_scale(g, g * Decimal("0.895")), 0.25)
 
     def test_fixed_legacy_week_keeps_running_after_switch(self):
         self.carry.ADAPTIVE = False
@@ -884,6 +885,40 @@ class AdaptiveCarry(unittest.TestCase):
         r = self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)  # same week, NULL notional
         self.assertEqual(len(self.client.posts), posts)
         self.assertIsNone(self.db.execute("SELECT notional FROM carry_targets LIMIT 1").fetchone()[0])
+
+
+class CarrySizing(unittest.TestCase):
+    def test_default_gross_is_4000_and_bad_values_are_refused(self):
+        from remora_bot import carry_adaptive
+        self.assertEqual(carry_adaptive.GROSS_USDT, Decimal("4000"))
+        import os
+        old = os.environ.get("REMORA_CARRY_GROSS_USDT")
+        try:
+            os.environ["REMORA_CARRY_GROSS_USDT"] = "50000"
+            with self.assertRaises(SystemExit):
+                carry_adaptive._gross()
+            os.environ["REMORA_CARRY_GROSS_USDT"] = "3000"
+            self.assertEqual(carry_adaptive._gross(), Decimal("3000"))
+        finally:
+            os.environ.pop("REMORA_CARRY_GROSS_USDT", None) if old is None else os.environ.update(
+                REMORA_CARRY_GROSS_USDT=old)
+
+    def test_loss_limits_scale_with_the_book(self):
+        from remora_bot import carry
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        try:
+            db = carry.connect(Path(tmp.name) / "s.db")
+            now = 1767571200000
+            bot.update_risk(db, None, now, True, total=Decimal("4000"))
+            db.execute("INSERT INTO trades(symbol, entry_bar, entry_price, exit_ms, exit_price, qty, exit_reason, "
+                       "gross_pnl) VALUES ('DOTUSDT', 0, '1', 0, '1', '1', 'x', '-100')")
+            db.commit()
+            # -100 is 5% of a 2000 book (daily limit 3% -> blocked) but only 2.5% of a 4000 book
+            self.assertIsNone(bot.update_risk(db, None, now + 1000, True, total=Decimal("4000")))
+            self.assertEqual(bot.update_risk(db, None, now + 2000, True), "daily_loss_limit")
+        finally:
+            db.close()
+            tmp.cleanup()
 
 
 class StopRestore(unittest.TestCase):

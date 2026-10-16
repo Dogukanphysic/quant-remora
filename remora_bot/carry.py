@@ -537,7 +537,8 @@ def tick(db, client, market, now_ms=None):
     now_ms = now_ms or int(time.time() * 1000)
     if db.execute("SELECT halted FROM bot WHERE id=1").fetchone()["halted"]:
         return {"halted": True}
-    blocked = bot.update_risk(db, client, now_ms, universe.shared_account())
+    blocked = bot.update_risk(db, client, now_ms, universe.shared_account(),
+                              total=carry_adaptive.GROSS_USDT if ADAPTIVE else None)
     positions = {r["symbol"]: r for r in db.execute("SELECT * FROM positions")}
     result = {}
     for s in UNIVERSE:                           # pending intents: query only
