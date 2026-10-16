@@ -90,6 +90,8 @@ def _sign(phase):
     return {"long": 1, "short": -1}.get(phase, 0)
 
 
+OWN_PREFIX = "rmb-"            # every client id this project sends starts with this
+_foreign: dict[str, Decimal] = {}      # coin -> qty another bot holds while our ledger is flat there
 ZERO_CONFIRM_TICKS = 10       # ~5 min of consistent "flat + stop still live" before believing it
 _zero_seen: dict[str, int] = {}
 
@@ -145,8 +147,21 @@ def verify(db, client, pos, now_ms):
                 if pos["stop_id"] not in orders:
                     raise bot.Halt(f"{symbol} protective stop missing after restore")
         orders.discard(pos["stop_id"])
-    elif qty != 0:
-        raise bot.Halt(f"{symbol} untracked exchange position {qty}")
+    elif qty != 0 or orders:
+        own = sorted(o for o in orders if o and o.startswith(OWN_PREFIX))
+        if own:
+            raise bot.Halt(f"{symbol} untracked own orders {own[:3]} while the ledger is flat")
+        # Another bot on the shared one-way account holds this coin: positions would merge, so this bot
+        # stays out of it (no entries) until it is gone. Our own legs are never affected by this branch.
+        if symbol not in _foreign:
+            bot.event(db, "foreign_position", symbol=symbol, qty=qty, orders=sorted(orders)[:3])
+            db.commit()
+        _foreign[symbol] = qty
+        return pos
+    elif symbol in _foreign:
+        del _foreign[symbol]
+        bot.event(db, "foreign_cleared", symbol=symbol)
+        db.commit()
     if orders:
         raise bot.Halt(f"{symbol} untracked open orders {sorted(orders)[:3]}")
     return pos
@@ -550,6 +565,8 @@ def tick(db, client, market, now_ms=None):
             positions[s] = verify(db, client, positions[s], now_ms)
             if _zero_seen.get(s):
                 result[s] = "position_unconfirmed"       # no orders on a leg whose read is in doubt
+            elif s in _foreign:
+                result[s] = "foreign_position"           # another bot's coin right now: stay out
     ts = ensure_targets(db, market, now_ms, blocked)
     if ts is None:
         ts = db.execute("SELECT MAX(rebalance_ts) FROM carry_targets").fetchone()[0]
@@ -606,7 +623,8 @@ def status(mode):
                 positions=[dict(r) for r in db.execute("SELECT symbol, phase, qty, entry_price, stop_price, pending_id "
                                                        "FROM positions WHERE symbol IN (%s)" % ",".join("?" * len(UNIVERSE)),
                                                        UNIVERSE)],
-                trades=trades, total_gross_pnl=str(total))
+                trades=trades, total_gross_pnl=str(total),
+                foreign={s: str(q) for s, q in _foreign.items()})
 
 
 def _model_status(db):

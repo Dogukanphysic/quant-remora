@@ -750,10 +750,33 @@ class Carry(unittest.TestCase):
         self.assertEqual(row[0], "exchange_stop")
         self.assertLess(Decimal(row[1]), 0)                      # short stopped above entry loses
 
-    def test_untracked_position_halts(self):
-        self.client.qty["XRPUSDT"] = Decimal(3)
+    def test_another_bots_coin_is_skipped_not_halted(self):
+        self.carry._foreign.clear()
+        self.client.qty["DOGEUSDT"] = Decimal(-3)                 # other bot shorted a coin we would trade
+        self.client.stops["qftp-doge-stop"] = "DOGEUSDT"
+        r = self.tick(self.ts + 60_000)
+        self.assertEqual(r["DOGEUSDT"], "foreign_position")
+        self.assertEqual(self.client.qty["DOGEUSDT"], -3)         # we placed nothing there
+        self.assertFalse(any("cdoge" in c for c in self.client.posts))
+        self.assertEqual(r["ADAUSDT"], "entry")                   # the rest of the book still trades
+        self.client.qty["DOGEUSDT"] = Decimal(0)                  # other bot left: free again
+        self.client.stops.pop("qftp-doge-stop")
+        r = self.tick(self.ts + 120_000)
+        self.assertNotIn("DOGEUSDT", self.carry._foreign)
+        self.assertEqual(r["DOGEUSDT"], "entry")
+
+    def test_own_orders_on_a_flat_coin_still_halt(self):
+        self.carry._foreign.clear()
+        self.client.stops["rmb-cxrpu-s-1-abc"] = "XRPUSDT"
         with self.assertRaises(bot.Halt):
             self.tick(self.ts + 60_000)
+
+    def test_foreign_order_on_our_open_leg_still_halts(self):
+        self.carry._foreign.clear()
+        self.tick(self.ts + 60_000)
+        self.client.stops["qftp-doge-x"] = "DOGEUSDT"
+        with self.assertRaises(bot.Halt):
+            self.tick(self.ts + 3600_000)
 
     def test_late_first_start_joins_current_week_but_later_weeks_are_not_chased(self):
         r = self.tick(self.ts + 3 * 86400_000)                    # Thursday, fresh ledger
@@ -926,6 +949,7 @@ class StopRestore(unittest.TestCase):
         from remora_bot import carry
         self.carry = carry
         carry._zero_seen.clear()
+        carry._foreign.clear()
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = carry.connect(Path(self.tmp.name) / "r.db")
         self.client = CarryClient()
@@ -1079,9 +1103,16 @@ class StopRestore(unittest.TestCase):
         self.assertEqual(Decimal(self.db.execute("SELECT exit_price FROM trades").fetchone()[0]), Decimal("115.0"))
         self.carry.repair(self.db, self.client)
 
-    def test_repair_keeps_halt_on_untracked_position(self):
-        bot.halt(self.db, "x")
+    def test_repair_clears_a_halt_caused_by_another_bots_coin(self):
+        bot.halt(self.db, "XRPUSDT untracked exchange position 5")
         self.client.qty["XRPUSDT"] = Decimal(5)
+        self.carry.repair(self.db, self.client, self.ts + 3600_000)
+        self.assertIsNone(self.db.execute("SELECT halted FROM bot").fetchone()[0])
+        self.assertIn("XRPUSDT", self.carry._foreign)
+
+    def test_repair_keeps_halt_on_mismatched_own_leg(self):
+        bot.halt(self.db, "x")
+        self.client.qty["DOGEUSDT"] = Decimal(-2)                 # our short is -5 in the ledger
         with self.assertRaises(bot.Halt):
             self.carry.repair(self.db, self.client, self.ts + 3600_000)
         self.assertEqual(self.db.execute("SELECT halted FROM bot").fetchone()[0], "x")
