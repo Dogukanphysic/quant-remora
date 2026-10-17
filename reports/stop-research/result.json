@@ -1,0 +1,152 @@
+{
+  "doc": "Does the carry bot's protective stop help? Walk-forward on universe b, same book as the live bot.\n\nPre-registered (written before any result was seen):\n  candidates  : stop distance d in {none, 10%, 15% (live), 20%, 25%, 30%} from the weekly entry price\n  book        : exactly adaptive_carry_research.py (live carry_adaptive functions, weights learned from the\n                no-stop config simulation, as live)\n  stop model  : 15m bars; long stopped when low <= entry*(1-d), short when high >= entry*(1+d); fill at\n                the stop level, or at the bar open if the bar gaps through it; funding counted only until\n                the stop; the leg stays flat until the next Monday; the exit costs one more turnover\n  cost        : 0.002 per unit traded (the bot's live learned cost)\n  split       : development = weeks before 2025-09-01, holdout = from 2025-09-01\n  decision    : pick the candidate with the best development Sharpe. Adopt it live only if its holdout\n                Sharpe >= the 15% stop's holdout Sharpe AND its holdout max drawdown is no more than\n                2 percentage points worse. Otherwise the live 15% stop stays.\n",
+  "none": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 79.1,
+      "sharpe": 1.68,
+      "max_dd_pct": -14.1,
+      "positive_weeks": 61
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 53.7,
+      "sharpe": 1.91,
+      "max_dd_pct": -14.1,
+      "positive_weeks": 29
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 25.4,
+      "sharpe": 1.42,
+      "max_dd_pct": -10.8,
+      "positive_weeks": 32
+    },
+    "stops_hit": 0
+  },
+  "10%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 43.5,
+      "sharpe": 0.79,
+      "max_dd_pct": -33.4,
+      "positive_weeks": 53
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 35.7,
+      "sharpe": 1.09,
+      "max_dd_pct": -16.5,
+      "positive_weeks": 27
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 7.9,
+      "sharpe": 0.37,
+      "max_dd_pct": -26.1,
+      "positive_weeks": 26
+    },
+    "stops_hit": 269
+  },
+  "15%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 66.3,
+      "sharpe": 1.26,
+      "max_dd_pct": -28.1,
+      "positive_weeks": 61
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 53.2,
+      "sharpe": 1.74,
+      "max_dd_pct": -15.2,
+      "positive_weeks": 31
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 13.1,
+      "sharpe": 0.62,
+      "max_dd_pct": -23.2,
+      "positive_weeks": 30
+    },
+    "stops_hit": 143
+  },
+  "20%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 65.9,
+      "sharpe": 1.32,
+      "max_dd_pct": -21.3,
+      "positive_weeks": 60
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 45.7,
+      "sharpe": 1.53,
+      "max_dd_pct": -16.8,
+      "positive_weeks": 28
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 20.2,
+      "sharpe": 1.06,
+      "max_dd_pct": -17.3,
+      "positive_weeks": 32
+    },
+    "stops_hit": 74
+  },
+  "25%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 57.3,
+      "sharpe": 1.19,
+      "max_dd_pct": -16.2,
+      "positive_weeks": 58
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 41.3,
+      "sharpe": 1.43,
+      "max_dd_pct": -14.0,
+      "positive_weeks": 27
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 16.1,
+      "sharpe": 0.88,
+      "max_dd_pct": -14.4,
+      "positive_weeks": 31
+    },
+    "stops_hit": 45
+  },
+  "30%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 71.6,
+      "sharpe": 1.52,
+      "max_dd_pct": -12.6,
+      "positive_weeks": 59
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 50.2,
+      "sharpe": 1.78,
+      "max_dd_pct": -12.6,
+      "positive_weeks": 29
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 21.4,
+      "sharpe": 1.21,
+      "max_dd_pct": -10.8,
+      "positive_weeks": 30
+    },
+    "stops_hit": 23
+  },
+  "decision": {
+    "best_on_dev": "none",
+    "adopt": true,
+    "live_stays": null
+  }
+}

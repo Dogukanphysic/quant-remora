@@ -30,7 +30,7 @@ MAX_LATE_MS = 24 * 3600_000               # a missed rebalance is skipped, never
 # ...except the very first one: a fresh ledger joins the current week's book immediately (user choice,
 # 2026-09-29) using that Monday's signal; the entry window then runs from when the book was set.
 LEG_NOTIONAL = (Decimal("1000") / K).quantize(Decimal("1"))
-STOP_DISTANCE = Decimal("0.15")
+STOP_DISTANCE = Decimal("0.30")    # catastrophe stop only; 15% cut the edge (reports/stop-research)
 POLICY = f"remora-funding-carry-v1-{universe.name()}"     # unchanged by adaptive mode: keeps client ids stable
 # Adaptive (self-updating) mode: see carry_adaptive.py. Off -> the single fixed config above.
 ADAPTIVE = os.environ.get("REMORA_CARRY_ADAPTIVE") == "true"

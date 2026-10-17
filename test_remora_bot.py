@@ -721,8 +721,8 @@ class Carry(unittest.TestCase):
         self.assertEqual(self.client.qty["DOGEUSDT"], -5)       # 500 USDT / 100
         self.assertEqual(self.client.qty["ADAUSDT"], 5)
         sides = {cid.split("-")[1]: v for cid, v in self.client.stop_sides.items()}
-        self.assertEqual(sides["cdoge"], ("BUY", Decimal("115.0")))
-        self.assertEqual(sides["cadau"], ("SELL", Decimal("85.0")))
+        self.assertEqual(sides["cdoge"], ("BUY", Decimal("130.0")))
+        self.assertEqual(sides["cadau"], ("SELL", Decimal("70.0")))
         posts = len(self.client.posts)
         self.tick(self.ts + 120_000)                              # same week: nothing re-sent
         self.assertEqual(len(self.client.posts), posts)
@@ -1071,7 +1071,7 @@ class StopRestore(unittest.TestCase):
         self.client.stops.pop(self.doge_stop)
         self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
         row = self.db.execute("SELECT exit_price FROM trades WHERE symbol='DOGEUSDT'").fetchone()
-        self.assertEqual(Decimal(row[0]), Decimal("115.0"))
+        self.assertEqual(Decimal(row[0]), Decimal("130.0"))
         self.assertTrue(self.db.execute("SELECT 1 FROM events WHERE kind='exit_price_estimated'").fetchone())
 
     def test_repair_reprices_an_earlier_assumed_close_once(self):
@@ -1100,7 +1100,7 @@ class StopRestore(unittest.TestCase):
         self.client.qty["DOGEUSDT"] = Decimal(0)
         self.client.stops.pop(self.doge_stop)
         self.carry.tick(self.db, self.client, self.market, self.ts + 3600_000)
-        self.assertEqual(Decimal(self.db.execute("SELECT exit_price FROM trades").fetchone()[0]), Decimal("115.0"))
+        self.assertEqual(Decimal(self.db.execute("SELECT exit_price FROM trades").fetchone()[0]), Decimal("130.0"))
         self.carry.repair(self.db, self.client)
 
     def test_repair_clears_a_halt_caused_by_another_bots_coin(self):
