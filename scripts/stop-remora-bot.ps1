@@ -2,6 +2,9 @@
 param([ValidateSet("paper", "testnet", "carry")][string]$Mode = "paper")
 $root = Split-Path -Parent $PSScriptRoot
 $name = if ($Mode -eq "carry") { "carry-testnet" } else { $Mode }
+if ($Mode -eq "carry") {      # a deliberate stop: the watchdog must not restart it (start-remora-carry clears this)
+    Set-Content -Path (Join-Path $root "state\carry-watchdog.pause") -Value (Get-Date -Format o)
+}
 $statusFile = Join-Path $root "state\remora-bot-$name-status.json"
 if (-not (Test-Path $statusFile)) { Write-Host "Durum dosyasi yok; calisan $Mode botu bulunamadi."; exit 0 }
 $botPid = (Get-Content $statusFile -Raw | ConvertFrom-Json).pid

@@ -46,6 +46,7 @@ try {
         -RedirectStandardOutput (Join-Path $root "state\remora-bot-carry-testnet.out.log") `
         -RedirectStandardError (Join-Path $root "state\remora-bot-carry-testnet.err.log")
     Write-Host "Carry botu basladi. PID=$($p.Id). Durum: state\remora-bot-carry-testnet-status.json"
+    Remove-Item (Join-Path $root "state\carry-watchdog.pause") -ErrorAction SilentlyContinue   # watchdog guards it again
 }
 finally {
     Remove-Item Env:REMORA_FUTURES_TESTNET_API_KEY, Env:REMORA_FUTURES_TESTNET_SECRET_KEY, Env:REMORA_FUTURES_TEST_ENV, `
