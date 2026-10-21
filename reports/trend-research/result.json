@@ -1,0 +1,103 @@
+{
+  "doc": "Would a trend filter help the carry book? Walk-forward on universe b, same book and stop as live.\n\nPre-registered (written before any result was seen):\n  momentum    : m = price at the rebalance / price 7 days earlier - 1\n  filter      : at each Monday rebalance, drop a short leg if m > theta and a long leg if m < -theta\n                (the dropped leg stays flat that week; the rest is not re-scaled)\n  candidates  : theta in {none, 5%, 10%, 20%}\n  book, stop  : live adaptive book (carry_adaptive), 30% stop on 15m bars, cost 0.002 (stop_research.py)\n  split       : development = weeks before 2025-09-01, holdout = from 2025-09-01\n  decision    : pick the candidate with the best development Sharpe. Adopt it live only if its holdout\n                Sharpe >= the unfiltered holdout Sharpe AND its holdout max drawdown is no more than\n                2 percentage points worse. Otherwise nothing changes.\n",
+  "none": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 71.6,
+      "sharpe": 1.52,
+      "max_dd_pct": -12.6,
+      "positive_weeks": 59
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 50.2,
+      "sharpe": 1.78,
+      "max_dd_pct": -12.6,
+      "positive_weeks": 29
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 21.4,
+      "sharpe": 1.21,
+      "max_dd_pct": -10.8,
+      "positive_weeks": 30
+    },
+    "legs_dropped": 0
+  },
+  "5%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 38.7,
+      "sharpe": 0.65,
+      "max_dd_pct": -29.4,
+      "positive_weeks": 55
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 18.7,
+      "sharpe": 0.51,
+      "max_dd_pct": -24.7,
+      "positive_weeks": 27
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 20.0,
+      "sharpe": 0.95,
+      "max_dd_pct": -15.1,
+      "positive_weeks": 28
+    },
+    "legs_dropped": 277
+  },
+  "10%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 65.8,
+      "sharpe": 1.21,
+      "max_dd_pct": -17.1,
+      "positive_weeks": 61
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 30.6,
+      "sharpe": 0.9,
+      "max_dd_pct": -17.1,
+      "positive_weeks": 29
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 35.2,
+      "sharpe": 1.88,
+      "max_dd_pct": -9.7,
+      "positive_weeks": 32
+    },
+    "legs_dropped": 153
+  },
+  "20%": {
+    "all": {
+      "weeks": 104,
+      "net_pct": 63.5,
+      "sharpe": 1.34,
+      "max_dd_pct": -11.5,
+      "positive_weeks": 59
+    },
+    "dev": {
+      "weeks": 52,
+      "net_pct": 44.1,
+      "sharpe": 1.54,
+      "max_dd_pct": -10.8,
+      "positive_weeks": 28
+    },
+    "holdout": {
+      "weeks": 52,
+      "net_pct": 19.4,
+      "sharpe": 1.11,
+      "max_dd_pct": -11.5,
+      "positive_weeks": 31
+    },
+    "legs_dropped": 36
+  },
+  "decision": {
+    "best_on_dev": "none",
+    "adopt": false
+  }
+}
