@@ -35,8 +35,9 @@ fi
 if [ -f /etc/remora/carry.env ]; then
     echo "/etc/remora/carry.env zaten var; anahtarlar degistirilmedi (yenilemek icin dosyayi silip tekrar calistirin)"
 else
-    read -rsp "Demo API key: " KEY; echo
-    read -rsp "Demo Secret key: " SECRET; echo
+    KEY=; SECRET=
+    while [ -z "$KEY" ]; do read -rsp "Demo API key (sag tikla yapistir): " KEY; echo; done
+    while [ -z "$SECRET" ]; do read -rsp "Demo Secret key (sag tikla yapistir): " SECRET; echo; done
     read -rp "Onay icin tam olarak yazin: $CONFIRM: " ANSWER
     [ "$ANSWER" = "$CONFIRM" ] || { echo "onay cumlesi eslesmedi; anahtarlar kaydedilmedi"; exit 1; }
     install -d -o root -g root -m 700 /etc/remora
