@@ -1,0 +1,26 @@
+[Unit]
+Description=okx-agent Futures portfolio bot (Binance Futures Demo, own Demo account, virtual money only)
+After=network-online.target time-sync.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=okxbot
+Group=okxbot
+WorkingDirectory=/opt/okx-portfolio/app
+EnvironmentFile=/etc/okx-portfolio/portfolio.env
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONIOENCODING=utf-8
+# Same settings as scripts/start-futures-testnet-portfolio.ps1 defaults.
+ExecStart=/usr/bin/python3 -u futures_testnet_portfolio.py run --enabled --budget-usdt 1000 --top 20 --leverage 3 --max-positions 6 --poll-seconds 30 --strategy-mode adaptive_multi
+# A crash restarts after 60 s; `okx-portfolio stop` drains the bot, which then exits 0 and stays stopped.
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/okx-portfolio/app/state
+
+[Install]
+WantedBy=multi-user.target
