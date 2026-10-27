@@ -23,8 +23,11 @@ case "${1:-}" in
     start)
         if systemctl is-active --quiet "$UNIT"; then echo "bot zaten calisiyor"; exit 0; fi
         echo "hesap ayri mi kontrol ediliyor (carry botunun pozisyon/emri olmamali)..."
-        if ! as_bot /opt/okx-portfolio/check-separate-account.py; then
+        rc=0; as_bot /opt/okx-portfolio/check-separate-account.py || rc=$?
+        if [ "$rc" -eq 1 ]; then
             echo "DURDU: bu anahtar carry botunun hesabina ait gorunuyor; ayri Demo hesabin anahtarini girin"; exit 1
+        elif [ "$rc" -ne 0 ]; then
+            echo "DURDU: hesap okunamadi (code=-2015: anahtar/secret hatali, IP kisitlamasi veya Futures izni yok)"; exit 1
         fi
         echo "anahtar ve hesap kontrolu (diagnose)..."
         if ! as_bot futures_testnet_portfolio.py diagnose; then echo "diagnose basarisiz; bot baslatilmadi"; exit 1; fi
