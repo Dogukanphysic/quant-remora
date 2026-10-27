@@ -1,0 +1,32 @@
+#!/bin/bash
+# Read-only status of both Demo bots for the monitoring SSH key (installed as /usr/local/bin/remora-monitor).
+# The key's authorized_keys entry forces `sudo /usr/local/bin/remora-monitor`; nothing else can run with it.
+# Prints only status: no keys, no orders, no changes.
+set -uo pipefail
+echo "== $(date -u '+%Y-%m-%d %H:%M:%S UTC') | uptime: $(uptime -p)"
+for unit in remora-carry okx-portfolio; do
+    echo "== $unit: $(systemctl is-active "$unit.service") (enabled: $(systemctl is-enabled "$unit.service" 2>/dev/null))," \
+         "restarts=$(systemctl show -p NRestarts --value "$unit.service")," \
+         "since=$(systemctl show -p ActiveEnterTimestamp --value "$unit.service")"
+done
+echo "== carry status"
+cat /opt/remora/app/state/remora-bot-carry-testnet-status.json 2>/dev/null || echo "(status file missing)"
+echo
+echo "== okx-portfolio status"
+systemd-run --quiet --wait --pipe --collect --uid=okxbot --gid=okxbot \
+    --property=Environment="PYTHONDONTWRITEBYTECODE=1 PYTHONIOENCODING=utf-8" \
+    --working-directory=/opt/okx-portfolio/app /usr/bin/python3 futures_testnet_portfolio.py status 2>&1 |
+    /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception as exc:
+    print("(status unreadable:", exc, ")"); sys.exit(0)
+keep = ("running", "desired_running", "wallet_usdt", "available_usdt", "last_poll", "last_error", "errors",
+        "positions", "foreign_positions", "learning")
+print(json.dumps({k: d.get(k) for k in keep if k in d} | {"config": {k: d.get("config", {}).get(k) for k in
+      ("budget_usdt", "leverage", "max_positions")}}, indent=1, default=str)[:6000])'
+for unit in remora-carry okx-portfolio; do
+    echo "== $unit log (last 15)"
+    journalctl -u "$unit.service" --no-pager -o short-iso -n 15 2>/dev/null
+done
