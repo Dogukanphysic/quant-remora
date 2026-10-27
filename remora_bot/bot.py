@@ -425,9 +425,20 @@ def halt(db, reason):
 
 @contextmanager
 def singleton():
-    import msvcrt
     STATE.mkdir(parents=True, exist_ok=True)
     with (STATE / "remora-bot.lock").open("a+b") as handle:
+        if os.name != "nt":                      # Linux server: flock, released when the process dies
+            import fcntl
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise OSError("another bot process holds the lock") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return
+        import msvcrt
         handle.seek(0)
         if not handle.read(1):
             handle.write(b"0")

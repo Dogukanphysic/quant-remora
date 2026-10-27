@@ -1,2 +1,3 @@
-# Core runtime; validated with Python 3.12 on Windows
+# Core runtime; validated with Python 3.12 on Windows (Linux server: deploy/linux)
 numpy==2.4.3
+pandas==3.0.1

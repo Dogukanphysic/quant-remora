@@ -1,0 +1,51 @@
+#!/bin/bash
+# Server helper for the carry bot (virtual money, Futures Demo). Installed as /usr/local/bin/remora-carry.
+#   sudo remora-carry start    repair the ledger (restores stops / clears a halt it can explain), then start
+#   sudo remora-carry stop     stop the bot (stays stopped, also after a reboot, until start)
+#   sudo remora-carry status   short status from state/remora-bot-carry-testnet-status.json
+#   sudo remora-carry logs     last 100 log lines (add -f to follow: sudo remora-carry logs -f)
+set -euo pipefail
+APP=/opt/remora/app
+PY=/opt/remora/venv/bin/python
+UNIT=remora-carry.service
+
+as_bot() {   # runs a bot command as the remora user with the key file, without putting keys on a command line
+    systemd-run --quiet --wait --pipe --collect --uid=remora --gid=remora \
+        --property=EnvironmentFile=/etc/remora/carry.env --property=Environment=PYTHONDONTWRITEBYTECODE=1 \
+        --working-directory="$APP" "$PY" -m remora_bot "$@"
+}
+
+case "${1:-}" in
+    start)
+        if systemctl is-active --quiet "$UNIT"; then echo "bot zaten calisiyor"; exit 0; fi
+        echo "kayit onariliyor (temizse bir sey yapmaz)..."
+        if ! as_bot carry-repair; then echo "onarim basarisiz; bot baslatilmadi (yukaridaki mesaja bakin)"; exit 1; fi
+        systemctl enable --now "$UNIT"
+        sleep 5
+        systemctl --no-pager --lines=5 status "$UNIT" || true
+        ;;
+    stop)
+        systemctl disable --now "$UNIT"
+        echo "bot durduruldu; yeniden baslatmak icin: sudo remora-carry start"
+        ;;
+    status)
+        systemctl is-active "$UNIT" || true
+        "$PY" - "$APP/state/remora-bot-carry-testnet-status.json" <<'EOF'
+import json, sys, time
+d = json.load(open(sys.argv[1]))
+print(f"durum {time.time() - d['written_ms'] / 1000:.0f} sn once yazildi, halted={d['bot']['halted']}, "
+      f"blocked={d['bot']['entries_blocked']}, adaptive={d['adaptive']}")
+for p in d["positions"]:
+    if p["phase"] != "flat":
+        print(f"  {p['symbol']:9s} {p['phase']:5s} qty={p['qty']} giris={p['entry_price']} stop={p['stop_price']}")
+print(f"gerceklesmis toplam: {float(d['total_gross_pnl']):.2f} USDT, son islem no {d['trades'][0]['id'] if d['trades'] else '-'}")
+EOF
+        ;;
+    logs)
+        shift
+        journalctl -u "$UNIT" --no-pager -n 100 "$@"
+        ;;
+    *)
+        echo "kullanim: remora-carry {start|stop|status|logs}"; exit 2
+        ;;
+esac

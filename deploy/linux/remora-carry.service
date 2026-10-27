@@ -1,0 +1,25 @@
+[Unit]
+Description=Remora carry bot (Binance Futures Demo, virtual money only)
+After=network-online.target time-sync.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=remora
+Group=remora
+WorkingDirectory=/opt/remora/app
+EnvironmentFile=/etc/remora/carry.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/remora/app/deploy/linux/run-carry.sh
+# Crash or lost process -> restart after 60 s. A halted ledger makes run-carry.sh exit 0, so it stays stopped.
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/remora/app/state
+
+[Install]
+WantedBy=multi-user.target
