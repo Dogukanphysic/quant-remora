@@ -23,9 +23,14 @@ try:
 except Exception as exc:
     print("(status unreadable:", exc, ")"); sys.exit(0)
 keep = ("running", "desired_running", "wallet_usdt", "available_usdt", "last_poll", "last_error", "errors",
-        "positions", "foreign_positions", "learning")
-print(json.dumps({k: d.get(k) for k in keep if k in d} | {"config": {k: d.get("config", {}).get(k) for k in
-      ("budget_usdt", "leverage", "max_positions")}}, indent=1, default=str)[:6000])'
+        "foreign_positions")
+out = {k: d.get(k) for k in keep if k in d}
+out["config"] = {k: d.get("config", {}).get(k) for k in ("budget_usdt", "leverage", "max_positions")}
+out["positions"] = [{k: p.get(k) for k in ("symbol", "side", "quantity", "entry_price", "entry_ts", "stop_price",
+                     "target_price", "stop_confirmed", "target_confirmed")} for p in d.get("positions") or []]
+learning = d.get("learning") or {}
+out["learning"] = {k: v for k, v in learning.items() if not isinstance(v, (list, dict))}
+print(json.dumps(out, indent=1, default=str)[:8000])'
 for unit in remora-carry okx-portfolio; do
     echo "== $unit log (last 15)"
     journalctl -u "$unit.service" --no-pager -o short-iso -n 15 2>/dev/null
