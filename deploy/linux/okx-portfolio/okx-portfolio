@@ -2,12 +2,14 @@
 # Server helper for the okx-agent portfolio bot (own Demo account). Installed as /usr/local/bin/okx-portfolio.
 #   okx-portfolio diagnose   read-only key/account check (no orders)
 #   okx-portfolio start      diagnose + refuse the carry bot's account, then start (also after reboots)
+#   okx-portfolio allow-shared-account   deliberately run on the carry bot's Demo account (shared margin)
 #   okx-portfolio stop       ask the bot to stop; it drains (protections confirmed) and exits, then stays off
 #   okx-portfolio status     bot status JSON
 #   okx-portfolio logs       last 100 log lines (add -f to follow)
 set -euo pipefail
 APP=/opt/okx-portfolio/app
 UNIT=okx-portfolio.service
+SHARED_FLAG=/etc/okx-portfolio/shared-account
 
 as_bot() {   # runs as okxbot with the key file, keys never on a command line
     systemd-run --quiet --wait --pipe --collect --uid=okxbot --gid=okxbot \
@@ -23,9 +25,13 @@ case "${1:-}" in
     start)
         if systemctl is-active --quiet "$UNIT"; then echo "bot zaten calisiyor"; exit 0; fi
         echo "hesap ayri mi kontrol ediliyor (carry botunun pozisyon/emri olmamali)..."
-        rc=0; as_bot /opt/okx-portfolio/check-separate-account.py || rc=$?
+        mode=; [ -f "$SHARED_FLAG" ] && mode=--shared && echo "(ortak hesap modu: teminat carry botuyla ortak)"
+        rc=0; as_bot /opt/okx-portfolio/check-separate-account.py $mode || rc=$?
         if [ "$rc" -eq 1 ]; then
-            echo "DURDU: bu anahtar carry botunun hesabina ait gorunuyor; ayri Demo hesabin anahtarini girin"; exit 1
+            echo "DURDU: bu anahtar carry botunun hesabina ait. Ayri hesap kullanin ya da bilerek ortak hesap icin:"
+            echo "       okx-portfolio allow-shared-account"; exit 1
+        elif [ "$rc" -eq 3 ]; then
+            echo "DURDU: portfoy kodu carry coinlerinin hepsini RESERVED_SYMBOLS'ta tutmuyor; baslatilmadi"; exit 1
         elif [ "$rc" -ne 0 ]; then
             echo "DURDU: hesap okunamadi (code=-2015: anahtar/secret hatali, IP kisitlamasi veya Futures izni yok)"; exit 1
         fi
@@ -34,6 +40,13 @@ case "${1:-}" in
         systemctl enable --now "$UNIT"
         sleep 5
         systemctl --no-pager --lines=5 status "$UNIT" || true
+        ;;
+    allow-shared-account)
+        echo "Ortak hesap: iki bot ayni Demo hesabin teminatini kullanir; coinler ayrik (RESERVED_SYMBOLS)."
+        read -rp "Onaylamak icin tam olarak yazin: AYNI HESAP ORTAK TEMINAT: " ANSWER
+        [ "$ANSWER" = "AYNI HESAP ORTAK TEMINAT" ] || { echo "onay eslesmedi; degisiklik yok"; exit 1; }
+        touch "$SHARED_FLAG"; chmod 600 "$SHARED_FLAG"
+        echo "ortak hesap modu acik (geri almak: rm $SHARED_FLAG). Simdi: okx-portfolio start"
         ;;
     stop)
         as_bot futures_testnet_portfolio.py stop
@@ -51,6 +64,6 @@ case "${1:-}" in
         journalctl -u "$UNIT" --no-pager -n 100 "$@"
         ;;
     *)
-        echo "kullanim: okx-portfolio {diagnose|start|stop|status|logs}"; exit 2
+        echo "kullanim: okx-portfolio {diagnose|start|allow-shared-account|stop|status|logs}"; exit 2
         ;;
 esac
